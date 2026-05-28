@@ -1,5 +1,18 @@
 # AGENTS.md
 
+## 2026-05-28 参数辨识实现逻辑更新
+
+1. 参数辨识服务层入口为 `core/calibration_service.py`，UI 不直接调用 `core/calibration/bayesian_calibration_pipeline/` 内部算法模块。
+2. 当前默认辨识方法为 S1：交叉验证选择正则化参数、可辨识性参数加权、按位姿可辨识性进行子空间划分，再执行子空间顺序 LM 拟合。
+3. 辨识数据支持单个或多个 `.pkl/.pickle` 文件，服务层通过 `CalibrationService.load_identification_data()` 合并为统一数据结构。
+4. 定位误差定义固定为 `p_identified(q) - p_nominal(q)`，即辨识所得预测模型位置与名义模型位置的差；拟合残差另行定义为 `p_identified(q) - p_measured(q)`，两者不得混用。
+5. 名义位置由 `config/nominal_robot.yaml` 中的名义 MD-H/基座/工具参数前向运动学计算；如果项目目录没有该配置，服务层回退到算法包内置默认名义模型。
+6. 辨识结果默认保存到 `config/calibration_result.yaml`，保存内容包括方法名、时间戳、样本数、S1 选择的 lambda、定位误差指标、拟合残差指标、参数字典、交叉验证分数和子空间摘要。
+7. 每次辨识历史写入 SQLite：`storage/records/identification_history.sqlite`，表名为 `identification_runs`。
+8. 主界面实时精度状态从当前关节角计算：先用名义参数计算 `p_nominal(q)`，再用当前激活辨识参数计算 `p_identified(q)`，最后基于定位误差刷新 RMS、最大误差、超差结论和健康状态。
+9. 参数辨识页面运行耗时算法时使用进度弹窗提示当前处于 S1 参数辨识流程；辨识完成后自动保存 YAML 并写入 SQLite 历史。
+10. UR10 关节调试窗口属于临时调试入口，不放在右侧常用设置区，通过顶部“调试”入口打开。
+
 ## 协作约定
 
 1. 在任何代码仓库中开启新会话时，先检查并阅读仓库根目录的 `AGENTS.md` / `AGENT.md`，再做文件扫描、代码阅读、修改或运行命令。

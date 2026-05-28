@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QPushButton, QDoubleSpinBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QPushButton, QDoubleSpinBox, QToolButton
 
 from app.pages.initialization_page import InitializationPage
 
@@ -55,6 +55,7 @@ def test_load_model_button_reads_file(
     assert page.model_loaded is True
     assert child(page, QLabel, "config_status_label").text() == "⚠ 参数未加载"
     assert page.model_path_edit.text() == str(model_file)
+    assert not page.findChild(QToolButton, "model_path_edit_browse_button").icon().isNull()
     assert "模型已加载" in page.footer_status_label.text()
 
 
@@ -136,7 +137,8 @@ def test_default_project_loads_ur10_and_debug_angles(qapp: QApplication) -> None
     ]
     assert len(joint_colors) >= 8, f"Expected >=8 joint meshes, got {len(joint_colors)}"
 
-    QTest.mouseClick(child(page, QPushButton, "open_joint_debug_button"), Qt.MouseButton.LeftButton)
+    assert page.findChild(QPushButton, "open_joint_debug_button") is None
+    QTest.mouseClick(child(page, QPushButton, "joint_debug_menu_button"), Qt.MouseButton.LeftButton)
     assert page.joint_debug_dialog is not None
     child(page, QDoubleSpinBox, "joint_angle_spin_1").setValue(15.0)
     QTest.mouseClick(child(page, QPushButton, "apply_joint_angles_button"), Qt.MouseButton.LeftButton)

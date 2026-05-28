@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Callable
 
 import yaml
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtCore import QRectF, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -21,12 +21,14 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QStyle,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from app.widgets.robot_simulation_widget import DEFAULT_JOINT_DEGREES, RobotSimulationWidget
+from core.calibration_service import CalibrationService
 
 
 MODEL_SUFFIXES = {".urdf", ".xacro", ".stl", ".dae", ".obj"}
@@ -46,25 +48,89 @@ class CardFrame(QFrame):
         self.setFrameShape(QFrame.Shape.NoFrame)
 
 
+class HealthGaugeWidget(QWidget):
+    """Compact ring gauge for health score and status level."""
+
+    LEVEL_COLORS = {
+        "good": "#22b573",
+        "warning": "#f59e0b",
+        "critical": "#db3444",
+        "unknown": "#9aa6b2",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("health_gauge")
+        self.setMinimumSize(116, 116)
+        self.setMaximumSize(132, 132)
+        self._score = 0.0
+        self._level = "unknown"
+        self._caption = "未初始化"
+
+    def set_status(self, score: float | None, level: str | None) -> None:
+        if score is None:
+            self._score = 0.0
+            self._level = "unknown"
+            self._caption = "未初始化"
+        else:
+            self._score = max(0.0, min(100.0, float(score)))
+            self._level = (level or "unknown").lower()
+            self._caption = self._level
+        self.update()
+
+    @property
+    def level_color(self) -> str:
+        return self.LEVEL_COLORS.get(self._level, self.LEVEL_COLORS["unknown"])
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        side = min(self.width(), self.height()) - 16
+        rect = QRectF(
+            (self.width() - side) / 2,
+            (self.height() - side) / 2,
+            side,
+            side,
+        )
+        pen_width = 11
+        painter.setPen(QPen(QColor("#dfe4ea"), pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(rect, 90 * 16, -360 * 16)
+
+        painter.setPen(QPen(QColor(self.level_color), pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(rect, 90 * 16, int(-360 * 16 * (self._score / 100.0)))
+
+        painter.setPen(QColor("#172033"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{self._score:.0f}\n{self._caption}")
+
+
 class InitializationPage(QWidget):
     def __init__(
         self,
         project_root: str | Path | None = None,
         open_url: Callable[[QUrl], bool] | None = None,
+        navigate_to_calibration: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.project_root = Path(project_root or Path.cwd()).resolve()
         self._open_url = open_url or QDesktopServices.openUrl
+        self._navigate_to_calibration = navigate_to_calibration
         self.status_colors = self._load_status_colors()
+        self._calibration_service = CalibrationService(project_root=self.project_root)
+        self.active_parameters_loaded = False
         self.model_loaded = False
         self.params_loaded = False
         self.current_joint_names: list[str] = []
         self.joint_name_labels: list[QLabel] = []
         self.joint_angle_spins: list[QDoubleSpinBox] = []
+        self.accuracy_value_labels: list[QLabel] = []
+        self.health_value_labels: list[QLabel] = []
         self.joint_debug_dialog: QDialog | None = None
         self.setObjectName("initialization_page")
         self._build_ui()
         self._apply_style()
+        self._load_default_identification_parameters()
         self._load_default_robot_model()
         self._refresh_status()
 
@@ -90,6 +156,15 @@ class InitializationPage(QWidget):
         default_urdf = self.project_root / "models" / "urdf" / "ur10.urdf"
         if default_urdf.exists():
             self.load_model_file(default_urdf)
+
+    def _load_default_identification_parameters(self) -> None:
+        for candidate in (
+            self.project_root / "config" / "calibration_result.yaml",
+            self.project_root / "storage" / "model_versions" / "active_calib_params.yaml",
+        ):
+            if candidate.exists():
+                self.load_param_file(candidate)
+                return
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
@@ -149,6 +224,11 @@ class InitializationPage(QWidget):
             button.setObjectName("nav_button")
             button.setFlat(True)
             header_layout.addWidget(button)
+        self.joint_debug_menu_button = QPushButton("调试")
+        self.joint_debug_menu_button.setObjectName("joint_debug_menu_button")
+        self.joint_debug_menu_button.setFlat(True)
+        self.joint_debug_menu_button.clicked.connect(self.show_joint_debug_window)
+        header_layout.addWidget(self.joint_debug_menu_button)
 
         header_layout.addStretch(1)
         self.current_project_label = QLabel("当前项目：UR_示例产线_20240516")
@@ -193,6 +273,9 @@ class InitializationPage(QWidget):
         scene_layout.setSpacing(0)
 
         self.robot_view = RobotSimulationWidget()
+        self.robot_view.joint_angles_changed.connect(
+            lambda _angles: self._refresh_realtime_accuracy()
+        )
         scene_layout.addWidget(self.robot_view, 0, 0)
 
         tool_column = QWidget(scene_card)
@@ -297,12 +380,27 @@ class InitializationPage(QWidget):
         metrics_layout.setHorizontalSpacing(18)
         metrics_layout.setVerticalSpacing(13)
         metrics_layout.addWidget(self._section_title("⚙ 当前精度指标"), 0, 0, 1, 2)
-        for row, label in enumerate(("位置误差 RMS", "最大误差", "超差阈值", "当前结论"), start=1):
+        self.accuracy_value_labels = []
+        for row, label in enumerate(("\u4f4d\u7f6e\u8bef\u5dee RMS", "\u6700\u5927\u8bef\u5dee", "\u8d85\u5dee\u9608\u503c", "\u5f53\u524d\u7ed3\u8bba"), start=1):
             metrics_layout.addWidget(QLabel(label), row, 0)
-            value = QLabel("--" if label != "当前结论" else "未初始化")
+            value = QLabel("\u672a\u521d\u59cb\u5316" if label == "\u5f53\u524d\u7ed3\u8bba" else "--")
             value.setObjectName(f"accuracy_value_{row}")
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            metrics_layout.addWidget(value, row, 1)
+            self.accuracy_value_labels.append(value)
+            if label == "\u5f53\u524d\u7ed3\u8bba":
+                conclusion_cell = QWidget()
+                conclusion_cell.setObjectName("accuracy_conclusion_cell")
+                conclusion_layout = QHBoxLayout(conclusion_cell)
+                conclusion_layout.setContentsMargins(0, 0, 0, 0)
+                conclusion_layout.setSpacing(6)
+                conclusion_layout.addStretch(1)
+                self.accuracy_alarm_dot = QLabel()
+                self.accuracy_alarm_dot.setObjectName("accuracy_alarm_dot")
+                conclusion_layout.addWidget(self.accuracy_alarm_dot)
+                conclusion_layout.addWidget(value)
+                metrics_layout.addWidget(conclusion_cell, row, 1)
+            else:
+                metrics_layout.addWidget(value, row, 1)
         layout.addWidget(metrics)
 
         health = CardFrame("health_card")
@@ -310,19 +408,40 @@ class InitializationPage(QWidget):
         health_layout.setContentsMargins(18, 14, 18, 14)
         health_layout.setHorizontalSpacing(18)
         health_layout.setVerticalSpacing(13)
-        health_layout.addWidget(self._section_title("♡ 健康状态"), 0, 0, 1, 3)
-        self.health_ring_label = QLabel("--\n未初始化")
+        health_title = QHBoxLayout()
+        health_title.addWidget(self._section_title("♡ 健康状态"))
+        health_layout.addLayout(health_title, 0, 0, 1, 3)
+
+        self.health_gauge = HealthGaugeWidget()
+        health_layout.addWidget(self.health_gauge, 1, 0, 3, 1)
+        self.health_ring_label = QLabel("--\n未初始化", self)
         self.health_ring_label.setObjectName("health_ring_label")
+        self.health_ring_label.setVisible(False)
         self.health_ring_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        health_layout.addWidget(self.health_ring_label, 1, 0, 3, 1)
+        self.health_value_labels = []
         for row, (label, value) in enumerate(
             (("模型置信度", "--"), ("当前状态", "未初始化"), ("更新时间", "--")),
             start=1,
         ):
             health_layout.addWidget(QLabel(label), row, 1)
             value_label = QLabel(value)
+            value_label.setObjectName(f"health_value_{row}")
             value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            health_layout.addWidget(value_label, row, 2)
+            self.health_value_labels.append(value_label)
+            if row == 2:
+                state_cell = QWidget()
+                state_cell.setObjectName("health_state_cell")
+                state_layout = QHBoxLayout(state_cell)
+                state_layout.setContentsMargins(0, 0, 0, 0)
+                state_layout.setSpacing(6)
+                self.health_status_dot = QLabel()
+                self.health_status_dot.setObjectName("health_status_dot")
+                state_layout.addWidget(self.health_status_dot)
+                state_layout.addStretch(1)
+                state_layout.addWidget(value_label)
+                health_layout.addWidget(state_cell, row, 2)
+            else:
+                health_layout.addWidget(value_label, row, 2)
         layout.addWidget(health)
         return container
 
@@ -383,12 +502,14 @@ class InitializationPage(QWidget):
     def apply_joint_debug_angles(self) -> None:
         values = [spin.value() for spin in self.joint_angle_spins]
         self.robot_view.set_joint_angles(values)
+        self._refresh_realtime_accuracy()
         self._set_status_message("已应用 UR10 调试关节角")
 
     def reset_joint_debug_angles(self) -> None:
         for spin, value in zip(self.joint_angle_spins, DEFAULT_JOINT_DEGREES, strict=False):
             spin.setValue(float(value))
         self.robot_view.reset_home_pose()
+        self._refresh_realtime_accuracy()
         self._set_status_message("已恢复 UR10 Home 调试姿态")
 
     def _sync_joint_debug_labels(self, joint_names: list[str]) -> None:
@@ -414,9 +535,11 @@ class InitializationPage(QWidget):
         self.threshold_spin.setValue(300)
         self.threshold_spin.setSuffix(" μm")
         self.threshold_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.threshold_spin.valueChanged.connect(lambda _value: self._refresh_realtime_accuracy())
+        self.threshold_spin.editingFinished.connect(self._refresh_realtime_accuracy)
         layout.addWidget(threshold_label, 1, 0)
         layout.addWidget(self.threshold_spin, 1, 1)
-        layout.addWidget(QLabel("ⓘ"), 1, 2)
+        layout.addWidget(QLabel(""), 1, 2)
 
         self.model_path_edit = self._path_row(
             layout,
@@ -457,10 +580,11 @@ class InitializationPage(QWidget):
         layout.addWidget(self.scan_on_start_checkbox, 6, 1)
         layout.addWidget(QLabel("ⓘ"), 6, 2)
 
-        debug_button = QPushButton("打开 UR10 关节调试")
-        debug_button.setObjectName("open_joint_debug_button")
-        debug_button.clicked.connect(self.show_joint_debug_window)
-        layout.addWidget(debug_button, 7, 1)
+        self.calibration_button = QPushButton("▶ 进入标定分析")
+        self.calibration_button.setObjectName("calibration_button")
+        self.calibration_button.clicked.connect(self._on_navigate_to_calibration)
+        self.calibration_button.setEnabled(False)
+        layout.addWidget(self.calibration_button, 7, 1)
 
         self.config_warning_label = QLabel("⚠ 配置不完整：请加载三维模型与参数文件以完成初始化")
         self.config_warning_label.setObjectName("config_warning_label")
@@ -482,7 +606,8 @@ class InitializationPage(QWidget):
         edit.setReadOnly(True)
         layout.addWidget(edit, row, 1)
         button = QToolButton()
-        button.setText("□")
+        button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        button.setToolTip("选择文件")
         button.setObjectName(f"{object_name}_browse_button")
         button.clicked.connect(callback)
         layout.addWidget(button, row, 2)
@@ -656,9 +781,16 @@ class InitializationPage(QWidget):
                 raise TypeError("参数文件顶层必须是映射结构")
         except Exception as exc:  # noqa: BLE001
             self.params_loaded = False
+            self.active_parameters_loaded = False
             self._set_status_message(f"参数加载失败：{exc}")
             self._refresh_status()
             return
+        self.active_parameters_loaded = False
+        try:
+            self._calibration_service.load_active_parameters(param_path)
+            self.active_parameters_loaded = True
+        except Exception:
+            self.active_parameters_loaded = False
         self.params_loaded = True
         self.param_path_edit.setText(str(param_path))
         self._set_status_message(f"参数文件已加载：{param_path.name}")
@@ -667,6 +799,10 @@ class InitializationPage(QWidget):
     def open_default_directory(self) -> None:
         self._open_url(QUrl.fromLocalFile(str(self.project_root)))
         self._set_status_message(f"已打开默认目录：{self.project_root}")
+
+    def _on_navigate_to_calibration(self) -> None:
+        if self._navigate_to_calibration is not None:
+            self._navigate_to_calibration()
 
     def _validate_existing_file(self, path: Path, allowed_suffixes: set[str]) -> None:
         if not path.exists():
@@ -682,6 +818,71 @@ class InitializationPage(QWidget):
         if path.suffix.lower() == ".json":
             return json.loads(text)
         return yaml.safe_load(text)
+
+    def _refresh_realtime_accuracy(self) -> None:
+        if not hasattr(self, "accuracy_value_labels") or not self.accuracy_value_labels:
+            return
+        threshold_mm = float(self.threshold_spin.value()) / 1000.0
+        if not self.active_parameters_loaded:
+            self.accuracy_value_labels[0].setText("--")
+            self.accuracy_value_labels[1].setText("--")
+            self.accuracy_value_labels[2].setText(f"{threshold_mm:.3f} mm")
+            self.accuracy_value_labels[3].setText("\u672a\u52a0\u8f7d\u8fa8\u8bc6\u53c2\u6570")
+            self._set_accuracy_alarm_dot("unknown")
+            self.health_ring_label.setText("--\n\u672a\u521d\u59cb\u5316")
+            self.health_gauge.set_status(None, None)
+            self._set_health_dot("unknown")
+            if self.health_value_labels:
+                self.health_value_labels[0].setText("--")
+                self.health_value_labels[1].setText("\u672a\u52a0\u8f7d\u8fa8\u8bc6\u53c2\u6570")
+                self.health_value_labels[2].setText("--")
+            return
+
+        try:
+            state = self._calibration_service.compute_predicted_position(
+                self.robot_view.joint_degrees,
+                joint_unit="degrees",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.accuracy_value_labels[3].setText(f"\u8ba1\u7b97\u5931\u8d25\uff1a{exc}")
+            self._set_accuracy_alarm_dot("critical")
+            return
+
+        is_over_limit = state.rms_mm > threshold_mm
+        self.accuracy_value_labels[0].setText(f"{state.rms_mm:.3f} mm")
+        self.accuracy_value_labels[1].setText(f"{state.max_error_mm:.3f} mm")
+        self.accuracy_value_labels[2].setText(f"{threshold_mm:.3f} mm")
+        self.accuracy_value_labels[3].setText("\u8d85\u5dee" if is_over_limit else "\u6b63\u5e38")
+        self._set_accuracy_alarm_dot("critical" if is_over_limit else "good")
+        self.health_ring_label.setText(f"{state.health_score:.0f}\n{state.health_level}")
+        self.health_gauge.set_status(state.health_score, state.health_level)
+        self._set_health_dot(state.health_level)
+        if self.health_value_labels:
+            self.health_value_labels[0].setText(f"{state.confidence:.0f}%")
+            self.health_value_labels[1].setText(state.health_level)
+            self.health_value_labels[2].setText("\u5b9e\u65f6")
+
+    def _set_accuracy_alarm_dot(self, level: str) -> None:
+        if not hasattr(self, "accuracy_alarm_dot"):
+            return
+        color = HealthGaugeWidget.LEVEL_COLORS.get(
+            (level or "unknown").lower(),
+            HealthGaugeWidget.LEVEL_COLORS["unknown"],
+        )
+        self.accuracy_alarm_dot.setStyleSheet(
+            f"min-width: 12px; max-width: 12px; min-height: 12px; max-height: 12px;"
+            f"border-radius: 2px; background: {color};"
+        )
+
+    def _set_health_dot(self, level: str) -> None:
+        color = HealthGaugeWidget.LEVEL_COLORS.get(
+            (level or "unknown").lower(),
+            HealthGaugeWidget.LEVEL_COLORS["unknown"],
+        )
+        self.health_status_dot.setStyleSheet(
+            f"min-width: 12px; max-width: 12px; min-height: 12px; max-height: 12px;"
+            f"border-radius: 6px; background: {color};"
+        )
 
     def _refresh_status(self) -> None:
         if self.model_loaded and self.params_loaded:
@@ -713,7 +914,10 @@ class InitializationPage(QWidget):
             )
             self.alarm_status_label.setText("● 无告警")
         self.init_prompt_card.setVisible(not self.model_loaded)
+        if hasattr(self, "calibration_button"):
+            self.calibration_button.setEnabled(self.model_loaded)
         self._apply_status_colors()
+        self._refresh_realtime_accuracy()
 
     def _apply_status_colors(self) -> None:
         normal = self.status_colors["normal"]
@@ -771,7 +975,8 @@ class InitializationPage(QWidget):
                 font-weight: 700;
                 color: #172033;
             }
-            QPushButton#nav_button {
+            QPushButton#nav_button,
+            QPushButton#joint_debug_menu_button {
                 border: 0;
                 color: #263750;
                 padding: 8px 16px;
@@ -881,6 +1086,9 @@ class InitializationPage(QWidget):
                 font-size: 15px;
                 font-weight: 700;
             }
+            QWidget#health_gauge {
+                background: transparent;
+            }
             QLineEdit,
             QComboBox,
             QSpinBox {
@@ -915,6 +1123,21 @@ class InitializationPage(QWidget):
             QPushButton#template_button_3 {
                 min-height: 84px;
                 text-align: left;
+            }
+            QPushButton#calibration_button {
+                min-height: 38px;
+                color: #ffffff;
+                background: #0f62d9;
+                border: 1px solid #0953c7;
+                font-weight: 700;
+            }
+            QPushButton#calibration_button:hover {
+                background: #2563eb;
+            }
+            QPushButton#calibration_button:disabled {
+                background: #b0c4de;
+                border-color: #8fa8c8;
+                color: #6b7c93;
             }
             """
         )

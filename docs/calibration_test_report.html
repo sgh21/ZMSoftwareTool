@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>机器人参数标定与精度报告功能 — 测试报告</title>
+<style>
+body { font-family: Arial, "Microsoft YaHei", sans-serif; margin: 28px; color: #1f2933; line-height: 1.6; max-width: 1100px; }
+h1 { color: #102a43; border-bottom: 3px solid #2563eb; padding-bottom: 10px; }
+h2 { color: #1e3a5f; border-bottom: 2px solid #93c5fd; padding-bottom: 6px; margin-top: 32px; }
+h3 { color: #334155; margin-top: 24px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 13px; }
+th, td { border: 1px solid #d9e2ec; padding: 8px 10px; text-align: left; vertical-align: top; }
+th { background: #f0f4f8; font-weight: 700; }
+code { background: #f0f4f8; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+.pass { color: #0b6b3a; font-weight: 700; }
+.ok { color: #0b6b3a; font-weight: 700; }
+.warn { color: #9a6700; font-weight: 700; }
+.card { background: #f8fafc; border: 1px solid #d9e2ec; border-radius: 8px; padding: 14px 18px; margin: 12px 0; }
+.summary-box { background: #eef5ff; border: 2px solid #2563eb; border-radius: 10px; padding: 18px 22px; margin: 16px 0; }
+.file-path { color: #0f62d9; font-family: Consolas, monospace; }
+</style>
+</head>
+<body>
+
+<h1>机器人参数标定与精度报告功能<br>实现与测试报告</h1>
+
+<div class="summary-box">
+<table>
+<tr><th>项目</th><th>值</th></tr>
+<tr><td>生成日期</td><td>2026-05-28</td></tr>
+<tr><td>测试总数</td><td><span class="ok">29</span>（7 原有 + 22 新增）</td></tr>
+<tr><td>通过</td><td><span class="ok">29</span></td></tr>
+<tr><td>失败</td><td>0</td></tr>
+<tr><td>执行时间</td><td>6.33s</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>一、任务理解</h2>
+
+<div class="card">
+<h3>1.1 业务背景</h3>
+<p>
+本任务的目标是为机器人数字孪生工具实现<strong>运动学参数标定</strong>与<strong>精度报告</strong>功能。
+用户需要在实际生产环境中评估机器人的定位精度：集控系统基于名义运动学参数报告机器人的末端位置，
+而实际位置由于制造误差、装配误差等因素存在偏差。通过标定数据（关节角 + 实测位置），
+运用标定算法拟合出机器人的<strong>真实误差参数</strong>，从而量化名义模型与真实模型之间的定位误差。
+</p>
+</div>
+
+<div class="card">
+<h3>1.2 标定流程设计</h3>
+<ol>
+  <li><strong>名义末端位置报告</strong>：在完成机器人可视化模型加载后，基于名义 MD-H 参数计算并显示当前关节角下的末端执行器位置。此位置代表集控系统认为的机器人末端位置。</li>
+  <li><strong>加载标定数据</strong>：从外部加载标定数据文件（.pkl 格式），包含 N 组关节角配置和对应的实测末端位置。</li>
+  <li><strong>执行标定计算</strong>：使用 Levenberg-Marquardt 非线性最小二乘优化，在 33 几何参数空间中拟合误差向量，使模型预测位置与实测位置之间的残差最小化。</li>
+  <li><strong>误差量化</strong>：标定前（名义参数）与标定后（优化参数）的 RMSE 和最大误差，差值即为辨识出的定位误差。</li>
+  <li><strong>生成报告</strong>：标定完成后生成简易 HTML 精度报告，包含误差参数、逐点对比等信息。</li>
+  <li><strong>置信度设定</strong>：初始置信度设定为 100%，表示刚完成标定，精度处于最佳状态。</li>
+  <li><strong>持久化保存</strong>：将标定误差参数以 YAML 格式保存到本地，供后续使用。</li>
+</ol>
+</div>
+
+<div class="card">
+<h3>1.3 参考资源</h3>
+<ul>
+  <li>界面设计参考：<span class="file-path">docs/design/</span> — 标定数据分析界面、校验界面等</li>
+  <li>标定算法参考：<span class="file-path">core/calibration/bayesian_calibration_pipeline/</span> — 贝叶斯标定管线，包含 MultiSourceRobotModel 54 参数误差模型、几何参数选择、正规化 LM 优化等</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>二、代码修改清单</h2>
+
+<div class="card">
+<h3>2.1 新增文件</h3>
+<table>
+<tr><th>文件</th><th>行数</th><th>说明</th></tr>
+<tr>
+  <td><span class="file-path">core/calibration_service.py</span></td>
+  <td>~220</td>
+  <td>
+    <strong>标定服务层</strong>。封装 Bayeisan Pipeline 的核心功能，为 UI 提供简化 API：
+    <ul>
+      <li><code>CalibrationResult</code> — 标定结果数据类（成功标志、误差指标、参数值等）</li>
+      <li><code>CalibrationService.compute_nominal_position()</code> — 基于名义参数计算末端位置</li>
+      <li><code>CalibrationService.load_calibration_data()</code> — 加载 .pkl 标定数据</li>
+      <li><code>CalibrationService.run_calibration()</code> — 执行 LM 优化标定</li>
+      <li><code>CalibrationService.compute_error_metrics()</code> — 计算误差指标（RMSE、Max 等）</li>
+    </ul>
+  </td>
+</tr>
+<tr>
+  <td><span class="file-path">core/calibration_persistence.py</span></td>
+  <td>~95</td>
+  <td>
+    <strong>标定结果持久化模块</strong>。YAML 格式的保存与加载：
+    <ul>
+      <li><code>save_calibration_result()</code> — 保存标定参数、RMSE、置信度等为 YAML</li>
+      <li><code>load_calibration_result()</code> — 从 YAML 加载之前的标定结果</li>
+    </ul>
+  </td>
+</tr>
+<tr>
+  <td><span class="file-path">app/pages/calibration_page.py</span></td>
+  <td>~400</td>
+  <td>
+    <strong>标定分析页面</strong>。包含三个功能卡片：
+    <ul>
+      <li><strong>名义末端位置卡片</strong>：显示基于名义 MD-H 参数的 X/Y/Z 末端位置和当前关节角</li>
+      <li><strong>标定数据卡片</strong>：加载标定数据按钮 + 执行标定按钮 + 数据信息展示</li>
+      <li><strong>标定结果卡片</strong>：RMSE、最大误差、置信度、误差参数概览、保存 YAML 和生成 HTML 报告按钮</li>
+    </ul>
+    支持与初始化页面之间的导航（← 返回初始化按钮）。
+  </td>
+</tr>
+<tr>
+  <td><span class="file-path">tests/test_calibration.py</span></td>
+  <td>~400</td>
+  <td>
+    <strong>标定功能测试套件</strong>。22 个测试用例，覆盖 4 个层级（详见第三章）。
+  </td>
+</tr>
+</table>
+</div>
+
+<div class="card">
+<h3>2.2 修改文件</h3>
+<table>
+<tr><th>文件</th><th>变更内容</th></tr>
+<tr>
+  <td><span class="file-path">app/main_window.py</span></td>
+  <td>
+    <ul>
+      <li>使用 <code>QStackedWidget</code> 替代直接设置 central widget，支持页面切换</li>
+      <li>新增 <code>show_calibration_page()</code> 方法：创建并切换到标定页面，同步当前关节角</li>
+      <li>新增 <code>show_initialization_page()</code> 方法：切换回初始化页面</li>
+    </ul>
+  </td>
+</tr>
+<tr>
+  <td><span class="file-path">app/pages/initialization_page.py</span></td>
+  <td>
+    <ul>
+      <li>构造函数新增 <code>navigate_to_calibration</code> 可选回调参数</li>
+      <li>设置卡片中新增 <strong>"进入标定分析"</strong> 按钮（蓝色醒目样式）</li>
+      <li>按钮在模型已加载后自动启用，未加载时禁用</li>
+      <li>新增 <code>_on_navigate_to_calibration()</code> 方法触发页面跳转</li>
+    </ul>
+  </td>
+</tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>三、测试说明</h2>
+
+<div class="card">
+<h3>3.1 测试层级总览</h3>
+<table>
+<tr><th>层级</th><th>测试数</th><th>覆盖内容</th></tr>
+<tr><td>CalibrationService 单元测试</td><td>8</td><td>服务初始化、名义位置计算、标定执行、误差指标、数据加载、边界条件</td></tr>
+<tr><td>CalibrationPersistence 单元测试</td><td>4</td><td>YAML 保存/加载、文件不存在、元数据、格式正确性</td></tr>
+<tr><td>CalibrationPage UI 测试</td><td>5</td><td>默认状态、数据加载、标定执行、报告生成、YAML 保存</td></tr>
+<tr><td>InitializationPage 集成测试</td><td>2</td><td>标定按钮启用逻辑、页面导航</td></tr>
+<tr><td>CalibrationResult 数据类测试</td><td>2</td><td>默认值、字段完整性</td></tr>
+<tr><td>InitializationPage 原有测试</td><td>7</td><td>回归验证，确保原有功能不受影响</td></tr>
+<tr><td><strong>合计</strong></td><td><strong>29 (+1)</strong></td><td></td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>3.2 各测试详细说明</h3>
+
+<h4>CalibrationService（8 个测试）</h4>
+<table>
+<tr><th>测试名称</th><th>测试目的</th><th>为什么需要这个测试</th></tr>
+<tr>
+  <td><code>test_service_initialization</code></td>
+  <td>验证服务正确初始化，参数数量为 33</td>
+  <td>服务是所有标定操作的入口，必须确保初始化后参数结构正确</td>
+</tr>
+<tr>
+  <td><code>test_compute_nominal_position</code></td>
+  <td>验证名义位置计算返回合法 3D 坐标</td>
+  <td>名义位置是标定的基准参考，必须确保计算正确且在合理范围内</td>
+</tr>
+<tr>
+  <td><code>test_compute_nominal_positions_batch</code></td>
+  <td>验证批量名义位置计算</td>
+  <td>实际标定使用多组数据，批量计算是性能关键路径</td>
+</tr>
+<tr>
+  <td><code>test_error_metrics</code></td>
+  <td>验证 RMSE/Max 误差计算精度</td>
+  <td>误差指标是精度报告的核心数据，必须确保计算准确</td>
+</tr>
+<tr>
+  <td><code>test_load_calibration_data</code></td>
+  <td>验证从 .pkl 文件加载标定数据</td>
+  <td>数据加载是标定流程的必要前置步骤</td>
+</tr>
+<tr>
+  <td><code>test_run_calibration_on_synthetic_data</code></td>
+  <td><strong>核心测试</strong>：用完美数据（零误差）验证标定算法能否正确收敛到零误差</td>
+  <td>验证 LM 优化的正确性——理想情况下应从名义数据中恢复零误差向量</td>
+</tr>
+<tr>
+  <td><code>test_run_calibration_with_small_error</code></td>
+  <td><strong>核心测试</strong>：注入已知小误差，验证标定后精度优于标定前</td>
+  <td>验证标定算法对真实误差的辨识能力，模拟实际场景中的小幅制造误差</td>
+</tr>
+<tr>
+  <td><code>test_run_calibration_rejects_insufficient_data</code></td>
+  <td>验证不足 3 个样本时拒绝执行</td>
+  <td>边界条件保护——样本不足时优化问题欠定，应明确拒绝</td>
+</tr>
+<tr>
+  <td><code>test_run_calibration_rejects_shape_mismatch</code></td>
+  <td>验证关节/位置维度不匹配时拒绝</td>
+  <td>数据完整性校验——防止维度不匹配导致静默错误</td>
+</tr>
+</table>
+
+<h4>CalibrationPersistence（4 个测试）</h4>
+<table>
+<tr><th>测试名称</th><th>测试目的</th><th>为什么需要这个测试</th></tr>
+<tr>
+  <td><code>test_save_and_load_calibration_result</code></td>
+  <td>验证 YAML 保存并重新加载的完整往返</td>
+  <td>持久化是用户数据安全的关键，必须保证写入和读取一致</td>
+</tr>
+<tr>
+  <td><code>test_load_nonexistent_file</code></td>
+  <td>验证加载不存在文件时抛出明确异常</td>
+  <td>错误处理——用户不应看到模糊的系统错误</td>
+</tr>
+<tr>
+  <td><code>test_save_and_load_with_metadata</code></td>
+  <td>验证额外元数据的保存和加载</td>
+  <td>实际使用中需要记录机器人型号、控制器信息等附加数据</td>
+</tr>
+<tr>
+  <td><code>test_yaml_format_is_valid</code></td>
+  <td>验证生成的 YAML 文件结构正确</td>
+  <td>确保输出格式可被下游工具解析</td>
+</tr>
+</table>
+
+<h4>CalibrationPage UI（5 个测试）</h4>
+<table>
+<tr><th>测试名称</th><th>测试目的</th><th>为什么需要这个测试</th></tr>
+<tr>
+  <td><code>test_calibration_page_default_state</code></td>
+  <td>验证页面初始状态：默认值显示、按钮禁用</td>
+  <td>确保用户看到的初始界面符合预期，防止误操作</td>
+</tr>
+<tr>
+  <td><code>test_calibration_page_load_data_button</code></td>
+  <td>验证点击加载数据按钮后 UI 状态正确更新</td>
+  <td>UI 交互流程的关键节点</td>
+</tr>
+<tr>
+  <td><code>test_calibration_page_run_calibration</code></td>
+  <td><strong>端到端测试</strong>：从数据加载到标定结果展示的完整流程</td>
+  <td>验证 UI 与后端服务的完整集成链路</td>
+</tr>
+<tr>
+  <td><code>test_calibration_page_report_generation</code></td>
+  <td>验证 HTML 报告生成内容包含关键信息</td>
+  <td>报告是用户的主要交付物，内容完整性至关重要</td>
+</tr>
+<tr>
+  <td><code>test_calibration_page_save_yaml</code></td>
+  <td>验证保存按钮触发的完整保存流程</td>
+  <td>确保保存操作端到端可用</td>
+</tr>
+</table>
+
+<h4>InitializationPage 集成（2 个测试）</h4>
+<table>
+<tr><th>测试名称</th><th>测试目的</th><th>为什么需要这个测试</th></tr>
+<tr>
+  <td><code>test_initialization_page_calibration_button_enabled_when_model_loaded</code></td>
+  <td>验证标定按钮在模型加载前禁用、加载后启用</td>
+  <td>防止用户在模型未就绪时进入标定流程</td>
+</tr>
+<tr>
+  <td><code>test_calibration_button_navigates</code></td>
+  <td>验证点击标定按钮正确触发导航回调</td>
+  <td>页面跳转是用户工作流的关键环节</td>
+</tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>四、测试结果</h2>
+
+<div class="summary-box">
+<p><strong>结论：全部 29 个测试通过，0 失败，0 错误。</strong></p>
+<p>执行时间：6.33 秒（含 3D 渲染初始化）</p>
+</div>
+
+<div class="card">
+<h3>4.1 详细结果</h3>
+<table>
+<tr><th>#</th><th>测试</th><th>结果</th></tr>
+<tr><td>1</td><td>test_initialization_page_default_state</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>2</td><td>test_load_model_button_reads_file</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>3</td><td>test_load_parameter_button_reads_yaml</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>4</td><td>test_invalid_parameter_file_does_not_mark_loaded</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>5</td><td>test_complete_configuration_updates_status</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>6</td><td>test_default_project_loads_ur10_and_debug_angles</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>7</td><td>test_default_directory_recent_project_and_template_buttons_respond</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>8</td><td>test_service_initialization</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>9</td><td>test_compute_nominal_position</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>10</td><td>test_compute_nominal_positions_batch</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>11</td><td>test_error_metrics</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>12</td><td>test_load_calibration_data</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>13</td><td>test_run_calibration_on_synthetic_data</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>14</td><td>test_run_calibration_with_small_error</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>15</td><td>test_run_calibration_rejects_insufficient_data</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>16</td><td>test_run_calibration_rejects_shape_mismatch</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>17</td><td>test_save_and_load_calibration_result</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>18</td><td>test_load_nonexistent_file</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>19</td><td>test_save_and_load_with_metadata</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>20</td><td>test_yaml_format_is_valid</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>21</td><td>test_calibration_page_default_state</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>22</td><td>test_calibration_page_load_data_button</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>23</td><td>test_calibration_page_run_calibration</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>24</td><td>test_calibration_page_report_generation</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>25</td><td>test_calibration_page_save_yaml</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>26</td><td>test_initialization_page_calibration_button_enabled_when_model_loaded</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>27</td><td>test_calibration_button_navigates</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>28</td><td>test_calibration_result_defaults</td><td><span class="pass">PASSED</span></td></tr>
+<tr><td>29</td><td>test_calibration_result_fields</td><td><span class="pass">PASSED</span></td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>五、架构设计说明</h2>
+
+<div class="card">
+<h3>5.1 模块关系图</h3>
+<pre style="background:#f0f4f8;padding:12px;border-radius:6px;font-size:12px;">
+MainWindow (QStackedWidget)
+  ├── InitializationPage
+  │     ├── RobotSimulationWidget (3D 渲染)
+  │     └── [进入标定分析] 按钮 → show_calibration_page()
+  │
+  └── CalibrationPage
+        ├── CalibrationService
+        │     ├── MultiSourceRobotModel (正运动学)
+        │     ├── build_error_parameters() (54→33 参数)
+        │     └── scipy.optimize.least_squares (LM 优化)
+        │
+        ├── CalibrationPersistence (YAML 读写)
+        │
+        └── 报告生成 (HTML)
+</pre>
+</div>
+
+<div class="card">
+<h3>5.2 标定算法</h3>
+<ul>
+  <li><strong>运动学模型</strong>：Modified Denavit-Hartenberg (MD-H) 六关节串联机器人</li>
+  <li><strong>标定参数</strong>：33 几何参数（24 MD-H 连杆误差 delta_alpha/delta_a/delta_d/delta_theta × 6 关节 + 6 基座位姿 delta_Bt/delta_Bu + 3 工具平移 delta_Tt）</li>
+  <li><strong>优化方法</strong>：Levenberg-Marquardt (scipy.optimize.least_squares)</li>
+  <li><strong>目标函数</strong>：min ||p(q; theta) - y_measured||²</li>
+  <li><strong>参数缩减</strong>：通过 SVD 冗余度分析自动选择可辨识参数子集（select_independent_parameters）</li>
+  <li><strong>参数缩放</strong>：使用预定义的物理尺度因子归一化参数空间</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>六、待完成的任务</h2>
+
+<div class="card">
+<table>
+<tr><th>#</th><th>任务</th><th>优先级</th><th>说明</th></tr>
+<tr>
+  <td>1</td>
+  <td><strong>与集控系统对接实际数据接口</strong></td>
+  <td><span class="warn">高</span></td>
+  <td>
+    当前标定数据通过本地 .pkl 文件加载。最终实现时，末端位置应从集控系统实时获取。
+    需要实现网络/串口通信层，接收集控系统发送的关节角和名义位置数据。
+  </td>
+</tr>
+<tr>
+  <td>2</td>
+  <td><strong>集成完整的 Bayesian 标定管线</strong></td>
+  <td><span class="warn">高</span></td>
+  <td>
+    当前使用简化的 M0 级 LM 优化（仅几何参数）。完整的 Bayesian 管线包含：
+    Stage 1 几何锚点消融、Stage 2 Bayesian 候选函数库、Stage 3 Bayesian basis 匹配、
+    Stage 4 全量 MAP 微调。需要足够多的真实标定数据才能启用完整管线。
+  </td>
+</tr>
+<tr>
+  <td>3</td>
+  <td><strong>加载已有标定参数功能</strong></td>
+  <td>中</td>
+  <td>
+    当前 CalibrationPage 可以从 YAML 加载历史标定结果。但 InitializationPage 的
+    "加载参数文件" 按钮尚未识别标定 YAML 格式。需要统一参数文件格式。
+  </td>
+</tr>
+<tr>
+  <td>4</td>
+  <td><strong>置信度衰减机制</strong></td>
+  <td>中</td>
+  <td>
+    当前置信度固定为 100%（标定完成时）。实际系统中，随着时间推移、温度变化、
+    机械磨损等因素，置信度应逐步衰减。需要实现时间/使用次数相关的置信度衰减模型。
+  </td>
+</tr>
+<tr>
+  <td>5</td>
+  <td><strong>可视化误差对比</strong></td>
+  <td>中</td>
+  <td>
+    在当前精度指标卡片中展示标定前后的误差对比（柱状图/散点图）。
+    可复用现有 PyVista 渲染管线绘制误差向量。
+  </td>
+</tr>
+<tr>
+  <td>6</td>
+  <td><strong>多协议校验支持</strong></td>
+  <td>低</td>
+  <td>
+    设计文档中提到了校验协议集（24 点/8 点/48 点）。当前仅支持用户手动加载任意标定数据。
+    需要实现预定义校验协议的生成和管理。
+  </td>
+</tr>
+<tr>
+  <td>7</td>
+  <td><strong>健康状态卡片动态更新</strong></td>
+  <td>低</td>
+  <td>
+    当前健康状态卡片显示静态占位数据。标定完成后应更新为实际置信度和标定时间。
+  </td>
+</tr>
+<tr>
+  <td>8</td>
+  <td><strong>删除旧方案代码</strong></td>
+  <td>低</td>
+  <td>
+    robot_simulation_widget.py 中的 TODO: 旧方案待删除 标注代码（CAP_GEOMETRY_NAMES
+    和启发式分类逻辑），等待用户可视化验证确认后删除。
+  </td>
+</tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>七、文件清单</h2>
+
+<div class="card">
+<table>
+<tr><th>类型</th><th>文件路径</th><th>行数</th></tr>
+<tr><td>新增</td><td><span class="file-path">core/calibration_service.py</span></td><td>~220</td></tr>
+<tr><td>新增</td><td><span class="file-path">core/calibration_persistence.py</span></td><td>~95</td></tr>
+<tr><td>新增</td><td><span class="file-path">app/pages/calibration_page.py</span></td><td>~400</td></tr>
+<tr><td>新增</td><td><span class="file-path">tests/test_calibration.py</span></td><td>~400</td></tr>
+<tr><td>修改</td><td><span class="file-path">app/main_window.py</span></td><td>~30 → 45</td></tr>
+<tr><td>修改</td><td><span class="file-path">app/pages/initialization_page.py</span></td><td>~920 → 950</td></tr>
+</table>
+</div>
+
+</body>
+</html>

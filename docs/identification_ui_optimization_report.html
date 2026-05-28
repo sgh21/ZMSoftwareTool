@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>参数辨识界面优化报告</title>
+  <style>
+    body { font-family: "Microsoft YaHei", Arial, sans-serif; margin: 28px; color: #1f2933; line-height: 1.6; }
+    h1, h2 { color: #102a43; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 14px; }
+    th, td { border: 1px solid #d9e2ec; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #f0f4f8; }
+    code { background: #f5f7fa; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>参数辨识界面优化报告</h1>
+  <p>本次优化围绕 S1 参数辨识流程、主界面实时精度刷新和健康状态可视化展开，保持本地单进程 PySide6 桌面工具链形态。</p>
+
+  <h2>优化项</h2>
+  <table>
+    <tr><th>问题</th><th>实现</th><th>涉及文件</th></tr>
+    <tr>
+      <td>参数辨识过程耗时较长，缺少进度反馈</td>
+      <td>运行 S1 辨识时显示模态不确定进度弹窗，完成或失败后自动关闭。</td>
+      <td><code>app/pages/calibration_page.py</code></td>
+    </tr>
+    <tr>
+      <td>辨识界面返回主界面失败</td>
+      <td>返回逻辑改为沿父级链查找 <code>MainWindow</code>，适配页面被 <code>QStackedWidget</code> 包裹的结构。</td>
+      <td><code>app/pages/calibration_page.py</code></td>
+    </tr>
+    <tr>
+      <td>超差阈值修改后左侧显示不立即刷新</td>
+      <td>阈值输入右侧新增“更新”按钮，点击后立即重算当前构型定位误差、超差结论和健康状态。</td>
+      <td><code>app/pages/initialization_page.py</code></td>
+    </tr>
+    <tr>
+      <td>主页面右上角布局拥挤，UR 调试入口占用常用设置区</td>
+      <td>移除右侧设置区的 UR 调试按钮，改为顶部“调试”入口打开临时关节调试窗口。</td>
+      <td><code>app/pages/initialization_page.py</code></td>
+    </tr>
+    <tr>
+      <td>健康状态可视化不够直观</td>
+      <td>新增状态圆点与环形评分仪表盘：绿色表示 good，黄色表示 warning，红色表示 critical，灰色表示 unknown。</td>
+      <td><code>app/pages/initialization_page.py</code></td>
+    </tr>
+
+    <tr>
+      <td>????????????</td>
+      <td>?????????????????S1 ?????? YAML/SQLite??????????????????????????????? YAML ????????????</td>
+      <td><code>core/calibration_service.py</code><br><code>app/pages/calibration_page.py</code><br><code>app/main_window.py</code></td>
+    </tr>
+    <tr>
+      <td>??????????</td>
+      <td>???????????????????????? <code>100 / (1 + worst_cv_rmse_mm / (10 * rms_limit_mm))</code>??? worst_cv_rmse ????????? RMSE?</td>
+      <td><code>core/calibration_service.py</code></td>
+    </tr>
+  </table>
+
+  <h2>验证</h2>
+  <p>执行 <code>D:\Softwares\miniconda3\envs\ZMSoftware\python.exe -m pytest -q</code>，覆盖辨识封装、YAML/SQLite 持久化、主界面实时精度刷新、阈值更新入口、顶部调试入口和健康仪表盘。</p>
+</body>
+</html>

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pyvista as pv
 import yaml
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy
 from yourdfpy import URDF
@@ -36,6 +36,8 @@ CAP_GEOMETRY_NAMES = {
 
 class RobotSimulationWidget(QLabel):
     """URDF renderer backed by yourdfpy kinematics and PyVista off-screen rendering."""
+
+    joint_angles_changed = Signal(list)
 
     def __init__(self, project_root: str | Path | None = None) -> None:
         super().__init__()
@@ -89,6 +91,7 @@ class RobotSimulationWidget(QLabel):
     def set_joint_angles(self, joint_degrees: list[float] | tuple[float, ...]) -> None:
         values = list(joint_degrees)[: len(self._joint_names)]
         self._joint_degrees = values + [0.0] * max(0, 6 - len(values))
+        self.joint_angles_changed.emit(self.joint_degrees)
         if self._urdf_model is None:
             return
 
