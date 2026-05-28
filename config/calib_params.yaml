@@ -1,0 +1,4 @@
+calibration:
+  active_param_file: storage/model_versions/active_calib_params.yaml
+  backup_dir: storage/model_versions
+  algorithm_package: core.calibration.bayesian_calibration_pipeline

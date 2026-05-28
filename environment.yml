@@ -1,0 +1,30 @@
+name: ZMSoftware
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - pyyaml
+  - pyqtgraph
+  - pyside6
+  - pyopengl
+  - vtk>=9.3,<9.6
+  - pyvista=0.46.5
+  - pyvistaqt
+  - trimesh
+  - lxml
+  - opencv
+  - jinja2
+  - jsonschema
+  - platformdirs
+  - pytest
+  - ruff
+  - mypy
+  - pip:
+      - yourdfpy>=0.0.60
+      - xacro>=2.1

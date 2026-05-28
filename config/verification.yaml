@@ -1,0 +1,5 @@
+verification:
+  pose_config: config/verification.yaml
+  image_count: 5
+  randomize_pose: true
+  output_dir: data/verification

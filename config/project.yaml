@@ -1,0 +1,5 @@
+project:
+  name: ZMSoftware Robot Digital Twin Tool
+  default_model_dir: models
+  default_data_dir: data
+  default_storage_dir: storage

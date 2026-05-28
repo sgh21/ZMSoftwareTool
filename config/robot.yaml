@@ -1,0 +1,6 @@
+robot:
+  model: UR
+  urdf_path: models/urdf
+  mesh_path: models/meshes
+  base_frame: base
+  tool_frame: tool0

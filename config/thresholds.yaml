@@ -1,0 +1,5 @@
+accuracy:
+  position_rms_limit_mm: 0.5
+  max_error_limit_mm: 1.0
+  over_tolerance_rate_limit: 0.05
+  min_model_confidence: 0.8
