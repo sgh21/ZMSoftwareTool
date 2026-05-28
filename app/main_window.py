@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QMainWindow, QVBoxLayout, QWidget
+from pathlib import Path
+
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QMainWindow
+
+from app.pages.initialization_page import InitializationPage
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ZMSoftware Robot Digital Twin Tool")
-        self.resize(1280, 720)
-
-        placeholder = QLabel("Robot digital twin workspace")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.addWidget(placeholder)
-        self.setCentralWidget(central)
+        logo_path = Path(__file__).resolve().parent / "resources" / "app_logo.png"
+        if logo_path.exists():
+            self.setWindowIcon(QIcon(str(logo_path)))
+        self.resize(1440, 810)
+        self.setMinimumSize(1180, 700)
+        self.initialization_page = InitializationPage()
+        self.setCentralWidget(self.initialization_page)

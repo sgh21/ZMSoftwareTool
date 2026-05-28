@@ -1,0 +1,57 @@
+status_colors:
+  alarm: "#db3444"
+  normal: "#45db34"
+  warning: "#db7734"
+
+# 机器人三维渲染配色方案
+robot_render_colors:
+  long_link: "#E0E3DB"
+  joint:     "#6E7570"
+  connector: "#6E7570"
+  cap:       "#9ED6F5"
+  silver:    "#E0E3DB"
+
+# 子网格 → 颜色类别 显式映射表
+# yourdfpy 命名规则: filename.dae (第1个), filename.dae_1 (第2个), ...
+# 分类规则（基于 DAE 原始材质色 + 形状）:
+#   蓝色 (0.392,0.541,0.639)              → cap      端盖
+#   深灰 (0.224,0.224,0.224) + 细长 (>0.6m) → long_link 长连杆（仅上臂/前臂主体）
+#   深灰 (0.224,0.224,0.224) + 紧凑       → joint    关节外壳（肩/腕部主体）
+#   中灰 (0.463,0.463,0.463)              → joint    关节连接环/腕3
+#   浅灰 (0.655,0.655,0.655) + 细长       → long_link 长连杆延长段
+#   深黑 (0.078,0.078,0.078)              → connector 连接盘
+#   中灰 (0.373,0.373,0.373)              → silver   底座平台
+mesh_color_map:
+  # === base (底座) - 1 子网格 ===
+  base.dae:       silver         # 底座平台 (0.373 材质)
+
+  # === shoulder (肩部) - 3 子网格 ===
+  shoulder.dae:   joint          # 肩部关节外壳 (0.224 深灰, 紧凑)
+  shoulder.dae_1: cap            # 蓝色端盖环
+  shoulder.dae_2: joint          # 关节连接环 (0.463 中灰)
+
+  # === upperarm (上臂) - 4 子网格 ===
+  upperarm.dae:   joint      # ★ 最长连杆段 (0.745m, 0.224 深灰+细长)
+  upperarm.dae_1: cap            # 蓝色端盖
+  upperarm.dae_2: joint          # 关节连接环 (0.463 中灰)
+  upperarm.dae_3: long_link         # 上臂非主体段，灰色
+
+  # === forearm (前臂) - 5 子网格 ===
+  forearm.dae:    joint      # ★ 次长连杆段 (0.675m, 0.224 深灰+细长)
+  forearm.dae_1:  cap            # 蓝色端盖
+  forearm.dae_2:  joint          # 关节连接环 (0.463 中灰)
+  forearm.dae_3:  long_link         # 前臂非主体段，灰色
+  forearm.dae_4:  connector      # 深黑连接盘 (0.078 材质)
+
+  # === wrist1 (腕部1) - 3 子网格 ===
+  wrist1.dae:     joint          # 腕部1关节外壳 (0.224 深灰, 紧凑)
+  wrist1.dae_1:   cap            # 蓝色端盖
+  wrist1.dae_2:   joint          # 关节连接件 (0.463 中灰)
+
+  # === wrist2 (腕部2) - 3 子网格 ===
+  wrist2.dae:     joint          # 腕部2关节外壳 (0.224 深灰, 紧凑)
+  wrist2.dae_1:   cap            # 蓝色端盖
+  wrist2.dae_2:   joint          # 关节连接件 (0.463 中灰)
+
+  # === wrist3 (腕部3/工具法兰) - 1 子网格 ===
+  wrist3.dae:     silver          # 末端关节法兰 (0.463 中灰, 非蓝色端盖)
