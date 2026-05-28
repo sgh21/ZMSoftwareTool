@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QLabel, QSizePolicy
 from yourdfpy import URDF
 
 
-DEFAULT_JOINT_DEGREES = (0.0, -58.0, 82.0, -112.0, -90.0, 0.0)
+DEFAULT_JOINT_DEGREES = (130.0, -90.0, 90.0, -90.0, -90.0, 0.0)
 SCENE_BACKGROUND_RGB = np.array([248, 251, 255], dtype=np.uint8)
 SCENE_GRID_RGB = np.array([224, 233, 244], dtype=np.uint8)
 SCENE_BORDER_RGB = np.array([199, 213, 232], dtype=np.uint8)

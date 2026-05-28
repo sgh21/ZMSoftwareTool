@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>标定页面集成与健康状态模块优化报告</title>
+<style>
+body { font-family: Arial, "Microsoft YaHei", sans-serif; margin: 28px; color: #1f2933; line-height: 1.65; max-width: 1100px; }
+h1, h2, h3 { color: #102a43; }
+h1 { border-bottom: 2px solid #0f62d9; padding-bottom: 10px; }
+h2 { margin-top: 32px; border-bottom: 1px solid #d9e2ec; padding-bottom: 6px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 13px; }
+th, td { border: 1px solid #d9e2ec; padding: 7px 10px; text-align: left; }
+th { background: #f0f4f8; }
+tr:nth-child(even) { background: #f8fafc; }
+.ok { color: #0b6b3a; font-weight: 700; }
+.warn { color: #9a6700; font-weight: 700; }
+.card { background: #f8fafc; border: 1px solid #d9e2ec; border-radius: 8px; padding: 14px 18px; margin: 12px 0; }
+code { background: #f0f4f8; padding: 1px 5px; border-radius: 3px; font-size: 12px; color: #c7254e; }
+.formula { background: #1e293b; color: #e2e8f0; padding: 14px 18px; border-radius: 6px; margin: 10px 0; font-family: "Consolas", "Courier New", monospace; font-size: 13px; line-height: 1.7; overflow-x: auto; }
+.note { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 10px 14px; margin: 10px 0; border-radius: 4px; }
+.diff-add { background: #dcfce7; color: #166534; }
+.diff-remove { background: #fee2e2; color: #991b1b; }
+</style>
+</head>
+<body>
+
+<h1>标定页面集成与健康状态模块优化报告</h1>
+
+<div class="card">
+<h2>概要</h2>
+<table>
+<tr><th>项目</th><th>内容</th></tr>
+<tr><td>任务目标</td><td>去除标注的无用模块，将标定页面集成到初始化页面，移除健康状态红点，说明置信度与健康度计算方式</td></tr>
+<tr><td>第二轮优化</td><td>移除无用的校验协议和扫描点数设置项；修复面板切换时上方针输入栏闪动问题</td></tr>
+<tr><td>修改文件数</td><td>4 个（3 个代码文件 + 1 个测试文件）</td></tr>
+<tr><td>测试结果</td><td class="ok">14/14 通过（7 标定 + 7 初始化，零回归）</td></tr>
+</table>
+</div>
+
+<h2>一、修改模块清单</h2>
+
+<div class="card">
+<h3>1. app/main_window.py — 简化为单页架构</h3>
+<table>
+<tr><th>变更类型</th><th>说明</th></tr>
+<tr><td class="diff-remove">移除</td><td><code>QStackedWidget</code> 多页面容器 — 标定功能已集成到初始化页面，不再需要页面切换</td></tr>
+<tr><td class="diff-remove">移除</td><td><code>CalibrationPage</code> 导入及实例化 — 不再作为独立页面存在</td></tr>
+<tr><td class="diff-remove">移除</td><td><code>show_calibration_page()</code> / <code>show_initialization_page()</code> — 页面导航方法</td></tr>
+<tr><td class="diff-add">精简</td><td>中央控件直接设为 <code>InitializationPage</code> 实例，移除 <code>navigate_to_calibration</code> 回调参数</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>2. app/pages/initialization_page.py — 集成标定功能 + 移除红点 + 精简设置项 + 修复闪动</h3>
+<table>
+<tr><th>变更类型</th><th>说明</th></tr>
+<tr><td class="diff-remove">移除</td><td><code>navigate_to_calibration</code> 回调 + <code>_on_navigate_to_calibration()</code> — 不再跳转页面</td></tr>
+<tr><td class="diff-remove">移除</td><td><code>health_status_dot</code> 红色圆点 + <code>_set_health_dot()</code> + <code>health_state_cell</code> 容器</td></tr>
+<tr><td class="diff-remove">移除</td><td>"校验协议"行（QComboBox + 管理按钮）和"扫描点数"行（QSpinBox）— 暂无实际功能</td></tr>
+<tr><td class="diff-remove">移除</td><td>独立的 <code>calib_back_button</code> 按钮 — 改为单按钮动态切换，消除布局闪动</td></tr>
+<tr><td class="diff-add">新增</td><td><code>IdentificationWorker</code> 异步标定线程 + <code>QStackedWidget</code> 面板切换</td></tr>
+<tr><td class="diff-add">新增</td><td><code>_build_calibration_card()</code> 标定控制面板</td></tr>
+<tr><td class="diff-add">变更</td><td>"进入标定分析"按钮：使用<strong>单按钮动态文本+信号切换</strong>，切换时改为"← 返回指南"并重连信号，避免 GridLayout 重新布局导致的闪动</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>3. app/pages/calibration_page.py — 移除死代码</h3>
+<table>
+<tr><th>变更类型</th><th>说明</th></tr>
+<tr><td class="diff-remove">移除</td><td><code>_build_nominal_card()</code> 方法（~40行）— 从未被 <code>_build_ui()</code> 调用</td></tr>
+<tr><td class="diff-remove">移除</td><td><code>import math</code> — 不再使用的导入</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>4. tests/test_calibration.py — 更新测试断言</h3>
+<table>
+<tr><th>变更类型</th><th>说明</th></tr>
+<tr><td class="diff-add">更新</td><td><code>health_status_dot</code> → <code>is None</code>；<code>health_state_cell</code> → <code>is None</code></td></tr>
+</table>
+</div>
+
+<h2>二、UI 架构变化</h2>
+
+<div class="card">
+<h3>变更前：双页面 + 双按钮切换</h3>
+<pre style="background:#f5f5f5;padding:12px;border-radius:4px;font-size:12px;">
+MainWindow
+  └── QStackedWidget
+        ├── InitializationPage
+        └── CalibrationPage (独立页面)
+
+SettingsCard 包含: 校验协议行 + 扫描点数行 + 两个独立按钮(进入/返回)
+问题: 按钮切换时 col 2 宽度变化 → 上方输入栏闪动
+</pre>
+
+<h3>变更后：单页面 + 面板切换 + 单按钮</h3>
+<pre style="background:#f5f5f5;padding:12px;border-radius:4px;font-size:12px;">
+MainWindow
+  └── InitializationPage
+        ├── Body (GridLayout)
+        │     ├── [左] SimulationCard
+        │     ├── [右上] SettingsCard (精简: 去掉了校验协议/扫描点数行)
+        │     │         └── [单按钮] "进入标定分析" ⇄ "← 返回指南"
+        │     └── [右下] QStackedWidget
+        │           ├── GuideCard
+        │           └── CalibrationCard
+        └── Footer
+</pre>
+</div>
+
+<h2>三、第二轮修改详解：去除无用设置项 + 修复闪动</h2>
+
+<div class="card">
+<h3>3.1 移除"校验协议"和"扫描点数"行</h3>
+
+<h4>SettingsCard 布局变化</h4>
+<pre style="background:#f5f5f5;padding:12px;border-radius:4px;font-size:12px;">
+变更前:                              变更后:
+Row 0: section_title                  Row 0: section_title
+Row 1: 超差阈值 | spin | empty        Row 1: 超差阈值 | spin | empty
+Row 2: 模型路径 | edit | browse       Row 2: 模型路径 | edit | browse
+Row 3: 参数文件 | edit | browse       Row 3: 参数文件 | edit | browse
+Row 4: 校验协议 | combo | 管理  ✗     Row 4: 启动时扫描 | (i)
+Row 5: 扫描点数 | spin          ✗     Row 5: [单按钮 进入标定/返回指南]
+Row 6: 启动时扫描 | (i)               Row 6: config_warning
+Row 7: [进入标定] | [返回指南]
+Row 8: config_warning
+</pre>
+</div>
+
+<div class="card">
+<h3>3.2 修复"返回指南"按钮导致布局闪动</h3>
+
+<h4>问题根因</h4>
+<p>原设计用<strong>两个独立按钮</strong>放在 GridLayout 不同列（col 1 和 col 2），通过 <code>setVisible(True/False)</code> 切换。当 "返回指南" 按钮 visible 状态变化时，GridLayout 重新计算 col 2 列宽，导致上方<strong>所有输入控件</strong>（模型路径编辑框、参数文件编辑框等）水平位移，产生明显"闪动"。</p>
+
+<h4>修复方案：单按钮动态切换</h4>
+<p>合并为<strong>一个按钮</strong>，始终占据同一位置（row 5, col 1），通过 <code>setText()</code> 改变文字、<code>disconnect()/connect()</code> 切换信号连接：</p>
+
+<table>
+<tr><th>状态</th><th>按钮文本</th><th>连接方法</th><th>外观</th></tr>
+<tr><td>指南模式</td><td><code>▶ 进入标定分析</code></td><td><code>_toggle_calibration_panel</code></td><td>蓝色 #calibration_button</td></tr>
+<tr><td>标定模式</td><td><code>← 返回指南</code></td><td><code>_show_guide_panel</code></td><td>蓝色 #calibration_button（一致）</td></tr>
+</table>
+
+<pre style="background:#1e293b;color:#e2e8f0;padding:14px;border-radius:4px;font-size:12px;">
+def _toggle_calibration_panel(self):
+    self._right_bottom_stack.setCurrentIndex(1)
+    self.calibration_toggle_btn.setText("← 返回指南")
+    self.calibration_toggle_btn.clicked.disconnect()
+    self.calibration_toggle_btn.clicked.connect(self._show_guide_panel)
+
+def _show_guide_panel(self):
+    self._right_bottom_stack.setCurrentIndex(0)
+    self.calibration_toggle_btn.setText("▶ 进入标定分析")
+    self.calibration_toggle_btn.clicked.disconnect()
+    self.calibration_toggle_btn.clicked.connect(self._toggle_calibration_panel)
+</pre>
+
+<div class="note">
+<strong>效果：</strong>按钮始终在同一位置，文字变化不触发 GridLayout 重新布局，彻底消除闪动。两个方向的按钮样式一致（共用 <code>#calibration_button</code> 蓝色主题）。
+</div>
+</div>
+
+<h2>四、标定置信度计算方式</h2>
+
+<div class="card">
+<h3>定义位置</h3>
+<p><code>core/calibration_service.py</code> — 函数 <code>_confidence_from_cv()</code> (第 800-811 行)</p>
+
+<h3>计算公式</h3>
+<div class="formula">
+confidence = 100.0 / (1.0 + cv_max_rmse_mm / (10.0 * limit_mm))
+</div>
+
+<h3>参数说明</h3>
+<table>
+<tr><th>参数</th><th>来源</th><th>含义</th></tr>
+<tr><td><code>cv_max_rmse_mm</code></td><td>S1 交叉验证最差折的拟合 RMSE (mm)</td><td>交叉验证中表现最差那一折的均方根误差，衡量模型泛化能力</td></tr>
+<tr><td><code>limit_mm</code></td><td><code>config/thresholds.yaml</code> → <code>accuracy.position_rms_limit_mm</code>（默认 0.5 mm）</td><td>用户配置的定位精度容差上限</td></tr>
+</table>
+
+<h3>数值示例</h3>
+<table>
+<tr><th>CV 最差 RMSE (mm)</th><th>limit_mm (mm)</th><th>置信度</th></tr>
+<tr><td>0.01</td><td>0.5</td><td>99.8%</td></tr>
+<tr><td>0.1</td><td>0.5</td><td>98.0%</td></tr>
+<tr><td>0.5</td><td>0.5</td><td>90.9%</td></tr>
+<tr><td>1.0</td><td>0.5</td><td>83.3%</td></tr>
+<tr><td>5.0</td><td>0.5</td><td>50.0%</td></tr>
+</table>
+
+<div class="note">
+<strong>注意：</strong>这不是贝叶斯后验概率。它是基于交叉验证误差的经验可靠性评分：CV 误差越小，置信度越接近 100%。初始化标定后置信度设定为 100%。
+</div>
+</div>
+
+<h2>五、健康度（Health Score / Level）计算方式</h2>
+
+<div class="card">
+<h3>定义位置</h3>
+<p><code>core/calibration_service.py</code> — <code>_score_from_error()</code> 及 <code>compute_predicted_position()</code></p>
+
+<h3>计算公式</h3>
+<div class="formula">
+ratio = error_mm / limit_mm<br>
+health_score = 100.0 / (1.0 + ratio / 3.0)
+</div>
+
+<h3>健康等级阈值</h3>
+<table>
+<tr><th>健康评分</th><th>健康等级</th><th>含义</th><th>颜色</th></tr>
+<tr><td>score >= 80</td><td><code>good</code></td><td>运行良好</td><td style="color:#22b573;">绿色 #22b573</td></tr>
+<tr><td>60 <= score < 80</td><td><code>warning</code></td><td>需要关注</td><td style="color:#f59e0b;">橙色 #f59e0b</td></tr>
+<tr><td>score < 60</td><td><code>critical</code></td><td>需要立即处理</td><td style="color:#db3444;">红色 #db3444</td></tr>
+</table>
+
+<h3>数值示例（limit_mm = 0.5 mm）</h3>
+<table>
+<tr><th>当前定位误差 (mm)</th><th>健康评分</th><th>健康等级</th></tr>
+<tr><td>0.0</td><td>100.0</td><td>good</td></tr>
+<tr><td>0.3</td><td>83.3</td><td>good</td></tr>
+<tr><td>0.5</td><td>75.0</td><td>warning</td></tr>
+<tr><td>1.0</td><td>60.0</td><td>warning</td></tr>
+<tr><td>1.5</td><td>50.0</td><td>critical</td></tr>
+</table>
+</div>
+
+<h2>六、置信度与健康度的关系</h2>
+
+<div class="card">
+<table>
+<tr><th>维度</th><th>置信度 (Confidence)</th><th>健康度 (Health Score)</th></tr>
+<tr><td><strong>评估对象</strong></td><td>辨识模型整体的可靠性（全局）</td><td>当前关节角下的定位误差（实时/点位）</td></tr>
+<tr><td><strong>输入数据</strong></td><td>交叉验证 CV 拟合残差</td><td>当前位姿的预测-名义位置偏差</td></tr>
+<tr><td><strong>更新时机</strong></td><td>标定完成后计算一次，后续可随时间衰减</td><td>每次关节角变化时实时更新</td></tr>
+<tr><td><strong>用途</strong></td><td>衡量辨识模型的泛化可信程度</td><td>衡量当前工作点的定位精度是否达标</td></tr>
+</table>
+</div>
+
+<h2>七、测试结果</h2>
+
+<div class="card">
+<table>
+<tr><th>测试文件</th><th>测试名称</th><th>结果</th></tr>
+<tr><td>test_calibration.py</td><td>test_nominal_config_file_is_used</td><td class="ok">PASSED</td></tr>
+<tr><td>test_calibration.py</td><td>test_load_identification_data_accepts_multiple_pkl_files</td><td class="ok">PASSED</td></tr>
+<tr><td>test_calibration.py</td><td>test_s1_identification_wraps_algorithm_and_separates_error_concepts</td><td class="ok">PASSED</td></tr>
+<tr><td>test_calibration.py</td><td>test_identify_from_files_persists_active_model_for_live_prediction</td><td class="ok">PASSED</td></tr>
+<tr><td>test_calibration.py</td><td>test_identification_yaml_and_sqlite_history_round_trip</td><td class="ok">PASSED</td></tr>
+<tr><td>test_calibration.py</td><td>test_calibration_page_loads_multiple_files_runs_and_persists</td><td class="ok">PASSED</td></tr>
+<tr><td>test_calibration.py</td><td>test_initialization_page_realtime_accuracy_labels_are_reasonable</td><td class="ok">PASSED</td></tr>
+<tr><td>test_initialization_page.py</td><td>test_initialization_page_default_state</td><td class="ok">PASSED</td></tr>
+<tr><td>test_initialization_page.py</td><td>test_load_model_button_reads_file</td><td class="ok">PASSED</td></tr>
+<tr><td>test_initialization_page.py</td><td>test_load_parameter_button_reads_yaml</td><td class="ok">PASSED</td></tr>
+<tr><td>test_initialization_page.py</td><td>test_invalid_parameter_file_does_not_mark_loaded</td><td class="ok">PASSED</td></tr>
+<tr><td>test_initialization_page.py</td><td>test_complete_configuration_updates_status</td><td class="ok">PASSED</td></tr>
+<tr><td>test_initialization_page.py</td><td>test_default_project_loads_ur10_and_debug_angles</td><td class="ok">PASSED</td></tr>
+<tr><td>test_initialization_page.py</td><td>test_default_directory_recent_project_and_template_buttons_respond</td><td class="ok">PASSED</td></tr>
+</table>
+<p style="font-weight:700;color:#0b6b3a;">全部 14 个测试通过，零回归。</p>
+</div>
+
+</body>
+</html>

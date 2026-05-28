@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Callable
 
@@ -137,48 +136,6 @@ class CalibrationPage(QWidget):
         self._page_status.setObjectName("page_status_label")
         layout.addWidget(self._page_status)
         return header
-
-    def _build_nominal_card(self) -> QWidget:
-        card = self._card_frame("nominal_card")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(10)
-
-        title_row = QHBoxLayout()
-        title_row.addWidget(self._section_title("📐 名义末端位置（基于名义 MD-H 参数）"))
-        title_row.addStretch(1)
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.setObjectName("refresh_nominal_button")
-        refresh_btn.clicked.connect(self._update_nominal_position_display)
-        title_row.addWidget(refresh_btn)
-        layout.addLayout(title_row)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(8)
-        for col, (label, key) in enumerate(
-            [("X (m)", "x"), ("Y (m)", "y"), ("Z (m)", "z")]
-        ):
-            grid.addWidget(QLabel(label), 0, col)
-            value_label = QLabel("--")
-            value_label.setObjectName(f"nominal_{key}_label")
-            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            grid.addWidget(value_label, 1, col)
-        layout.addLayout(grid)
-
-        joint_info = QHBoxLayout()
-        joint_info.addWidget(QLabel("当前关节角:"))
-        self._joint_display = QLabel("--")
-        self._joint_display.setObjectName("joint_angle_display")
-        joint_info.addWidget(self._joint_display)
-        joint_info.addStretch(1)
-        layout.addLayout(joint_info)
-
-        note = QLabel("此位置为集控系统基于名义运动学参数计算的理论末端位置。")
-        note.setObjectName("nominal_note")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        return card
 
     def _build_data_card(self) -> QWidget:
         card = self._card_frame("data_card")

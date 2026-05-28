@@ -293,7 +293,8 @@ def test_initialization_page_realtime_accuracy_labels_are_reasonable(
     assert child(page, QLabel, "health_value_1").text() == "95%"
     assert "\n" in child(page, QLabel, "health_ring_label").text()
     assert page.findChild(QWidget, "health_gauge") is not None
-    assert page.findChild(QLabel, "health_status_dot") is not None
+    # Red dot removed - health_status_dot should no longer exist
+    assert page.findChild(QLabel, "health_status_dot") is None
     assert page.findChild(QPushButton, "refresh_accuracy_button") is None
     threshold = child(page, QSpinBox, "threshold_spin")
     threshold.setValue(500)
@@ -302,4 +303,5 @@ def test_initialization_page_realtime_accuracy_labels_are_reasonable(
     assert child(page, QLabel, "accuracy_value_4").text() in {"\u6b63\u5e38", "\u8d85\u5dee"}
     assert page.findChild(QLabel, "accuracy_value_5") is None
     assert page.findChild(QLabel, "accuracy_alarm_dot") is not None
-    assert page.findChild(QWidget, "health_state_cell") is not None
+    # health_state_cell removed with the red dot
+    assert page.findChild(QWidget, "health_state_cell") is None

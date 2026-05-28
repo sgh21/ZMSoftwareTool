@@ -4,13 +4,13 @@ import json
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import yaml
-from PySide6.QtCore import QRectF, Qt, QUrl
+from PySide6.QtCore import QObject, QRectF, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -19,8 +19,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QStyle,
     QToolButton,
     QVBoxLayout,
@@ -28,8 +31,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.widgets.robot_simulation_widget import DEFAULT_JOINT_DEGREES, RobotSimulationWidget
-from core.calibration_service import CalibrationService
-
+from core.calibration_persistence import (
+    record_identification_history,
+    save_identification_result,
+)
+from core.calibration_service import CalibrationResult, CalibrationService, IdentificationOptions
 
 MODEL_SUFFIXES = {".urdf", ".xacro", ".stl", ".dae", ".obj"}
 PARAM_SUFFIXES = {".yaml", ".yml", ".json"}
@@ -38,6 +44,38 @@ DEFAULT_STATUS_COLORS = {
     "normal": "#45db34",
     "warning": "#db7734",
 }
+
+
+class IdentificationWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        service: CalibrationService,
+        data: dict[str, np.ndarray],
+        paths: list[Path],
+    ) -> None:
+        super().__init__()
+        self._service = service
+        self._data = data
+        self._paths = list(paths)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self._service.run_identification(
+                self._data["joints"],
+                self._data["measured_positions"],
+                payloads=self._data.get("payloads"),
+                directions=self._data.get("directions"),
+                dataset_paths=self._paths,
+                options=IdentificationOptions(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(result)
 
 
 class CardFrame(QFrame):
@@ -110,12 +148,10 @@ class InitializationPage(QWidget):
         self,
         project_root: str | Path | None = None,
         open_url: Callable[[QUrl], bool] | None = None,
-        navigate_to_calibration: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.project_root = Path(project_root or Path.cwd()).resolve()
         self._open_url = open_url or QDesktopServices.openUrl
-        self._navigate_to_calibration = navigate_to_calibration
         self.status_colors = self._load_status_colors()
         self._calibration_service = CalibrationService(project_root=self.project_root)
         self.active_parameters_loaded = False
@@ -127,6 +163,15 @@ class InitializationPage(QWidget):
         self.accuracy_value_labels: list[QLabel] = []
         self.health_value_labels: list[QLabel] = []
         self.joint_debug_dialog: QDialog | None = None
+
+        # Calibration state
+        self._calib_result: CalibrationResult | None = None
+        self._calib_data: dict[str, np.ndarray] | None = None
+        self._calib_paths: list[Path] = []
+        self._identification_thread: QThread | None = None
+        self._identification_worker: IdentificationWorker | None = None
+        self._identification_progress: QProgressDialog | None = None
+
         self.setObjectName("initialization_page")
         self._build_ui()
         self._apply_style()
@@ -186,7 +231,13 @@ class InitializationPage(QWidget):
 
         body_layout.addWidget(self._build_simulation_card(), 0, 0, 2, 1)
         body_layout.addWidget(self._build_settings_card(), 0, 1)
-        body_layout.addWidget(self._build_guide_card(), 1, 1)
+
+        # Right-bottom: stacked widget toggles between guide and calibration
+        self._right_bottom_stack = QStackedWidget()
+        self._right_bottom_stack.setObjectName("right_bottom_stack")
+        self._right_bottom_stack.addWidget(self._build_guide_card())
+        self._right_bottom_stack.addWidget(self._build_calibration_card())
+        body_layout.addWidget(self._right_bottom_stack, 1, 1)
 
         root_layout.addWidget(body, stretch=1)
         root_layout.addWidget(self._build_footer())
@@ -381,13 +432,13 @@ class InitializationPage(QWidget):
         metrics_layout.setVerticalSpacing(13)
         metrics_layout.addWidget(self._section_title("⚙ 当前精度指标"), 0, 0, 1, 2)
         self.accuracy_value_labels = []
-        for row, label in enumerate(("\u4f4d\u7f6e\u8bef\u5dee RMS", "\u6700\u5927\u8bef\u5dee", "\u8d85\u5dee\u9608\u503c", "\u5f53\u524d\u7ed3\u8bba"), start=1):
+        for row, label in enumerate(("位置误差 RMS", "最大误差", "超差阈值", "当前结论"), start=1):
             metrics_layout.addWidget(QLabel(label), row, 0)
-            value = QLabel("\u672a\u521d\u59cb\u5316" if label == "\u5f53\u524d\u7ed3\u8bba" else "--")
+            value = QLabel("未初始化" if label == "当前结论" else "--")
             value.setObjectName(f"accuracy_value_{row}")
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.accuracy_value_labels.append(value)
-            if label == "\u5f53\u524d\u7ed3\u8bba":
+            if label == "当前结论":
                 conclusion_cell = QWidget()
                 conclusion_cell.setObjectName("accuracy_conclusion_cell")
                 conclusion_layout = QHBoxLayout(conclusion_cell)
@@ -428,20 +479,7 @@ class InitializationPage(QWidget):
             value_label.setObjectName(f"health_value_{row}")
             value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.health_value_labels.append(value_label)
-            if row == 2:
-                state_cell = QWidget()
-                state_cell.setObjectName("health_state_cell")
-                state_layout = QHBoxLayout(state_cell)
-                state_layout.setContentsMargins(0, 0, 0, 0)
-                state_layout.setSpacing(6)
-                self.health_status_dot = QLabel()
-                self.health_status_dot.setObjectName("health_status_dot")
-                state_layout.addWidget(self.health_status_dot)
-                state_layout.addStretch(1)
-                state_layout.addWidget(value_label)
-                health_layout.addWidget(state_cell, row, 2)
-            else:
-                health_layout.addWidget(value_label, row, 2)
+            health_layout.addWidget(value_label, row, 2)
         layout.addWidget(health)
         return container
 
@@ -558,37 +596,20 @@ class InitializationPage(QWidget):
             "param_path_edit",
         )
 
-        layout.addWidget(QLabel("校验协议"), 4, 0)
-        self.protocol_combo = QComboBox()
-        self.protocol_combo.setObjectName("protocol_combo")
-        self.protocol_combo.addItems(("默认校验协议集（24点）", "快速校验协议（8点）", "完整校验协议（48点）"))
-        layout.addWidget(self.protocol_combo, 4, 1)
-        manage_button = QPushButton("管理")
-        manage_button.setObjectName("manage_protocol_button")
-        manage_button.clicked.connect(lambda: self._set_status_message("校验协议管理暂未实现"))
-        layout.addWidget(manage_button, 4, 2)
-
-        layout.addWidget(QLabel("扫描点数"), 5, 0)
-        self.scan_point_spin = QSpinBox()
-        self.scan_point_spin.setObjectName("scan_point_spin")
-        self.scan_point_spin.setRange(1, 999)
-        self.scan_point_spin.setValue(20)
-        layout.addWidget(self.scan_point_spin, 5, 1)
-
         self.scan_on_start_checkbox = QCheckBox("启动时扫描配置目录")
         self.scan_on_start_checkbox.setObjectName("scan_on_start_checkbox")
-        layout.addWidget(self.scan_on_start_checkbox, 6, 1)
-        layout.addWidget(QLabel("ⓘ"), 6, 2)
+        layout.addWidget(self.scan_on_start_checkbox, 4, 1)
+        layout.addWidget(QLabel("ⓘ"), 4, 2)
 
-        self.calibration_button = QPushButton("▶ 进入标定分析")
-        self.calibration_button.setObjectName("calibration_button")
-        self.calibration_button.clicked.connect(self._on_navigate_to_calibration)
-        self.calibration_button.setEnabled(False)
-        layout.addWidget(self.calibration_button, 7, 1)
+        self.calibration_toggle_btn = QPushButton("▶ 进入标定分析")
+        self.calibration_toggle_btn.setObjectName("calibration_button")
+        self.calibration_toggle_btn.clicked.connect(self._toggle_calibration_panel)
+        self.calibration_toggle_btn.setEnabled(False)
+        layout.addWidget(self.calibration_toggle_btn, 5, 1)
 
         self.config_warning_label = QLabel("⚠ 配置不完整：请加载三维模型与参数文件以完成初始化")
         self.config_warning_label.setObjectName("config_warning_label")
-        layout.addWidget(self.config_warning_label, 8, 0, 1, 3)
+        layout.addWidget(self.config_warning_label, 6, 0, 1, 3)
         return card
 
     def _path_row(
@@ -612,6 +633,93 @@ class InitializationPage(QWidget):
         button.clicked.connect(callback)
         layout.addWidget(button, row, 2)
         return edit
+
+    # ── Calibration card (integrated inline) ─────────────────────────
+
+    def _build_calibration_card(self) -> QWidget:
+        card = CardFrame("calibration_card")
+        card.setObjectName("calibration_card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(22, 16, 22, 16)
+        layout.setSpacing(10)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(self._section_title("📐 参数辨识工具"))
+        title_row.addStretch(1)
+        self._calib_status_label = QLabel("就绪")
+        self._calib_status_label.setObjectName("calib_status_inline_label")
+        title_row.addWidget(self._calib_status_label)
+        layout.addLayout(title_row)
+
+        # Data loading row
+        data_row = QHBoxLayout()
+        data_row.setSpacing(8)
+        self._load_calib_btn = QPushButton("加载辨识数据 (.pkl)")
+        self._load_calib_btn.setObjectName("load_calib_data_button")
+        self._load_calib_btn.clicked.connect(self._choose_calib_data)
+        data_row.addWidget(self._load_calib_btn)
+
+        self._run_calib_btn = QPushButton("执行 S1 辨识")
+        self._run_calib_btn.setObjectName("run_calibration_button")
+        self._run_calib_btn.setEnabled(False)
+        self._run_calib_btn.clicked.connect(self._run_calibration)
+        data_row.addWidget(self._run_calib_btn)
+        layout.addLayout(data_row)
+
+        self._calib_data_info = QLabel("尚未加载辨识数据")
+        self._calib_data_info.setObjectName("data_info_label")
+        self._calib_data_info.setWordWrap(True)
+        layout.addWidget(self._calib_data_info)
+
+        # Results grid
+        results = QFrame()
+        results.setObjectName("metrics_frame")
+        rg = QGridLayout(results)
+        rg.setContentsMargins(0, 0, 0, 0)
+        rg.setHorizontalSpacing(14)
+        rg.setVerticalSpacing(6)
+
+        result_labels = [
+            ("定位误差 RMS:", "rmse_label", "-- mm"),
+            ("最大定位误差:", "max_error_label", "-- mm"),
+            ("辨识样本数:", "sample_count_label", "--"),
+            ("置信度:", "confidence_label", "100%"),
+            ("优化迭代:", "nfev_label", "--"),
+            ("辨识状态:", "calib_status_label", "未执行"),
+        ]
+        for row_idx, (title, obj_name, default) in enumerate(result_labels):
+            rg.addWidget(QLabel(title), row_idx, 0)
+            value = QLabel(default)
+            value.setObjectName(obj_name)
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            rg.addWidget(value, row_idx, 1)
+        layout.addWidget(results)
+
+        # Error parameter summary
+        self._param_summary = QLabel("辨识参数将在执行后显示")
+        self._param_summary.setObjectName("param_summary_label")
+        self._param_summary.setWordWrap(True)
+        layout.addWidget(self._param_summary)
+
+        # Action buttons
+        action_row = QHBoxLayout()
+        self._save_calib_btn = QPushButton("💾 保存辨识结果 (YAML)")
+        self._save_calib_btn.setObjectName("save_calib_button")
+        self._save_calib_btn.setEnabled(False)
+        self._save_calib_btn.clicked.connect(self._save_calibration)
+        action_row.addWidget(self._save_calib_btn)
+
+        self._report_calib_btn = QPushButton("📄 生成精度报告 (HTML)")
+        self._report_calib_btn.setObjectName("generate_report_button")
+        self._report_calib_btn.setEnabled(False)
+        self._report_calib_btn.clicked.connect(self._generate_calibration_report)
+        action_row.addWidget(self._report_calib_btn)
+        layout.addLayout(action_row)
+
+        layout.addStretch(1)
+        return card
+
+    # ── Guide card ────────────────────────────────────────────────────
 
     def _build_guide_card(self) -> QWidget:
         card = CardFrame("guide_card")
@@ -714,7 +822,7 @@ class InitializationPage(QWidget):
         layout = QHBoxLayout(footer)
         layout.setContentsMargins(18, 0, 18, 0)
         layout.setSpacing(22)
-        for text in ("机器人：UR10", "控制器：CB3", "仿真频率：60 Hz", "数字孪生时间：--"):
+        for text in ("机器人：UR10", "控制器：CB3", "仿真频率：60 Hz"):
             layout.addWidget(QLabel(text))
         layout.addStretch(1)
         layout.addWidget(QLabel("坐标系：基坐标系"))
@@ -730,6 +838,26 @@ class InitializationPage(QWidget):
         label = QLabel(text)
         label.setObjectName("section_title")
         return label
+
+    # ── Toggle between guide and calibration panels ──────────────────
+
+    def _toggle_calibration_panel(self) -> None:
+        self._right_bottom_stack.setCurrentIndex(1)
+        self.calibration_toggle_btn.setText("← 返回指南")
+        self.calibration_toggle_btn.clicked.disconnect()
+        self.calibration_toggle_btn.clicked.connect(self._show_guide_panel)
+        self.calibration_toggle_btn.setEnabled(True)
+        self._set_status_message("已切换到参数辨识面板")
+
+    def _show_guide_panel(self) -> None:
+        self._right_bottom_stack.setCurrentIndex(0)
+        self.calibration_toggle_btn.setText("▶ 进入标定分析")
+        self.calibration_toggle_btn.clicked.disconnect()
+        self.calibration_toggle_btn.clicked.connect(self._toggle_calibration_panel)
+        self.calibration_toggle_btn.setEnabled(self.model_loaded)
+        self._set_status_message("已返回初始化指南")
+
+    # ── File loading ─────────────────────────────────────────────────
 
     def choose_model_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -800,10 +928,6 @@ class InitializationPage(QWidget):
         self._open_url(QUrl.fromLocalFile(str(self.project_root)))
         self._set_status_message(f"已打开默认目录：{self.project_root}")
 
-    def _on_navigate_to_calibration(self) -> None:
-        if self._navigate_to_calibration is not None:
-            self._navigate_to_calibration()
-
     def _validate_existing_file(self, path: Path, allowed_suffixes: set[str]) -> None:
         if not path.exists():
             raise FileNotFoundError(path)
@@ -819,6 +943,8 @@ class InitializationPage(QWidget):
             return json.loads(text)
         return yaml.safe_load(text)
 
+    # ── Realtime accuracy refresh ────────────────────────────────────
+
     def _refresh_realtime_accuracy(self) -> None:
         if not hasattr(self, "accuracy_value_labels") or not self.accuracy_value_labels:
             return
@@ -827,14 +953,14 @@ class InitializationPage(QWidget):
             self.accuracy_value_labels[0].setText("--")
             self.accuracy_value_labels[1].setText("--")
             self.accuracy_value_labels[2].setText(f"{threshold_mm:.3f} mm")
-            self.accuracy_value_labels[3].setText("\u672a\u52a0\u8f7d\u8fa8\u8bc6\u53c2\u6570")
+            self.accuracy_value_labels[3].setText("未加载辨识参数")
             self._set_accuracy_alarm_dot("unknown")
-            self.health_ring_label.setText("--\n\u672a\u521d\u59cb\u5316")
+            self.health_ring_label.setText("--\n未初始化")
             self.health_gauge.set_status(None, None)
-            self._set_health_dot("unknown")
+            self._set_alarm_status("unknown")
             if self.health_value_labels:
                 self.health_value_labels[0].setText("--")
-                self.health_value_labels[1].setText("\u672a\u52a0\u8f7d\u8fa8\u8bc6\u53c2\u6570")
+                self.health_value_labels[1].setText("未加载辨识参数")
                 self.health_value_labels[2].setText("--")
             return
 
@@ -844,23 +970,24 @@ class InitializationPage(QWidget):
                 joint_unit="degrees",
             )
         except Exception as exc:  # noqa: BLE001
-            self.accuracy_value_labels[3].setText(f"\u8ba1\u7b97\u5931\u8d25\uff1a{exc}")
+            self.accuracy_value_labels[3].setText(f"计算失败：{exc}")
             self._set_accuracy_alarm_dot("critical")
+            self._set_alarm_status("critical")
             return
 
         is_over_limit = state.rms_mm > threshold_mm
         self.accuracy_value_labels[0].setText(f"{state.rms_mm:.3f} mm")
         self.accuracy_value_labels[1].setText(f"{state.max_error_mm:.3f} mm")
         self.accuracy_value_labels[2].setText(f"{threshold_mm:.3f} mm")
-        self.accuracy_value_labels[3].setText("\u8d85\u5dee" if is_over_limit else "\u6b63\u5e38")
+        self.accuracy_value_labels[3].setText("超差" if is_over_limit else "正常")
         self._set_accuracy_alarm_dot("critical" if is_over_limit else "good")
         self.health_ring_label.setText(f"{state.health_score:.0f}\n{state.health_level}")
         self.health_gauge.set_status(state.health_score, state.health_level)
-        self._set_health_dot(state.health_level)
+        self._set_alarm_status(state.health_level)
         if self.health_value_labels:
             self.health_value_labels[0].setText(f"{state.confidence:.0f}%")
             self.health_value_labels[1].setText(state.health_level)
-            self.health_value_labels[2].setText("\u5b9e\u65f6")
+            self.health_value_labels[2].setText("实时")
 
     def _set_accuracy_alarm_dot(self, level: str) -> None:
         if not hasattr(self, "accuracy_alarm_dot"):
@@ -874,15 +1001,396 @@ class InitializationPage(QWidget):
             f"border-radius: 2px; background: {color};"
         )
 
-    def _set_health_dot(self, level: str) -> None:
+    def _set_alarm_status(self, level: str) -> None:
+        """Sync footer alarm badge with health level from realtime accuracy."""
+        level_lower = (level or "unknown").lower()
+        alarm_text = {
+            "good": "● 无告警",
+            "warning": "⚠ 注意",
+            "critical": "● 告警",
+        }
+        self.alarm_status_label.setText(alarm_text.get(level_lower, "● 未知"))
         color = HealthGaugeWidget.LEVEL_COLORS.get(
-            (level or "unknown").lower(),
+            level_lower,
             HealthGaugeWidget.LEVEL_COLORS["unknown"],
         )
-        self.health_status_dot.setStyleSheet(
-            f"min-width: 12px; max-width: 12px; min-height: 12px; max-height: 12px;"
-            f"border-radius: 6px; background: {color};"
+        self.alarm_status_label.setStyleSheet(f"color: {color}; font-weight: 600;")
+
+    # ── Calibration actions ──────────────────────────────────────────
+
+    def _choose_calib_data(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "加载辨识数据",
+            str(self.project_root / "data"),
+            "Calibration data (*.pkl *.pickle);;All files (*)",
         )
+        if paths:
+            self._load_calib_data([Path(path) for path in paths])
+
+    def _load_calib_data(self, paths: Path | list[Path]) -> None:
+        try:
+            path_list = [paths] if isinstance(paths, Path) else list(paths)
+            data = self._calibration_service.load_identification_data(path_list)
+            joints = np.asarray(data["joints"])
+            positions = np.asarray(data["measured_positions"])
+            self._calib_data = data
+            self._calib_paths = path_list
+            names = f"{len(path_list)} 个文件: " + ", ".join(path.name for path in path_list[:3])
+            if len(path_list) > 3:
+                names += f" ... 共 {len(path_list)} 个文件"
+            self._calib_data_info.setText(
+                f"已加载: {names}\n"
+                f"样本数: {len(joints)} | 关节1范围: [{joints[:, 0].min():.3f}, {joints[:, 0].max():.3f}] rad | "
+                f"位置范围: X[{positions[:, 0].min():.3f}, {positions[:, 0].max():.3f}]m"
+            )
+            self._run_calib_btn.setEnabled(True)
+            self._calib_status_label.setText("● 数据已加载")
+            self._set_status_message(f"辨识数据已加载: {len(path_list)} 个文件，{len(joints)} 个样本")
+        except Exception as exc:
+            self._calib_data_info.setText(f"加载失败: {exc}")
+            self._set_status_message(f"数据加载失败: {exc}")
+
+    def _run_calibration(self) -> None:
+        if self._calib_data is None:
+            self._set_status_message("请先加载辨识数据")
+            return
+
+        self._calib_status_label.setText("● 正在辨识...")
+        self._run_calib_btn.setEnabled(False)
+        self._identification_progress = QProgressDialog("S1 参数辨识正在运行，请稍候...", "", 0, 0, self)
+        self._identification_progress.setObjectName("identification_progress_dialog")
+        self._identification_progress.setWindowTitle("参数辨识进度")
+        self._identification_progress.setCancelButton(None)
+        self._identification_progress.setMinimumDuration(0)
+        self._identification_progress.setModal(True)
+        self._identification_progress.show()
+
+        thread = QThread(self)
+        worker = IdentificationWorker(self._calibration_service, self._calib_data, self._calib_paths)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_identification_finished)
+        worker.failed.connect(self._on_identification_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_identification_thread_finished)
+        self._identification_thread = thread
+        self._identification_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _on_identification_finished(self, result: CalibrationResult) -> None:
+        if self._identification_progress is not None:
+            self._identification_progress.close()
+            self._identification_progress = None
+        self._calib_result = result
+        self._display_calibration_result(result)
+        if result.success:
+            saved = self._persist_identification_result(result)
+            if saved is not None:
+                self._ask_to_apply_identification_result(result, saved)
+        self._run_calib_btn.setEnabled(True)
+
+    @Slot(str)
+    def _on_identification_failed(self, message: str) -> None:
+        if self._identification_progress is not None:
+            self._identification_progress.close()
+            self._identification_progress = None
+        self._calib_status_label.setText(f"● 辨识失败: {message}")
+        self._set_status_message(f"辨识失败: {message}")
+        self._run_calib_btn.setEnabled(True)
+
+    @Slot()
+    def _on_identification_thread_finished(self) -> None:
+        self._identification_thread = None
+        self._identification_worker = None
+
+    def _display_calibration_result(self, result: CalibrationResult) -> None:
+        self.findChild(QLabel, "rmse_label").setText(f"{result.position_error_rmse_mm:.4f} mm")
+        self.findChild(QLabel, "max_error_label").setText(f"{result.position_error_max_mm:.4f} mm")
+        self.findChild(QLabel, "sample_count_label").setText(str(result.joint_count))
+        self.findChild(QLabel, "confidence_label").setText(f"{result.confidence:.0f}%")
+        self.findChild(QLabel, "nfev_label").setText(str(result.nfev))
+
+        if result.success:
+            self.findChild(QLabel, "calib_status_label").setText("✔ S1 辨识成功")
+            self._calib_status_label.setText("● 辨识完成")
+        else:
+            self.findChild(QLabel, "calib_status_label").setText(f"⚠ {result.message}")
+
+        # Summarize top error parameters
+        if result.parameter_values:
+            significant = [
+                (name, val)
+                for name, val in result.parameter_values.items()
+                if abs(val) > 1e-10
+            ]
+            significant.sort(key=lambda x: abs(x[1]), reverse=True)
+            top_n = 8
+            if significant:
+                lines = [
+                    "主要辨识参数:",
+                    f"  S1 λ: {result.selected_lambda:.3g}",
+                    f"  拟合残差 RMSE: {result.rmse_mm:.4f} mm",
+                    "  定位误差定义: 预测模型位置 - 名义模型位置",
+                ]
+                for name, val in significant[:top_n]:
+                    param = next(
+                        (p for p in result.error_parameters if p.name == name), None
+                    )
+                    unit = param.unit if param else ""
+                    lines.append(f"  {name}: {val:.6f} {unit}")
+                if len(significant) > top_n:
+                    lines.append(f"  ... 共 {len(significant)} 个非零参数")
+                self._param_summary.setText("\n".join(lines))
+            else:
+                self._param_summary.setText("所有误差参数接近零，模型与测量数据高度一致。")
+
+        self._save_calib_btn.setEnabled(True)
+        self._report_calib_btn.setEnabled(True)
+        self._set_status_message(
+            f"S1 辨识完成: 定位误差RMSE={result.position_error_rmse_mm:.4f}mm, 拟合RMSE={result.rmse_mm:.4f}mm"
+        )
+
+    def _persist_identification_result(self, result: CalibrationResult) -> Path | None:
+        try:
+            yaml_path = self.project_root / "config" / "calibration_result.yaml"
+            saved = save_identification_result(
+                yaml_path,
+                result.parameter_values,
+                fit_rmse_mm=result.rmse_mm,
+                fit_max_error_mm=result.max_error_mm,
+                position_error_rmse_mm=result.position_error_rmse_mm,
+                position_error_max_mm=result.position_error_max_mm,
+                sample_count=result.joint_count,
+                confidence=result.confidence,
+                method=result.method,
+                selected_lambda=result.selected_lambda,
+                dataset_paths=result.dataset_paths,
+                cv_scores=result.cv_scores,
+                subspace_summary=result.subspace_summary,
+                extra_metadata=result.metadata,
+            )
+            record_identification_history(
+                self.project_root / "storage" / "records" / "identification_history.sqlite",
+                result_yaml_path=saved,
+                method=result.method,
+                success=result.success,
+                message=result.message,
+                sample_count=result.joint_count,
+                fit_rmse_mm=result.rmse_mm,
+                fit_max_error_mm=result.max_error_mm,
+                position_error_rmse_mm=result.position_error_rmse_mm,
+                position_error_max_mm=result.position_error_max_mm,
+                selected_lambda=result.selected_lambda,
+                confidence=result.confidence,
+                dataset_paths=result.dataset_paths,
+            )
+            self._set_status_message(f"S1 辨识结果已保存: {saved.name}，历史已入库")
+            return saved
+        except Exception as exc:  # noqa: BLE001
+            self._set_status_message(f"辨识完成，但持久化失败: {exc}")
+            return None
+
+    def _ask_to_apply_identification_result(
+        self,
+        result: CalibrationResult,
+        saved_path: Path,
+    ) -> None:
+        if not self._should_suggest_model_update(result):
+            self._set_status_message("辨识结果已保存；当前指标未触发模型更新建议")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "应用辨识参数",
+            (
+                "辨识结果已持久化，当前指标建议更新精度模型。\n"
+                f"是否将新参数文件加载到主界面参数文件栏？\n\n{saved_path}"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._set_status_message("辨识结果已保存，未加载为当前参数模型")
+            return
+
+        self.load_param_file(saved_path)
+        self._set_status_message(f"已加载新参数文件: {saved_path.name}")
+
+    def _should_suggest_model_update(self, result: CalibrationResult) -> bool:
+        threshold_path = self.project_root / "config" / "thresholds.yaml"
+        rms_limit = 0.5
+        max_limit = 1.0
+        try:
+            data = yaml.safe_load(threshold_path.read_text(encoding="utf-8")) or {}
+            accuracy = data.get("accuracy", {}) if isinstance(data, dict) else {}
+            rms_limit = float(accuracy.get("position_rms_limit_mm", rms_limit))
+            max_limit = float(accuracy.get("max_error_limit_mm", max_limit))
+        except Exception:
+            pass
+        improved_fit = result.rmse_mm < result.nominal_to_measured_rmse_mm
+        exceeds_limit = (
+            result.position_error_rmse_mm > rms_limit
+            or result.position_error_max_mm > max_limit
+        )
+        return bool(improved_fit or exceeds_limit)
+
+    def _save_calibration(self) -> None:
+        if self._calib_result is None:
+            return
+        default_dir = self.project_root / "data" / "calibration"
+        default_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存辨识结果",
+            str(default_dir / "calibration_result.yaml"),
+            "YAML files (*.yaml *.yml)",
+        )
+        if not path:
+            return
+        try:
+            result = self._calib_result
+            saved = save_identification_result(
+                path,
+                result.parameter_values,
+                fit_rmse_mm=result.rmse_mm,
+                fit_max_error_mm=result.max_error_mm,
+                position_error_rmse_mm=result.position_error_rmse_mm,
+                position_error_max_mm=result.position_error_max_mm,
+                sample_count=result.joint_count,
+                confidence=result.confidence,
+                method=result.method,
+                selected_lambda=result.selected_lambda,
+                dataset_paths=result.dataset_paths,
+                cv_scores=result.cv_scores,
+                subspace_summary=result.subspace_summary,
+                extra_metadata=result.metadata,
+            )
+            self._set_status_message(f"辨识结果已保存: {saved.name}")
+        except Exception as exc:
+            self._set_status_message(f"保存失败: {exc}")
+
+    def _generate_calibration_report(self) -> None:
+        if self._calib_result is None:
+            return
+        default_dir = self.project_root / "data" / "reports"
+        default_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存精度报告",
+            str(default_dir / "calibration_report.html"),
+            "HTML files (*.html)",
+        )
+        if not path:
+            return
+        try:
+            html = self._build_calibration_report_html()
+            Path(path).write_text(html, encoding="utf-8")
+            self._set_status_message(f"精度报告已生成: {Path(path).name}")
+            self._open_url(QUrl.fromLocalFile(str(Path(path).resolve())))
+        except Exception as exc:
+            self._set_status_message(f"报告生成失败: {exc}")
+
+    def _build_calibration_report_html(self) -> str:
+        result = self._calib_result
+        if result is None:
+            return "<html><body>No calibration result</body></html>"
+
+        nominal = result.nominal_positions
+        measured = result.measured_positions
+        calibrated = result.calibrated_positions
+
+        rows_html = ""
+        for i in range(min(len(measured), 50)):
+            pos_err = np.linalg.norm(calibrated[i] - nominal[i]) * 1000.0
+            fit_err = np.linalg.norm(calibrated[i] - measured[i]) * 1000.0
+            rows_html += (
+                f"<tr><td>{i + 1}</td>"
+                f"<td>{nominal[i, 0]:.4f}, {nominal[i, 1]:.4f}, {nominal[i, 2]:.4f}</td>"
+                f"<td>{calibrated[i, 0]:.4f}, {calibrated[i, 1]:.4f}, {calibrated[i, 2]:.4f}</td>"
+                f"<td>{measured[i, 0]:.4f}, {measured[i, 1]:.4f}, {measured[i, 2]:.4f}</td>"
+                f"<td>{pos_err:.4f}</td><td>{fit_err:.4f}</td></tr>"
+            )
+
+        param_rows = ""
+        significant = sorted(
+            [(n, v) for n, v in result.parameter_values.items() if abs(v) > 1e-10],
+            key=lambda x: abs(x[1]),
+            reverse=True,
+        )
+        for name, val in significant[:20]:
+            param_rows += f"<tr><td>{name}</td><td>{val:.8f}</td></tr>"
+
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>机器人参数辨识精度报告</title>
+<style>
+body {{ font-family: Arial, "Microsoft YaHei", sans-serif; margin: 28px; color: #1f2933; line-height: 1.55; }}
+h1, h2, h3 {{ color: #102a43; }}
+table {{ border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 13px; }}
+th, td {{ border: 1px solid #d9e2ec; padding: 7px 9px; text-align: left; }}
+th {{ background: #f0f4f8; }}
+.ok {{ color: #0b6b3a; font-weight: 700; }}
+.warn {{ color: #9a6700; font-weight: 700; }}
+.card {{ background: #f8fafc; border: 1px solid #d9e2ec; border-radius: 8px; padding: 14px 18px; margin: 12px 0; }}
+</style>
+</head>
+<body>
+<h1>机器人参数辨识精度报告</h1>
+
+<div class="card">
+<h2>概要</h2>
+<table>
+<tr><th>项目</th><th>结果</th></tr>
+<tr><td>辨识状态</td><td class="{'ok' if result.success else 'warn'}">{'成功' if result.success else '未收敛'}</td></tr>
+<tr><td>辨识方法</td><td>{result.method}</td></tr>
+<tr><td>辨识样本数</td><td>{result.joint_count}</td></tr>
+<tr><td>S1 选择 λ</td><td>{result.selected_lambda:.6g}</td></tr>
+<tr><td>定位误差 RMSE（预测-名义）</td><td>{result.position_error_rmse_mm:.4f} mm</td></tr>
+<tr><td>最大定位误差（预测-名义）</td><td>{result.position_error_max_mm:.4f} mm</td></tr>
+<tr><td>拟合残差 RMSE（预测-测量）</td><td>{result.rmse_mm:.4f} mm</td></tr>
+<tr><td>最大拟合残差（预测-测量）</td><td>{result.max_error_mm:.4f} mm</td></tr>
+<tr><td>优化迭代次数</td><td>{result.nfev}</td></tr>
+<tr><td>初始置信度</td><td>{result.confidence:.0f}%</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h2>辨识误差参数（前20项）</h2>
+<table>
+<tr><th>参数名称</th><th>辨识值</th></tr>
+{param_rows if param_rows else '<tr><td colspan="2">所有参数接近零</td></tr>'}
+</table>
+</div>
+
+<div class="card">
+<h2>逐点误差对比（前50点）</h2>
+<table>
+<tr><th>#</th><th>名义位置 (m)</th><th>预测位置 (m)</th><th>测量位置 (m)</th><th>定位误差 (mm)</th><th>拟合残差 (mm)</th></tr>
+{rows_html}
+</table>
+</div>
+
+<div class="card">
+<h2>方法说明</h2>
+<ul>
+<li>运动学模型: 改进 D-H (Modified Denavit-Hartenberg) 六关节串联机器人</li>
+<li>辨识参数: 33 几何参数 (24 MD-H + 6 基座 + 3 工具平移)</li>
+<li>优化方法: S1 子空间可辨识性加权 + 交叉验证正则化 + Levenberg-Marquardt</li>
+<li>拟合目标: min ||p(q; theta) - y_measured||^2 + 正则项</li>
+<li>定位误差定义: p_identified(q) - p_nominal(q)</li>
+</ul>
+</div>
+
+</body>
+</html>"""
+
+    # ── Status refresh ───────────────────────────────────────────────
 
     def _refresh_status(self) -> None:
         if self.model_loaded and self.params_loaded:
@@ -890,19 +1398,16 @@ class InitializationPage(QWidget):
             self.config_warning_label.setText("● 初始化完成：三维模型与参数文件已加载")
             self.simulation_status_label.setText("● 初始化完成")
             self.prompt_message_label.setText("模型与参数已加载，可进入精度分析流程。")
-            self.alarm_status_label.setText("● 无告警")
         elif self.model_loaded:
             self.config_status_label.setText("⚠ 参数未加载")
             self.config_warning_label.setText("⚠ 配置不完整：请继续加载误差参数文件")
             self.simulation_status_label.setText("⚠ 模型已加载，等待参数")
             self.prompt_message_label.setText("已找到机器人模型，请继续加载误差参数文件。")
-            self.alarm_status_label.setText("● 无告警")
         elif self.params_loaded:
             self.config_status_label.setText("⚠ 模型未加载")
             self.config_warning_label.setText("⚠ 配置不完整：请继续加载机器人三维模型")
             self.simulation_status_label.setText("⚠ 参数已加载，等待模型")
             self.prompt_message_label.setText("已找到误差参数，请继续加载机器人三维模型。")
-            self.alarm_status_label.setText("● 无告警")
         else:
             self.config_status_label.setText("⚠ 未加载")
             self.config_warning_label.setText("⚠ 配置不完整：请加载三维模型与参数文件以完成初始化")
@@ -912,10 +1417,9 @@ class InitializationPage(QWidget):
                 "或误差参数文件（calib_params.yaml）。\n"
                 "请先加载所需文件以继续初始化。"
             )
-            self.alarm_status_label.setText("● 无告警")
         self.init_prompt_card.setVisible(not self.model_loaded)
-        if hasattr(self, "calibration_button"):
-            self.calibration_button.setEnabled(self.model_loaded)
+        if hasattr(self, "calibration_toggle_btn"):
+            self.calibration_toggle_btn.setEnabled(self.model_loaded)
         self._apply_status_colors()
         self._refresh_realtime_accuracy()
 
@@ -923,7 +1427,6 @@ class InitializationPage(QWidget):
         normal = self.status_colors["normal"]
         warning = self.status_colors["warning"]
         self.connection_status_label.setStyleSheet(f"color: {normal}; font-weight: 600;")
-        self.alarm_status_label.setStyleSheet(f"color: {normal}; font-weight: 600;")
         status_color = normal if self.model_loaded and self.params_loaded else warning
         self.config_status_label.setStyleSheet(f"color: {status_color}; font-weight: 600;")
         self.simulation_status_label.setStyleSheet(f"color: {status_color}; font-weight: 600;")
@@ -934,6 +1437,8 @@ class InitializationPage(QWidget):
 
     def _set_status_message(self, message: str) -> None:
         self.footer_status_label.setText(message)
+
+    # ── Styles ───────────────────────────────────────────────────────
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -995,6 +1500,7 @@ class InitializationPage(QWidget):
             QFrame#simulation_card,
             QFrame#settings_card,
             QFrame#guide_card,
+            QFrame#calibration_card,
             QFrame#scene_card {
                 background: #f8fbff;
                 border: 1px solid #d5e0ef;
@@ -1090,7 +1596,6 @@ class InitializationPage(QWidget):
                 background: transparent;
             }
             QLineEdit,
-            QComboBox,
             QSpinBox {
                 min-height: 30px;
                 border: 1px solid #d4dfed;
@@ -1138,6 +1643,38 @@ class InitializationPage(QWidget):
                 background: #b0c4de;
                 border-color: #8fa8c8;
                 color: #6b7c93;
+            }
+            QLabel#calib_status_inline_label {
+                color: #516075;
+                font-weight: 600;
+            }
+            QFrame#metrics_frame {
+                background: #f0f4f8;
+                border: 1px solid #d9e2ec;
+                border-radius: 6px;
+                padding: 8px;
+            }
+            QLabel#data_info_label, QLabel#param_summary_label {
+                color: #49566c;
+                background: #f8fafc;
+                border: 1px solid #e0e8f4;
+                border-radius: 4px;
+                padding: 8px;
+            }
+            QPushButton#load_calib_data_button, QPushButton#run_calibration_button {
+                min-height: 40px;
+                color: #0f62d9;
+                border: 1px solid #3982ff;
+                background: #ffffff;
+            }
+            QPushButton#save_calib_button, QPushButton#generate_report_button {
+                min-height: 36px;
+            }
+            QLabel#rmse_label, QLabel#max_error_label {
+                font-weight: 700;
+            }
+            QStackedWidget#right_bottom_stack {
+                background: transparent;
             }
             """
         )

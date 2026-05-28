@@ -1,116 +1,117 @@
 identification:
-  timestamp: '2026-05-28T13:15:39.667902+00:00'
+  timestamp: '2026-05-28T13:53:06.464944+00:00'
   method: S1
-  confidence: 96.78839515034701
-  sample_count: 51
+  confidence: 90.51677396696888
+  sample_count: 250
   selected_lambda: 1.0e-10
   dataset_paths:
   - D:\WorkSpace\ZMProject\SoftwareTools\data\calibration\bayesian_calibration_pipeline\real_world_normal50_nongeometric.pkl
+  - D:\WorkSpace\ZMProject\SoftwareTools\data\calibration\bayesian_calibration_pipeline\real_world200_nongeometric.pkl
   metrics:
-    fit_rmse_mm: 0.1516743740049046
-    fit_max_error_mm: 0.3998990019352432
-    position_error_rmse_mm: 8.703055420487548
-    position_error_max_mm: 8.827602586117473
-    rmse_mm: 0.1516743740049046
-    max_error_mm: 0.3998990019352432
+    fit_rmse_mm: 0.44581804286190396
+    fit_max_error_mm: 1.352100116835525
+    position_error_rmse_mm: 12.702531134416892
+    position_error_max_mm: 15.545578827552488
+    rmse_mm: 0.44581804286190396
+    max_error_mm: 1.352100116835525
   error_parameters:
-    delta_alpha_1: 1.5784032624419676e-05
-    delta_alpha_2: 6.992345358998018e-06
-    delta_alpha_3: -8.006587635227766e-06
-    delta_alpha_4: -1.660732575391846e-05
-    delta_alpha_5: 2.9358602649051975e-07
-    delta_alpha_6: 1.165388387746825e-07
-    delta_a_1: -2.057004874704519e-05
-    delta_a_2: -0.0004672463077615912
-    delta_a_3: -0.00015770236323891235
-    delta_a_4: -0.0013603791025799572
-    delta_a_5: -0.00032432683232246166
-    delta_a_6: -0.000554961433296887
-    delta_d_1: 9.495669430749222e-06
-    delta_d_2: 3.9413846121253394e-05
-    delta_d_3: 3.9413631309312495e-05
-    delta_d_4: 3.9413874274933275e-05
-    delta_d_5: 0.0003893208426810964
-    delta_d_6: 0.0008976796686405218
-    delta_theta_1: 1.087205166244972e-05
-    delta_theta_2: 1.6562989741487087e-06
-    delta_theta_3: -2.54749364706513e-06
-    delta_theta_4: -5.318517972301878e-07
-    delta_theta_5: 1.5624535780286408e-07
-    delta_theta_6: 1.081095045107718e-12
-    delta_Btx: 0.0013407729991946045
-    delta_Bty: -0.006660880928061784
-    delta_Btz: 0.0029824073991987234
-    delta_Bux: 1.5784029800571346e-05
-    delta_Buy: -1.8670615018744365e-07
-    delta_Buz: 1.1050525894384043e-05
-    delta_Ttx: 3.5637377637469816e-05
-    delta_Tty: 5.1042341450211e-06
-    delta_Ttz: 1.938838384595418e-06
+    delta_alpha_1: 0.0006493419754705642
+    delta_alpha_2: -0.0009947360600097595
+    delta_alpha_3: -0.0012204799189188783
+    delta_alpha_4: -6.723450083722345e-05
+    delta_alpha_5: 0.0003049873793158306
+    delta_alpha_6: 3.798802189766771e-07
+    delta_a_1: -3.116382340318792e-05
+    delta_a_2: 0.008012359206937584
+    delta_a_3: -0.006527321025264279
+    delta_a_4: -0.005975561420207066
+    delta_a_5: 0.0012996409973679032
+    delta_a_6: -0.00010341001189272357
+    delta_d_1: 3.6312081375335116e-06
+    delta_d_2: 0.0009544284981332281
+    delta_d_3: 0.0009590964081159609
+    delta_d_4: 0.0009588833097171543
+    delta_d_5: 0.0013238901210894198
+    delta_d_6: 0.0007348409420547627
+    delta_theta_1: -0.0014015257593871754
+    delta_theta_2: -0.00014341495059372943
+    delta_theta_3: 0.0004442206900695369
+    delta_theta_4: -1.3979509201467297e-05
+    delta_theta_5: 2.9270354805636416e-08
+    delta_theta_6: 2.549552407069564e-12
+    delta_Btx: 0.0001004939341733982
+    delta_Bty: -0.009850822988885243
+    delta_Btz: 0.001043529630971005
+    delta_Bux: 0.0006493419670847661
+    delta_Buy: 0.0005075359139830057
+    delta_Buz: -0.0013843685377442076
+    delta_Ttx: -6.0954044567310745e-05
+    delta_Tty: 1.0273141140947835e-05
+    delta_Ttz: 1.6026635280453446e-06
   cv_scores:
   - lambda: 1.0e-10
     fold_rmse_mm:
-    - 0.1201016265816173
-    - 0.16590857016815938
-    - 0.16568899423688774
-    mean_rmse_mm: 0.15056639699555482
-    max_rmse_mm: 0.16590857016815938
-    std_rmse_mm: 0.021542032257547725
+    - 0.47132842585365486
+    - 0.5238380477684552
+    - 0.4906829317070267
+    mean_rmse_mm: 0.4952831351097123
+    max_rmse_mm: 0.5238380477684552
+    std_rmse_mm: 0.02168235076305733
   - lambda: 3.162277660168379e-08
     fold_rmse_mm:
-    - 0.4034086376435537
-    - 0.4089533909389624
-    - 0.3791030479613621
-    mean_rmse_mm: 0.3971550255146261
-    max_rmse_mm: 0.4089533909389624
-    std_rmse_mm: 0.012963834115579529
+    - 1.7078891520274047
+    - 1.7713753615456727
+    - 2.0092051806477826
+    mean_rmse_mm: 1.82948989807362
+    max_rmse_mm: 2.0092051806477826
+    std_rmse_mm: 0.12969402914239528
   - lambda: 1.0e-05
     fold_rmse_mm:
-    - 7.015700907069519
-    - 6.999358151394206
-    - 7.011464345657244
-    mean_rmse_mm: 7.008841134706991
-    max_rmse_mm: 7.015700907069519
-    std_rmse_mm: 0.006924947293801632
+    - 4.954650952325707
+    - 4.9787770712582855
+    - 4.56581308341818
+    mean_rmse_mm: 4.833080369000725
+    max_rmse_mm: 4.9787770712582855
+    std_rmse_mm: 0.18924299874444148
   - lambda: 0.0031622776601683794
     fold_rmse_mm:
-    - 8.69981574212041
-    - 8.747389582851165
-    - 8.767264231966127
-    mean_rmse_mm: 8.738156518979233
-    max_rmse_mm: 8.767264231966127
-    std_rmse_mm: 0.02829913776029603
+    - 12.716678045214623
+    - 12.846296436734697
+    - 12.369631614025952
+    mean_rmse_mm: 12.644202031991757
+    max_rmse_mm: 12.846296436734697
+    std_rmse_mm: 0.20123273039195264
   - lambda: 1.0
     fold_rmse_mm:
-    - 8.706414679804329
-    - 8.754304129323753
-    - 8.774208352113536
-    mean_rmse_mm: 8.744975720413871
-    max_rmse_mm: 8.774208352113536
-    std_rmse_mm: 0.028451829594181636
+    - 12.785713645240989
+    - 12.914853337754494
+    - 12.440134725868528
+    mean_rmse_mm: 12.713567236288005
+    max_rmse_mm: 12.914853337754494
+    std_rmse_mm: 0.20040503713121058
   subspace_summary:
     K: 2
     cluster_sizes:
-    - 20
-    - 31
+    - 51
+    - 199
     order:
     - 0
     - 1
     summaries:
     - subspace: 0
-      sample_count: 20
+      sample_count: 51
       rank: 23
-      condition_number: 59465.32678188076
-      mean_risk: 0.9130388230173491
-      weight_min: 68.46421162559265
+      condition_number: 52232.931600730604
+      mean_risk: 0.9143005258186584
+      weight_min: 68.87697311517275
       weight_max: 10000.0
       unidentifiable_count: 23
     - subspace: 1
-      sample_count: 31
+      sample_count: 199
       rank: 23
-      condition_number: 55428.44898694501
-      mean_risk: 0.9157767303981798
-      weight_min: 69.38461524999207
+      condition_number: 2.8962803412437264e+16
+      mean_risk: 0.9175695144675541
+      weight_min: 71.28515585134036
       weight_max: 10000.0
       unidentifiable_count: 23
   metadata:
@@ -120,4 +121,4 @@ identification:
       lambda_count: 5
       jacobian_method: analytic
     parameter_count: 33
-    independent_count: 21
+    independent_count: 23
