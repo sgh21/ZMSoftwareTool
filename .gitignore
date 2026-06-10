@@ -23,3 +23,27 @@ storage/records/**
 !storage/records/.gitkeep
 
 *.log
+
+# PyInstaller packaging artifacts.
+build/
+dist/
+
+# Experiment workspace: keep reproducible scripts/configs/summaries, ignore bulky artifacts.
+experiments/logs/**
+!experiments/logs/.gitkeep
+experiments/outputs/**
+!experiments/outputs/.gitkeep
+experiments/**/__pycache__/
+experiments/**/*.py[cod]
+experiments/**/*.log
+experiments/**/*.tmp
+experiments/**/*.cache
+experiments/**/*.sqlite
+experiments/**/*.db
+experiments/**/*.ckpt
+experiments/**/*.pt
+experiments/**/*.pth
+experiments/**/*.onnx
+experiments/**/*.h5
+experiments/**/*.pkl
+experiments/**/*.pickle

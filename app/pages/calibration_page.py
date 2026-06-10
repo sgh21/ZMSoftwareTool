@@ -14,11 +14,9 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QProgressDialog,
     QPushButton,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -393,6 +391,8 @@ class CalibrationPage(QWidget):
             saved = save_identification_result(
                 yaml_path,
                 result.parameter_values,
+                nominal_robot=result.nominal_robot,
+                identified_robot=result.identified_robot,
                 fit_rmse_mm=result.rmse_mm,
                 fit_max_error_mm=result.max_error_mm,
                 position_error_rmse_mm=result.position_error_rmse_mm,
@@ -499,6 +499,8 @@ class CalibrationPage(QWidget):
             saved = save_identification_result(
                 path,
                 result.parameter_values,
+                nominal_robot=result.nominal_robot,
+                identified_robot=result.identified_robot,
                 fit_rmse_mm=result.rmse_mm,
                 fit_max_error_mm=result.max_error_mm,
                 position_error_rmse_mm=result.position_error_rmse_mm,

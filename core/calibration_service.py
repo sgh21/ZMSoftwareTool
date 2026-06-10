@@ -16,8 +16,11 @@ from typing import Any, Iterable
 
 import numpy as np
 import yaml
+from scipy.optimize import least_squares
+from scipy.spatial.transform import Rotation
 
 from core.accuracy_evaluator import evaluate_position_errors
+from core.health_evaluator import evaluate_positioning_health
 
 
 def _prepare_imports() -> None:
@@ -32,32 +35,31 @@ def _prepare_imports() -> None:
 
 _prepare_imports()
 
-from core.calibration.bayesian_calibration_pipeline.core.data_io import load_dataset
-from core.calibration.bayesian_calibration_pipeline.core.dynamic_identifiability import (
+from core.calibration.bayesian_calibration_pipeline.core.data_io import load_dataset  # noqa: E402
+from core.calibration.bayesian_calibration_pipeline.core.dynamic_identifiability import (  # noqa: E402
     SubspaceIdentifiabilityPartition,
     build_identifiability_subspace_partition,
     compute_pose_identifiability_metrics,
     fit_subspace_sequential_l2,
 )
-from core.calibration.bayesian_calibration_pipeline.core.geometric import (
+from core.calibration.bayesian_calibration_pipeline.core.geometric import (  # noqa: E402
     select_geometric_parameters,
 )
-from core.calibration.bayesian_calibration_pipeline.core.parameters import (
+from core.calibration.bayesian_calibration_pipeline.core.parameters import (  # noqa: E402
     ErrorParameter,
     build_error_parameters,
     parameter_scales,
     vector_to_named_dict,
     zero_error_vector,
 )
-from core.calibration.bayesian_calibration_pipeline.core.redundancy import output_jacobian
-from core.calibration.bayesian_calibration_pipeline.core.regularization import (
+from core.calibration.bayesian_calibration_pipeline.core.redundancy import output_jacobian  # noqa: E402
+from core.calibration.bayesian_calibration_pipeline.core.regularization import (  # noqa: E402
     RegularizedLMResult,
-    fit_l2_lm,
     make_lambda_grid,
     random_folds,
     select_independent_parameters,
 )
-from core.calibration.bayesian_calibration_pipeline.core.robot_model import (
+from core.calibration.bayesian_calibration_pipeline.core.robot_model import (  # noqa: E402
     MultiSourceRobotModel,
     load_nominal_robot,
 )
@@ -132,6 +134,8 @@ class CalibrationResult:
     active_indices: list[int] = field(default_factory=list)
     subspace_summary: dict[str, Any] = field(default_factory=dict)
     dataset_paths: list[str] = field(default_factory=list)
+    nominal_robot: dict[str, Any] = field(default_factory=dict)
+    identified_robot: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -163,6 +167,7 @@ class CalibrationService:
         self.project_root = Path(project_root or Path.cwd()).resolve()
         self.nominal_config_path = self._resolve_nominal_config_path(nominal_config_path)
         nominal = load_nominal_robot(_load_nominal_config(self.nominal_config_path))
+        self._nominal_config_signature = _file_signature(self.nominal_config_path)
         self._model = MultiSourceRobotModel(nominal)
         self._full_parameters = build_error_parameters()
         self._geometric_parameters = select_geometric_parameters(self._full_parameters)
@@ -171,6 +176,9 @@ class CalibrationService:
         self._active_parameter_values = vector_to_named_dict(
             self._active_error_vector, self._geometric_parameters
         )
+        self._active_identified_robot: dict[str, Any] | None = None
+        self._active_identified_model: MultiSourceRobotModel | None = None
+        self._active_parameter_source_path: Path | None = None
         self._active_confidence = 0.0
 
     @property
@@ -189,6 +197,26 @@ class CalibrationService:
     def active_confidence(self) -> float:
         return float(self._active_confidence)
 
+    def reload_nominal_parameters(self, nominal_config_path: str | Path | None = None) -> None:
+        """Reload the nominal MD-H/base/tool parameters used by live calculations."""
+        if nominal_config_path is not None:
+            self.nominal_config_path = Path(nominal_config_path).resolve()
+        elif self.nominal_config_path is None:
+            self.nominal_config_path = self._resolve_nominal_config_path(None)
+        nominal = load_nominal_robot(_load_nominal_config(self.nominal_config_path))
+        self._model = MultiSourceRobotModel(nominal)
+        self._nominal_config_signature = _file_signature(self.nominal_config_path)
+
+    def reload_nominal_parameters_if_changed(self) -> bool:
+        """Reload nominal parameters when the configured YAML file changed."""
+        if self.nominal_config_path is None:
+            self.nominal_config_path = self._resolve_nominal_config_path(None)
+        current_signature = _file_signature(self.nominal_config_path)
+        if current_signature == self._nominal_config_signature:
+            return False
+        self.reload_nominal_parameters()
+        return True
+
     def compute_nominal_position(
         self,
         joint_angles: list[float] | np.ndarray,
@@ -196,9 +224,34 @@ class CalibrationService:
         joint_unit: str = "auto",
     ) -> np.ndarray:
         """Compute nominal TCP position from configurable nominal MD-H parameters."""
-        angles = normalize_joint_configs(np.asarray(joint_angles, dtype=float).reshape(1, 6), joint_unit)
+        self.reload_nominal_parameters_if_changed()
+        angles = normalize_joint_configs(
+            np.asarray(joint_angles, dtype=float).reshape(1, 6),
+            joint_unit,
+        )
         zero = zero_error_vector(self._geometric_parameters)
         return self._model.position(angles[0], zero, self._geometric_parameters)
+
+    def compute_nominal_pose(
+        self,
+        joint_angles: list[float] | np.ndarray,
+        *,
+        joint_unit: str = "auto",
+    ) -> np.ndarray:
+        """Compute nominal TCP pose ``x, y, z, rx, ry, rz`` from joint angles.
+
+        Position is returned in meters and orientation in intrinsic xyz Euler
+        radians, matching the nominal model transform helper.
+        """
+        self.reload_nominal_parameters_if_changed()
+        angles = normalize_joint_configs(
+            np.asarray(joint_angles, dtype=float).reshape(1, 6),
+            joint_unit,
+        )
+        zero = zero_error_vector(self._geometric_parameters)
+        transform = self._model.transform(angles[0], zero, self._geometric_parameters)
+        rpy = Rotation.from_matrix(transform[:3, :3]).as_euler("xyz")
+        return np.concatenate([transform[:3, 3], rpy])
 
     def compute_nominal_positions(
         self,
@@ -207,9 +260,58 @@ class CalibrationService:
         joint_unit: str = "auto",
     ) -> np.ndarray:
         """Compute nominal TCP positions for multiple joint configurations."""
+        self.reload_nominal_parameters_if_changed()
         joints = normalize_joint_configs(joint_configs, joint_unit)
         zero = zero_error_vector(self._geometric_parameters)
         return self._model.batch_positions(joints, zero, self._geometric_parameters)
+
+    def solve_nominal_joint_angles_for_pose(
+        self,
+        pose_xyzrpy: list[float] | np.ndarray,
+        *,
+        initial_joint_angles: list[float] | np.ndarray | None = None,
+        initial_unit: str = "auto",
+        output_unit: str = "degrees",
+        max_nfev: int = 80,
+    ) -> np.ndarray:
+        """Estimate one nominal joint configuration for a target TCP pose.
+
+        This is a local least-squares helper for workstation pose previews.  It
+        is deliberately small and is not used by the S1 identification path.
+        """
+        self.reload_nominal_parameters_if_changed()
+        target = np.asarray(pose_xyzrpy, dtype=float).reshape(6)
+        if initial_joint_angles is None:
+            initial_joint_angles = np.zeros(6, dtype=float)
+            initial_unit = "radians"
+        initial = normalize_joint_configs(
+            np.asarray(initial_joint_angles, dtype=float).reshape(1, 6),
+            initial_unit,
+        )[0]
+        target_rotation = Rotation.from_euler("xyz", target[3:]).as_matrix()
+        zero = zero_error_vector(self._geometric_parameters)
+
+        def residual(joint_values: np.ndarray) -> np.ndarray:
+            transform = self._model.transform(joint_values, zero, self._geometric_parameters)
+            position_error = transform[:3, 3] - target[:3]
+            rotation_error = (
+                Rotation.from_matrix(target_rotation.T @ transform[:3, :3]).as_rotvec()
+            )
+            return np.concatenate([position_error, 0.25 * rotation_error])
+
+        result = least_squares(
+            residual,
+            initial,
+            method="trf",
+            max_nfev=max(10, int(max_nfev)),
+            xtol=1.0e-9,
+            ftol=1.0e-9,
+            gtol=1.0e-9,
+        )
+        output = np.asarray(result.x, dtype=float).reshape(6)
+        if (output_unit or "radians").lower() in {"deg", "degree", "degrees"}:
+            return np.rad2deg(output)
+        return output
 
     def compute_predicted_position(
         self,
@@ -218,31 +320,40 @@ class CalibrationService:
         *,
         joint_unit: str = "auto",
         confidence: float | None = None,
+        tolerance_mm: float | None = None,
     ) -> CurrentAccuracyState:
         """Predict actual TCP position and current positioning error.
 
         The positioning error is defined as:
         ``identified_model_position - nominal_model_position``.
         """
-        vector = (
-            self.error_vector_from_values(parameter_values)
-            if parameter_values is not None
-            else self._active_error_vector
-        )
+        if parameter_values is None:
+            self.reload_nominal_parameters_if_changed()
+        elif parameter_values is not None:
+            self.reload_nominal_parameters_if_changed()
         conf = self._active_confidence if confidence is None else float(confidence)
-        joints = normalize_joint_configs(np.asarray(joint_angles, dtype=float).reshape(1, 6), joint_unit)
+        joints = normalize_joint_configs(
+            np.asarray(joint_angles, dtype=float).reshape(1, 6),
+            joint_unit,
+        )
         zero = zero_error_vector(self._geometric_parameters)
         nominal = self._model.position(joints[0], zero, self._geometric_parameters)
-        predicted = self._model.position(joints[0], vector, self._geometric_parameters)
+        if parameter_values is not None:
+            identified_model = self._model_from_error_parameters(parameter_values)
+        else:
+            identified_model = self._active_identified_model or self._model
+        predicted = identified_model.position(joints[0], zero, self._geometric_parameters)
         error = predicted - nominal
         thresholds = self._load_thresholds()
-        tolerance_m = thresholds["position_rms_limit_mm"] / 1000.0
+        limit_mm = (
+            thresholds["position_rms_limit_mm"]
+            if tolerance_mm is None
+            else max(float(tolerance_mm), 0.0)
+        )
+        tolerance_m = limit_mm / 1000.0
         metrics = evaluate_position_errors(error.reshape(1, 3), tolerance_m)
         norm_mm = float(np.linalg.norm(error) * 1000.0)
-        health_score = _score_from_error(norm_mm, thresholds["position_rms_limit_mm"])
-        health_level = (
-            "good" if health_score >= 80.0 else "warning" if health_score >= 60.0 else "critical"
-        )
+        health = evaluate_positioning_health(norm_mm, limit_mm)
         return CurrentAccuracyState(
             nominal_position=nominal,
             predicted_position=predicted,
@@ -252,9 +363,9 @@ class CalibrationService:
             max_error_mm=float(metrics.max_error * 1000.0),
             over_tolerance_rate=float(metrics.over_tolerance_rate),
             confidence=float(conf),
-            health_score=float(health_score),
-            health_level=health_level,
-            health_message=f"health={health_level}, score={health_score:.1f}",
+            health_score=float(health.score),
+            health_level=health.level,
+            health_message=health.message,
         )
 
     def load_calibration_data(self, path: str | Path) -> dict[str, np.ndarray]:
@@ -336,7 +447,11 @@ class CalibrationService:
                 options=opts,
             )
             if result.success and activate:
-                self.set_active_parameters(result.parameter_values, confidence=result.confidence)
+                self.set_active_parameters(
+                    result.parameter_values,
+                    confidence=result.confidence,
+                    identified_robot=result.identified_robot,
+                )
             return result
         except Exception as exc:  # noqa: BLE001
             return CalibrationResult(False, f"S1 identification failed: {exc}", method="S1")
@@ -365,24 +480,68 @@ class CalibrationService:
         parameter_values: dict[str, float],
         *,
         confidence: float = 100.0,
+        identified_robot: dict[str, Any] | None = None,
     ) -> None:
-        """Set the active identified parameter model used for live prediction."""
+        """Set the active complete identified model used for live prediction."""
+        self._active_parameter_source_path = None
         self._active_error_vector = self.error_vector_from_values(parameter_values)
         self._active_parameter_values = vector_to_named_dict(
             self._active_error_vector, self._geometric_parameters
         )
+        robot = (
+            identified_robot
+            if identified_robot is not None
+            else self._identified_robot_from_error_parameters(parameter_values)
+        )
+        self._active_identified_robot = _plain_dict(robot)
+        self._active_identified_model = self._model_from_nominal_dict(robot)
         self._active_confidence = float(confidence)
 
     def load_active_parameters(self, path: str | Path) -> dict[str, Any]:
         """Load an identified parameter YAML file and activate it."""
         from core.calibration_persistence import load_identification_result
 
-        loaded = load_identification_result(path)
+        parameter_path = Path(path).resolve()
+        self.reload_nominal_parameters_if_changed()
+        loaded = load_identification_result(parameter_path)
         self.set_active_parameters(
             loaded["error_parameters"],
             confidence=float(loaded.get("confidence", 100.0)),
+            identified_robot=loaded["identified_robot"],
         )
+        self._active_parameter_source_path = parameter_path
         return loaded
+
+    def _current_nominal_robot_config(self) -> dict[str, Any]:
+        from core.nominal_parameter_service import NominalParameterService
+
+        service = NominalParameterService(
+            self.project_root,
+            nominal_path=self.nominal_config_path,
+        )
+        return _plain_dict(service.load_nominal())
+
+    def _identified_robot_from_error_parameters(
+        self,
+        parameter_values: dict[str, Any],
+    ) -> dict[str, Any]:
+        from core.nominal_parameter_service import nominal_after_applying_error_parameters
+
+        return nominal_after_applying_error_parameters(
+            self._current_nominal_robot_config(),
+            parameter_values,
+        )
+
+    def _model_from_error_parameters(
+        self,
+        parameter_values: dict[str, Any],
+    ) -> MultiSourceRobotModel:
+        return self._model_from_nominal_dict(
+            self._identified_robot_from_error_parameters(parameter_values)
+        )
+
+    def _model_from_nominal_dict(self, nominal_robot: dict[str, Any]) -> MultiSourceRobotModel:
+        return MultiSourceRobotModel(load_nominal_robot(nominal_robot))
 
     def error_vector_from_values(self, values: dict[str, float] | None) -> np.ndarray:
         """Convert a name/value parameter mapping into the geometry33 vector."""
@@ -629,6 +788,8 @@ class CalibrationService:
         positioning_errors_mm = np.linalg.norm(positioning_vectors, axis=1) * 1000.0
         nominal_errors_mm = np.linalg.norm(nominal - measured, axis=1) * 1000.0
         parameter_values = vector_to_named_dict(fit.vector, self._geometric_parameters)
+        nominal_robot = self._current_nominal_robot_config()
+        identified_robot = self._identified_robot_from_error_parameters(parameter_values)
         best_cv = min(cv_scores, key=lambda row: (row["max_rmse_mm"], row["mean_rmse_mm"], row["lambda"]))
         confidence = _confidence_from_cv(
             float(best_cv["max_rmse_mm"]),
@@ -670,6 +831,8 @@ class CalibrationService:
             active_indices=independent_indices,
             subspace_summary=subspace_summary,
             dataset_paths=dataset_paths,
+            nominal_robot=nominal_robot,
+            identified_robot=identified_robot,
             metadata={
                 "options": {
                     "max_nfev": int(options.max_nfev),
@@ -736,6 +899,31 @@ def _load_nominal_config(path: Path | None) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise TypeError(f"Nominal robot config must be a mapping: {path}")
     return data.get("nominal_robot", data)
+
+
+def _plain_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError("Robot parameters must be a mapping.")
+    return {str(key): _plain_value(item) for key, item in value.items()}
+
+
+def _plain_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _plain_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [_plain_value(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _file_signature(path: Path | None) -> tuple[int, int] | None:
+    if path is None or not path.exists():
+        return None
+    stat = path.stat()
+    return (int(stat.st_mtime_ns), int(stat.st_size))
 
 
 def _coerce_paths(paths: str | Path | Iterable[str | Path]) -> list[Path]:

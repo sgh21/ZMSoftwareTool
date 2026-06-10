@@ -16,6 +16,8 @@ def save_identification_result(
     output_path: str | Path,
     parameter_values: dict[str, float],
     *,
+    nominal_robot: dict[str, Any],
+    identified_robot: dict[str, Any],
     fit_rmse_mm: float,
     fit_max_error_mm: float,
     position_error_rmse_mm: float,
@@ -29,7 +31,7 @@ def save_identification_result(
     subspace_summary: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> Path:
-    """Save identified error parameters and run metadata as YAML."""
+    """Save identified error parameters, full models, and run metadata as YAML."""
     path = Path(output_path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -52,6 +54,8 @@ def save_identification_result(
         },
         "error_parameters": _serialize_parameters(parameter_values),
     }
+    identification["nominal_robot"] = _sanitize_metadata(nominal_robot)
+    identification["identified_robot"] = _sanitize_metadata(identified_robot)
     if cv_scores:
         identification["cv_scores"] = _sanitize_metadata({"rows": cv_scores})["rows"]
     if subspace_summary:
@@ -79,6 +83,12 @@ def load_identification_result(path: str | Path) -> dict[str, Any]:
     if not isinstance(section, dict):
         raise TypeError(f"Identification section must be a mapping: {file_path}")
     metrics = section.get("metrics", {}) if isinstance(section.get("metrics", {}), dict) else {}
+    nominal_robot = _required_mapping(section.get("nominal_robot"), "nominal_robot", file_path)
+    identified_robot = _required_mapping(
+        section.get("identified_robot"),
+        "identified_robot",
+        file_path,
+    )
 
     return {
         "timestamp": str(section.get("timestamp", "")),
@@ -96,6 +106,8 @@ def load_identification_result(path: str | Path) -> dict[str, Any]:
         "rmse_mm": float(metrics.get("rmse_mm", metrics.get("fit_rmse_mm", 0.0))),
         "max_error_mm": float(metrics.get("max_error_mm", metrics.get("fit_max_error_mm", 0.0))),
         "error_parameters": dict(section.get("error_parameters", {})),
+        "nominal_robot": nominal_robot,
+        "identified_robot": identified_robot,
         "cv_scores": list(section.get("cv_scores", [])),
         "subspace_summary": dict(section.get("subspace_summary", {})),
         "metadata": dict(section.get("metadata", {})),
@@ -208,6 +220,8 @@ def save_calibration_result(
         sample_count=joint_count,
         confidence=confidence,
         method=str(extra_metadata.get("method", "S1")) if extra_metadata else "S1",
+        nominal_robot=_required_extra_model(extra_metadata, "nominal_robot"),
+        identified_robot=_required_extra_model(extra_metadata, "identified_robot"),
         extra_metadata=extra_metadata,
     )
 
@@ -242,6 +256,20 @@ def _ensure_history_schema(conn: sqlite3.Connection) -> None:
 
 def _serialize_parameters(values: dict[str, float]) -> dict[str, float]:
     return {str(key): float(_sanitize_value(val)) for key, val in values.items()}
+
+
+def _required_mapping(value: Any, key: str, file_path: Path) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Identification file must contain a complete {key} mapping: {file_path}"
+        )
+    return dict(value)
+
+
+def _required_extra_model(extra_metadata: dict[str, Any] | None, key: str) -> dict[str, Any]:
+    if not extra_metadata or not isinstance(extra_metadata.get(key), dict):
+        raise ValueError(f"extra_metadata must contain {key} for calibration result saving.")
+    return dict(extra_metadata[key])
 
 
 def _sanitize_value(value: Any) -> float:

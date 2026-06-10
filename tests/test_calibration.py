@@ -23,6 +23,7 @@ from core.calibration_persistence import (
     save_identification_result,
 )
 from core.calibration_service import CalibrationResult, CalibrationService, IdentificationOptions
+from core.nominal_parameter_service import nominal_after_applying_error_parameters
 
 
 @pytest.fixture(scope="session")
@@ -68,6 +69,14 @@ def write_pkl(path: Path, joints: np.ndarray, measured: np.ndarray) -> Path:
     with path.open("wb") as file:
         pickle.dump({"joints": joints, "measured_positions": measured}, file)
     return path
+
+
+def model_pair(
+    service: CalibrationService,
+    errors: dict[str, float],
+) -> tuple[dict, dict]:
+    nominal = service._current_nominal_robot_config()
+    return nominal, nominal_after_applying_error_parameters(nominal, errors)
 
 
 def test_nominal_config_file_is_used(tmp_path: Path) -> None:
@@ -157,9 +166,13 @@ def test_identify_from_files_persists_active_model_for_live_prediction(tmp_path:
 
 
 def test_identification_yaml_and_sqlite_history_round_trip(tmp_path: Path) -> None:
+    errors = {"delta_a_1": 1.0e-4}
+    nominal_robot, identified_robot = model_pair(CalibrationService(project_root=tmp_path), errors)
     yaml_path = save_identification_result(
         tmp_path / "result.yaml",
-        {"delta_a_1": 1.0e-4},
+        errors,
+        nominal_robot=nominal_robot,
+        identified_robot=identified_robot,
         fit_rmse_mm=0.1,
         fit_max_error_mm=0.2,
         position_error_rmse_mm=0.3,
@@ -175,6 +188,12 @@ def test_identification_yaml_and_sqlite_history_round_trip(tmp_path: Path) -> No
     assert loaded["method"] == "S1"
     assert loaded["error_parameters"]["delta_a_1"] == pytest.approx(1.0e-4)
     assert loaded["position_error_rmse_mm"] == pytest.approx(0.3)
+    assert loaded["nominal_robot"]["mdh"]["a"][0] == pytest.approx(
+        nominal_robot["mdh"]["a"][0]
+    )
+    assert loaded["identified_robot"]["mdh"]["a"][0] == pytest.approx(
+        nominal_robot["mdh"]["a"][0] + 1.0e-4
+    )
 
     db_path = tmp_path / "history.sqlite"
     row_id = record_identification_history(
@@ -219,6 +238,8 @@ class FakeCalibrationService:
         nominal = self._real.compute_nominal_positions(joint_configs, joint_unit="radians")
         predicted = nominal + np.array([0.0001, 0.0, 0.0])
         parameters = self._real.geometric_parameters
+        errors = {"delta_a_1": 1.0e-4}
+        nominal_robot, identified_robot = model_pair(self._real, errors)
         return CalibrationResult(
             success=True,
             message="ok",
@@ -231,7 +252,7 @@ class FakeCalibrationService:
             error_vector=np.zeros(len(parameters)),
             error_parameters=parameters,
             parameter_names=[param.name for param in parameters],
-            parameter_values={"delta_a_1": 1.0e-4},
+            parameter_values=errors,
             rmse_mm=0.05,
             max_error_mm=0.08,
             position_error_rmse_mm=0.1,
@@ -241,6 +262,8 @@ class FakeCalibrationService:
             selected_lambda=1.0e-10,
             cv_scores=[{"lambda": 1.0e-10, "mean_rmse_mm": 0.05, "max_rmse_mm": 0.08}],
             dataset_paths=[str(path) for path in kwargs.get("dataset_paths", [])],
+            nominal_robot=nominal_robot,
+            identified_robot=identified_robot,
         )
 
 
@@ -273,9 +296,13 @@ def test_initialization_page_realtime_accuracy_labels_are_reasonable(
     qapp: QApplication, tmp_path: Path
 ) -> None:
     (tmp_path / "config").mkdir()
+    errors = {"delta_a_2": 1.0e-3}
+    nominal_robot, identified_robot = model_pair(CalibrationService(project_root=tmp_path), errors)
     save_identification_result(
         tmp_path / "config" / "calibration_result.yaml",
-        {"delta_a_2": 1.0e-3},
+        errors,
+        nominal_robot=nominal_robot,
+        identified_robot=identified_robot,
         fit_rmse_mm=0.1,
         fit_max_error_mm=0.2,
         position_error_rmse_mm=1.0,
