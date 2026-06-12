@@ -120,7 +120,7 @@ def test_joint_input_uses_nominal_model_for_tcp_pose(tmp_path: Path) -> None:
 
 def test_workstation_preview_outputs_errors_and_alarm_status(tmp_path: Path) -> None:
     calibration_service = CalibrationService(project_root=tmp_path)
-    calibration_service.set_active_parameters({"delta_Btx": 0.001}, confidence=96.0)
+    calibration_service.set_active_parameters({"delta_d_1": 0.001}, confidence=96.0)
     service = WorkstationVerificationService(
         tmp_path,
         calibration_service=calibration_service,
@@ -146,7 +146,7 @@ def test_workstation_dialog_uses_selector_and_separate_preview_window(
     tmp_path: Path,
 ) -> None:
     calibration_service = CalibrationService(project_root=tmp_path)
-    calibration_service.set_active_parameters({"delta_Btx": 0.001}, confidence=96.0)
+    calibration_service.set_active_parameters({"delta_d_1": 0.001}, confidence=96.0)
     service = WorkstationVerificationService(
         tmp_path,
         calibration_service=calibration_service,
@@ -240,7 +240,7 @@ def test_health_value_updates_when_threshold_changes(
     tmp_path: Path,
 ) -> None:
     write_nominal(tmp_path)
-    errors = {"delta_Btx": 0.001}
+    errors = {"delta_d_1": 0.001}
     save_identification_result(
         tmp_path / "config" / "calibration_result.yaml",
         errors,

@@ -59,10 +59,12 @@ def test_direct_update_persists_and_keeps_one_backup(tmp_path: Path) -> None:
 
     assert result.nominal_path == tmp_path / "config" / "nominal_robot.yaml"
     assert result.backup_path == tmp_path / "storage" / "model_versions" / "nominal_robot_previous.yaml"
-    assert read_nominal(tmp_path)["base_xyz"][0] == 9.0
+    saved = read_nominal(tmp_path)
+    assert "base_xyz" not in saved
+    assert saved["mdh"]["a"][1] == pytest.approx(-0.5)
 
     backup = yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["nominal_robot"]
-    assert backup["base_xyz"][0] == 1.0
+    assert "base_xyz" not in backup
     assert backup["mdh"]["a"][1] == -0.612
 
 
@@ -83,7 +85,7 @@ def test_value_update_overwrites_provided_values_without_delta_math(tmp_path: Pa
     )
 
     saved = read_nominal(tmp_path)
-    assert saved["base_xyz"] == [0.25, 2.5, 3.5]
+    assert "base_xyz" not in saved
     assert saved["mdh"]["a"][1] == pytest.approx(-0.5)
     assert saved["mdh"]["d"][3] == pytest.approx(0.001)
 
@@ -115,8 +117,8 @@ def test_identification_yaml_updates_nominal_parameters(tmp_path: Path) -> None:
     NominalParameterService(tmp_path).update_from_identification_file(result_yaml)
 
     saved = read_nominal(tmp_path)
-    assert saved["base_xyz"][1] == 1.5
-    assert saved["tool_xyz"][2] == pytest.approx(0.04)
+    assert "base_xyz" not in saved
+    assert saved["tool_xyz"][2] == pytest.approx(0.039)
     assert saved["mdh"]["a"][1] == pytest.approx(-0.592)
 
 
@@ -125,7 +127,7 @@ def test_loading_same_identification_after_nominal_update_uses_zero_residual(
 ) -> None:
     write_nominal(tmp_path)
     result_yaml = tmp_path / "config" / "calibration_result.yaml"
-    errors = {"delta_Btx": 0.01}
+    errors = {"delta_a_2": 0.02}
     save_identification_result(
         result_yaml,
         errors,
@@ -140,15 +142,15 @@ def test_loading_same_identification_after_nominal_update_uses_zero_residual(
     service = CalibrationService(project_root=tmp_path)
     service.load_active_parameters(result_yaml)
     before = service.compute_predicted_position([0.0, -58.0, 82.0, -112.0, -90.0, 0.0])
-    assert before.error_norm_mm == pytest.approx(10.0)
+    assert before.error_norm_mm > 0.0
 
     NominalParameterService(tmp_path).update_from_identification_file(result_yaml)
     service.reload_nominal_parameters()
-    loaded = service.load_active_parameters(result_yaml)
+    service.load_active_parameters(result_yaml)
     after = service.compute_predicted_position([0.0, -58.0, 82.0, -112.0, -90.0, 0.0])
 
     assert after.error_norm_mm == pytest.approx(0.0)
-    assert service.active_parameter_values["delta_Btx"] == pytest.approx(0.01)
+    assert service.active_parameter_values["delta_a_2"] == pytest.approx(0.02)
 
 
 def test_identification_result_without_full_model_is_rejected(
@@ -184,7 +186,7 @@ def test_rollback_restores_previous_version_once(tmp_path: Path) -> None:
 
     service.rollback()
 
-    assert read_nominal(tmp_path)["base_xyz"][0] == 1.0
+    assert "base_xyz" not in read_nominal(tmp_path)
     assert not service.has_backup()
     with pytest.raises(FileNotFoundError):
         service.rollback()

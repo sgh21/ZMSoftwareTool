@@ -1,0 +1,117 @@
+{
+  "method": "TSAI",
+  "num_total": 51,
+  "num_valid_by_mask": 33,
+  "num_used_in_calib": 33,
+  "used_images": [
+    "calib_00.jpg",
+    "calib_01.jpg",
+    "calib_02.jpg",
+    "calib_04.jpg",
+    "calib_05.jpg",
+    "calib_07.jpg",
+    "calib_08.jpg",
+    "calib_09.jpg",
+    "calib_10.jpg",
+    "calib_12.jpg",
+    "calib_14.jpg",
+    "calib_15.jpg",
+    "calib_16.jpg",
+    "calib_19.jpg",
+    "calib_20.jpg",
+    "calib_21.jpg",
+    "calib_22.jpg",
+    "calib_24.jpg",
+    "calib_25.jpg",
+    "calib_26.jpg",
+    "calib_27.jpg",
+    "calib_31.jpg",
+    "calib_32.jpg",
+    "calib_33.jpg",
+    "calib_35.jpg",
+    "calib_36.jpg",
+    "calib_37.jpg",
+    "calib_38.jpg",
+    "calib_43.jpg",
+    "calib_45.jpg",
+    "calib_46.jpg",
+    "calib_48.jpg",
+    "calib_50.jpg"
+  ],
+  "reproj_mean_px_mean": 0.06254895465107133,
+  "reproj_mean_px_std": 0.011876813778967474,
+  "T_tool_cam": [
+    [
+      0.999934171408886,
+      0.003458111176208542,
+      -0.010940489747609923,
+      4.948237840735319e-05
+    ],
+    [
+      -0.0034073241068876274,
+      0.9999833494358378,
+      0.0046573590707355015,
+      -0.08718159771301344
+    ],
+    [
+      0.01095641324773754,
+      -0.0046197746888913755,
+      0.9999293048463819,
+      0.0725562064109466
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "T_base_board": [
+    [
+      -0.005221233534956539,
+      -0.999985275975849,
+      -0.0014786993872787503,
+      -0.7240471464589502
+    ],
+    [
+      -0.9999855212697364,
+      0.005219297644151054,
+      0.0013100316769708504,
+      -0.1438416250497083
+    ],
+    [
+      -0.0013022946158043692,
+      0.001485517958912837,
+      -0.9999980486306593,
+      0.04506448475842545
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "board_pose_consistency": {
+    "translation_xyz_std_mm": [
+      0.1309925212278717,
+      0.09871252860287018,
+      0.0672867386511511
+    ],
+    "translation_to_mean_mm_mean": 0.15932452092417504,
+    "translation_to_mean_mm_std": 0.0777586403648965,
+    "translation_to_mean_mm_max": 0.3880176884074034,
+    "rotation_to_mean_deg_mean": 0.026352629679584908,
+    "rotation_to_mean_deg_std": 0.011885135618516021,
+    "rotation_to_mean_deg_max": 0.05467748870442167
+  },
+  "axxb_residual_consistency": {
+    "pair_count": 528,
+    "translation_mm_mean": 0.20313268292321582,
+    "translation_mm_std": 0.12677180747852948,
+    "translation_mm_max": 0.6129425267945671,
+    "rotation_deg_mean": 0.037933857317395646,
+    "rotation_deg_std": 0.016872755693934954,
+    "rotation_deg_max": 0.09926852506492839
+  }
+}

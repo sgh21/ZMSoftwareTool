@@ -12,12 +12,11 @@ import yaml
 from core.calibration_persistence import load_identification_result
 
 
-VECTOR3_KEYS = ("base_xyz", "base_rpy", "tool_xyz", "tool_rpy")
+TOOL_VECTOR3_KEYS = ("tool_xyz", "tool_rpy")
+CALIBRATION_FRAME_VECTOR3_KEYS = ("base_xyz", "base_rpy", "tool_xyz", "tool_rpy")
 MDH_KEYS = ("alpha", "a", "d", "theta_offset")
 AXES = ("x", "y", "z")
 DEFAULT_NOMINAL_ROBOT = {
-    "base_xyz": [3.335740524, 1.591246404, -0.475598057],
-    "base_rpy": [0.0189015, -0.0114514, 1.6069778],
     "tool_xyz": [0.0, 0.0, 0.039],
     "tool_rpy": [0.0, 0.0, 0.0],
     "mdh": {
@@ -134,7 +133,11 @@ class NominalParameterService:
             "source_timestamp": loaded.get("timestamp", ""),
             "applied_error_parameter_hash": fingerprint,
         }
-        updated = _normalize_nominal(_unwrap_nominal(loaded["identified_robot"]))
+        identified = _unwrap_nominal(loaded["identified_robot"])
+        updated = _merge_nominal_values(
+            self.load_nominal(),
+            {"nominal_values": {"mdh": identified.get("mdh")}},
+        )
         return self._persist(
             updated,
             mode="identification",
@@ -218,7 +221,11 @@ def nominal_after_applying_error_parameters(
     nominal_data: dict[str, Any],
     parameter_values: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return nominal parameters after absorbing identified error parameters."""
+    """Return nominal parameters after absorbing only identified MD-H errors.
+
+    Base-frame and target-ball offset errors remain calibration-layer data.
+    They are intentionally not folded into the robot nominal FK model.
+    """
     nominal = _normalize_nominal(_unwrap_nominal(nominal_data))
     delta = _normalize_delta({"error_parameters": parameter_values})
     return _add_delta(nominal, delta)
@@ -232,7 +239,7 @@ def nominal_parameter_sets_close(
 ) -> bool:
     left_nominal = _normalize_nominal(_unwrap_nominal(left))
     right_nominal = _normalize_nominal(_unwrap_nominal(right))
-    for key in VECTOR3_KEYS:
+    for key in TOOL_VECTOR3_KEYS:
         if not np.allclose(left_nominal[key], right_nominal[key], atol=atol, rtol=0.0):
             return False
     for key in MDH_KEYS:
@@ -270,7 +277,7 @@ def _normalize_nominal(data: dict[str, Any]) -> dict[str, Any]:
 
     nominal: dict[str, Any] = {
         key: _float_list(data, key, 3, required=True)
-        for key in VECTOR3_KEYS
+        for key in TOOL_VECTOR3_KEYS
     }
     nominal["mdh"] = {
         key: _float_list(mdh, key, 6, required=True)
@@ -295,7 +302,7 @@ def _merge_nominal_values(current: dict[str, Any], data: dict[str, Any]) -> dict
     updated = _plain(_normalize_nominal(_unwrap_nominal(current)))
     has_value = False
 
-    for key in VECTOR3_KEYS:
+    for key in TOOL_VECTOR3_KEYS:
         if key in source:
             updated[key] = _float_list(source, key, 3, required=True)
             has_value = True
@@ -316,7 +323,7 @@ def _merge_nominal_values(current: dict[str, Any], data: dict[str, Any]) -> dict
     if not has_value:
         raise KeyError(
             "nominal_values must contain at least one nominal field: "
-            "base_xyz/base_rpy/tool_xyz/tool_rpy/mdh/joint_limits."
+            "tool_xyz/tool_rpy/mdh/joint_limits."
         )
     return _normalize_nominal(updated)
 
@@ -362,7 +369,7 @@ def _normalize_delta(data: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
-    for key in VECTOR3_KEYS:
+    for key in CALIBRATION_FRAME_VECTOR3_KEYS:
         if key in source:
             delta[key] = _float_list(source, key, 3, required=False)
 
@@ -416,11 +423,8 @@ def _assign_if_present(target: list[float], index: int, source: dict[str, Any], 
 
 def _add_delta(current: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     updated: dict[str, Any] = {
-        key: [
-            float(current[key][index]) + float(delta[key][index])
-            for index in range(3)
-        ]
-        for key in VECTOR3_KEYS
+        key: list(current[key])
+        for key in TOOL_VECTOR3_KEYS
     }
     updated["mdh"] = {
         key: [

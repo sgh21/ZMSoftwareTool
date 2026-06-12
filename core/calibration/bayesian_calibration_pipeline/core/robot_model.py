@@ -46,8 +46,8 @@ def load_nominal_robot(config: dict | None = None) -> RobotParameters:
     cfg = NOMINAL_ROBOT if config is None else config
     mdh = cfg["mdh"]
     nominal = RobotParameters(
-        base_xyz=np.asarray(cfg["base_xyz"], dtype=float).reshape(3),
-        base_rpy=np.asarray(cfg["base_rpy"], dtype=float).reshape(3),
+        base_xyz=np.asarray(cfg.get("base_xyz", [0.0, 0.0, 0.0]), dtype=float).reshape(3),
+        base_rpy=np.asarray(cfg.get("base_rpy", [0.0, 0.0, 0.0]), dtype=float).reshape(3),
         tool_xyz=np.asarray(cfg["tool_xyz"], dtype=float).reshape(3),
         tool_rpy=np.asarray(cfg["tool_rpy"], dtype=float).reshape(3),
         alpha=np.asarray(mdh["alpha"], dtype=float).reshape(6),

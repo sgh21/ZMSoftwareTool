@@ -81,7 +81,7 @@ nominal_values:
     QTest.mouseClick(child(dialog, QPushButton, "nominal_update_save_button"), Qt.LeftButton)
 
     saved = read_nominal(tmp_path)
-    assert saved["base_xyz"] == [0.5, 0.0, 0.0]
+    assert "base_xyz" not in saved
     assert saved["mdh"]["a"][1] == -0.5
 
     rollback_dialog = NominalParameterUpdateDialog(tmp_path)
@@ -90,7 +90,7 @@ nominal_values:
     QTest.mouseClick(rollback_button, Qt.LeftButton)
 
     restored = read_nominal(tmp_path)
-    assert restored["base_xyz"][0] == 1.0
+    assert "base_xyz" not in restored
     assert restored["mdh"]["a"][1] == -0.612
 
 
@@ -100,7 +100,7 @@ def test_nominal_update_dialog_imports_identification_yaml(
 ) -> None:
     write_nominal(tmp_path)
     result_yaml = tmp_path / "config" / "calibration_result.yaml"
-    errors = {"delta_Btx": 0.25, "delta_Ttz": 0.001}
+    errors = {"delta_a_2": 0.02, "delta_Btx": 0.25, "delta_Ttz": 0.001}
     save_identification_result(
         result_yaml,
         errors,
@@ -119,5 +119,6 @@ def test_nominal_update_dialog_imports_identification_yaml(
     QTest.mouseClick(child(dialog, QPushButton, "nominal_update_save_button"), Qt.LeftButton)
 
     saved = read_nominal(tmp_path)
-    assert saved["base_xyz"][0] == 1.25
-    assert saved["tool_xyz"][2] == 0.04
+    assert "base_xyz" not in saved
+    assert saved["tool_xyz"][2] == pytest.approx(0.039)
+    assert saved["mdh"]["a"][1] == pytest.approx(-0.592)

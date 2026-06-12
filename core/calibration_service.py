@@ -20,6 +20,11 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
 from core.accuracy_evaluator import evaluate_position_errors
+from core.calibration_dataset_packager import (
+    default_packed_dataset_path,
+    pack_raw_calibration_pair,
+    split_calibration_input_paths,
+)
 from core.health_evaluator import evaluate_positioning_health
 
 
@@ -55,6 +60,7 @@ from core.calibration.bayesian_calibration_pipeline.core.parameters import (  # 
 from core.calibration.bayesian_calibration_pipeline.core.redundancy import output_jacobian  # noqa: E402
 from core.calibration.bayesian_calibration_pipeline.core.regularization import (  # noqa: E402
     RegularizedLMResult,
+    fit_l2_lm,
     make_lambda_grid,
     random_folds,
     select_independent_parameters,
@@ -95,6 +101,8 @@ class IdentificationOptions:
     seed: int = 20260524
     jacobian_method: str = "analytic"
     lambda_grid: tuple[float, ...] | None = None
+    debug_fast: bool = False
+    fixed_lambda: float = 1.0e-10
 
 
 @dataclass
@@ -198,7 +206,7 @@ class CalibrationService:
         return float(self._active_confidence)
 
     def reload_nominal_parameters(self, nominal_config_path: str | Path | None = None) -> None:
-        """Reload the nominal MD-H/base/tool parameters used by live calculations."""
+        """Reload the nominal MD-H/tool parameters used by live calculations."""
         if nominal_config_path is not None:
             self.nominal_config_path = Path(nominal_config_path).resolve()
         elif self.nominal_config_path is None:
@@ -369,27 +377,46 @@ class CalibrationService:
         )
 
     def load_calibration_data(self, path: str | Path) -> dict[str, np.ndarray]:
-        """Load one pkl identification dataset."""
+        """Load one processed pkl identification dataset."""
         return load_dataset(path)
 
     def load_identification_data(self, paths: str | Path | Iterable[str | Path]) -> dict[str, Any]:
-        """Load and concatenate one or more pkl files into a stable schema."""
+        """Load processed pkl data, or pack one raw CSV/TXT pair before loading."""
         path_list = _coerce_paths(paths)
         if not path_list:
             raise ValueError("At least one identification data file is required.")
-        datasets = [load_dataset(path) for path in path_list]
+        dataset_paths = self._prepare_identification_dataset_paths(path_list)
+        datasets = [load_dataset(path) for path in dataset_paths]
         merged: dict[str, Any] = {
             "joints": np.concatenate([np.asarray(data["joints"], dtype=float) for data in datasets]),
             "measured_positions": np.concatenate(
                 [np.asarray(data["measured_positions"], dtype=float) for data in datasets]
             ),
-            "dataset_paths": [str(path.resolve()) for path in path_list],
+            "dataset_paths": [str(path.resolve()) for path in dataset_paths],
             "sample_counts": [int(len(data["joints"])) for data in datasets],
         }
+        if dataset_paths != path_list:
+            merged["raw_dataset_paths"] = [str(path.resolve()) for path in path_list]
         for key in ("payloads", "directions", "joint_torques"):
             if all(key in data for data in datasets):
                 merged[key] = np.concatenate([np.asarray(data[key], dtype=float) for data in datasets])
         return merged
+
+    def _prepare_identification_dataset_paths(self, paths: list[Path]) -> list[Path]:
+        pkl_paths, csv_paths, txt_paths = split_calibration_input_paths(paths)
+        if pkl_paths and not csv_paths and not txt_paths:
+            return pkl_paths
+        if not pkl_paths and len(csv_paths) == 1 and len(txt_paths) == 1:
+            output_path = default_packed_dataset_path(
+                self.project_root,
+                csv_paths[0],
+                txt_paths[0],
+            )
+            return [pack_raw_calibration_pair(csv_paths[0], txt_paths[0], output_path)]
+        raise ValueError(
+            "Identification data must be either one or more .pkl/.pickle files, "
+            "or exactly one raw .csv file plus one raw .txt file."
+        )
 
     def run_calibration(
         self,
@@ -426,10 +453,11 @@ class CalibrationService:
         options: IdentificationOptions | None = None,
         joint_unit: str = "auto",
         activate: bool = False,
+        initial_parameter_path: str | Path | None = None,
     ) -> CalibrationResult:
         """Run S1 identification and return model, fit, and positioning metrics."""
         opts = options or IdentificationOptions()
-        if opts.method.upper() != "S1":
+        if _method_key(opts) not in {"S1", "S1_DEBUG", "DEBUG", "DEBUG_FAST"}:
             return CalibrationResult(False, f"Unsupported identification method: {opts.method}")
 
         try:
@@ -438,6 +466,21 @@ class CalibrationService:
             _validate_dataset(joints, measured)
             payload_array = _subset_or_none(payloads, np.arange(len(joints)), len(joints))
             direction_array = _subset_or_none(directions, np.arange(len(joints)), len(joints))
+            initial_path = (
+                Path(initial_parameter_path).resolve()
+                if initial_parameter_path is not None
+                else None
+            )
+            initial_nominal_robot = (
+                self.load_initial_nominal_robot(initial_path)
+                if initial_path is not None
+                else None
+            )
+            run_model = (
+                self._model_from_nominal_dict(initial_nominal_robot)
+                if initial_nominal_robot is not None
+                else self._model
+            )
             result = self._run_s1(
                 joints,
                 measured,
@@ -445,6 +488,10 @@ class CalibrationService:
                 directions=direction_array,
                 dataset_paths=[str(Path(path)) for path in dataset_paths or []],
                 options=opts,
+                model=run_model,
+                nominal_robot=initial_nominal_robot,
+                initial_vector=None,
+                initial_parameter_path=initial_path,
             )
             if result.success and activate:
                 self.set_active_parameters(
@@ -454,13 +501,18 @@ class CalibrationService:
                 )
             return result
         except Exception as exc:  # noqa: BLE001
-            return CalibrationResult(False, f"S1 identification failed: {exc}", method="S1")
+            return CalibrationResult(
+                False,
+                f"{_result_method(opts)} identification failed: {exc}",
+                method=_result_method(opts),
+            )
 
     def identify_from_files(
         self,
         paths: str | Path | Iterable[str | Path],
         *,
         options: IdentificationOptions | None = None,
+        initial_parameter_path: str | Path | None = None,
     ) -> CalibrationResult:
         """Convenience wrapper: load pkl files, concatenate, and run S1."""
         data = self.load_identification_data(paths)
@@ -473,6 +525,7 @@ class CalibrationService:
             options=options,
             joint_unit="auto",
             activate=True,
+            initial_parameter_path=initial_parameter_path,
         )
 
     def set_active_parameters(
@@ -494,7 +547,14 @@ class CalibrationService:
             else self._identified_robot_from_error_parameters(parameter_values)
         )
         self._active_identified_robot = _plain_dict(robot)
-        self._active_identified_model = self._model_from_nominal_dict(robot)
+        if identified_robot is not None:
+            self._active_identified_model = self._model_from_identified_robot_for_fk(
+                identified_robot
+            )
+        else:
+            self._active_identified_model = self._model_from_error_parameters(
+                self._active_parameter_values
+            )
         self._active_confidence = float(confidence)
 
     def load_active_parameters(self, path: str | Path) -> dict[str, Any]:
@@ -524,11 +584,12 @@ class CalibrationService:
     def _identified_robot_from_error_parameters(
         self,
         parameter_values: dict[str, Any],
+        nominal_robot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from core.nominal_parameter_service import nominal_after_applying_error_parameters
 
         return nominal_after_applying_error_parameters(
-            self._current_nominal_robot_config(),
+            nominal_robot if nominal_robot is not None else self._current_nominal_robot_config(),
             parameter_values,
         )
 
@@ -540,6 +601,19 @@ class CalibrationService:
             self._identified_robot_from_error_parameters(parameter_values)
         )
 
+    def _model_from_identified_robot_for_fk(
+        self,
+        identified_robot: dict[str, Any],
+    ) -> MultiSourceRobotModel:
+        current = self._current_nominal_robot_config()
+        source = _plain_dict(identified_robot)
+        mdh = source.get("mdh")
+        if not isinstance(mdh, dict):
+            raise KeyError("identified_robot.mdh is required for robot FK.")
+        robot = _plain_dict(current)
+        robot["mdh"] = _plain_dict(mdh)
+        return self._model_from_nominal_dict(robot)
+
     def _model_from_nominal_dict(self, nominal_robot: dict[str, Any]) -> MultiSourceRobotModel:
         return MultiSourceRobotModel(load_nominal_robot(nominal_robot))
 
@@ -550,6 +624,136 @@ class CalibrationService:
         for index, parameter in enumerate(self._geometric_parameters):
             vector[index] = float(source.get(parameter.name, 0.0))
         return vector
+
+    def load_initial_parameter_vector(self, path: str | Path) -> np.ndarray:
+        """Load initial calibration parameters as a geometry error vector.
+
+        The YAML may contain ``initial_parameters``/``initial_robot`` for a
+        standalone initial model, ``identified_robot`` from a previous result,
+        ``nominal_robot`` for direct model values, or flat ``error_parameters``.
+        Absolute MD-H, base, and hand-eye/tool values are converted into deltas
+        relative to the current nominal robot.
+        """
+        parameter_path = Path(path).resolve()
+        data = yaml.safe_load(parameter_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise TypeError(f"Initial parameter YAML must be a mapping: {parameter_path}")
+        values = self._initial_parameter_values_from_document(data)
+        return self.error_vector_from_values(values)
+
+    def load_initial_nominal_robot(self, path: str | Path) -> dict[str, Any]:
+        """Load the nominal robot model used as the baseline for identification.
+
+        ``initial_parameter_path`` is a nominal-parameter file, not an initial
+        error vector.  The S1 optimizer estimates errors relative to this
+        model, so the identified model saved after fitting is:
+        ``initial_nominal_robot + identified_error_parameters``.
+
+        For backward compatibility, a document containing only flat
+        ``error_parameters`` is treated as a previous delta from the current
+        nominal model and converted into a nominal baseline first.
+        """
+        parameter_path = Path(path).resolve()
+        data = yaml.safe_load(parameter_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise TypeError(f"Initial nominal YAML must be a mapping: {parameter_path}")
+        return self._initial_nominal_robot_from_document(data)
+
+    def _initial_parameter_values_from_document(self, data: dict[str, Any]) -> dict[str, float]:
+        values: dict[str, float] = {}
+        flat = _extract_initial_flat_error_parameters(data)
+        if flat:
+            values.update({str(key): float(value or 0.0) for key, value in flat.items()})
+
+        robot = _extract_initial_robot(data)
+        if robot is not None:
+            values.update(self._initial_robot_to_error_values(robot))
+        if not values:
+            raise KeyError(
+                "Initial parameter YAML must contain initial_parameters/initial_robot/"
+                "identified_robot/nominal_robot or error_parameters."
+            )
+        return values
+
+    def _initial_nominal_robot_from_document(self, data: dict[str, Any]) -> dict[str, Any]:
+        robot = _extract_initial_robot(data)
+        if robot is not None:
+            return self._merge_initial_nominal_robot(robot)
+
+        flat = _extract_initial_flat_error_parameters(data)
+        if flat:
+            values = {str(key): float(value or 0.0) for key, value in flat.items()}
+            return self._identified_robot_from_error_parameters(values)
+
+        raise KeyError(
+            "Initial nominal YAML must contain initial_parameters/initial_robot/"
+            "identified_robot/nominal_robot, or previous error_parameters."
+        )
+
+    def _merge_initial_nominal_robot(self, robot: dict[str, Any]) -> dict[str, Any]:
+        current = _plain_dict(self._current_nominal_robot_config())
+        current.setdefault("base_xyz", [0.0, 0.0, 0.0])
+        current.setdefault("base_rpy", [0.0, 0.0, 0.0])
+        source = _plain_dict(robot)
+        merged = _plain_dict(current)
+
+        for source_key, target_key in (
+            ("base_xyz", "base_xyz"),
+            ("base_rpy", "base_rpy"),
+            ("tool_xyz", "tool_xyz"),
+            ("tool_rpy", "tool_rpy"),
+        ):
+            value = _first_initial_vector3(source, source_key)
+            if value is not None:
+                merged[target_key] = _float_array(value, 3, source_key).tolist()
+
+        mdh = source.get("mdh")
+        if isinstance(mdh, dict):
+            target_mdh = _plain_dict(merged.get("mdh", {}))
+            for key in ("alpha", "a", "d", "theta_offset"):
+                if key in mdh:
+                    target_mdh[key] = _float_array(mdh[key], 6, f"mdh.{key}").tolist()
+            merged["mdh"] = target_mdh
+
+        if "joint_limits" in source:
+            merged["joint_limits"] = _plain_value(source["joint_limits"])
+        return merged
+
+    def _initial_robot_to_error_values(self, robot: dict[str, Any]) -> dict[str, float]:
+        current = self._current_nominal_robot_config()
+        values: dict[str, float] = {}
+        mdh = robot.get("mdh")
+        if isinstance(mdh, dict):
+            for key, prefix in (
+                ("alpha", "delta_alpha"),
+                ("a", "delta_a"),
+                ("d", "delta_d"),
+                ("theta_offset", "delta_theta"),
+            ):
+                if key in mdh:
+                    incoming = _float_array(mdh[key], 6, f"mdh.{key}")
+                    baseline = _float_array(current["mdh"][key], 6, f"current.mdh.{key}")
+                    for index, value in enumerate(incoming - baseline, start=1):
+                        values[f"{prefix}_{index}"] = float(value)
+
+        for source_key, prefix in (
+            ("base_xyz", "delta_Bt"),
+            ("base_rpy", "delta_Bu"),
+            ("tool_xyz", "delta_Tt"),
+            ("tool_rpy", "delta_Tu"),
+        ):
+            source_value = _first_initial_vector3(robot, source_key)
+            if source_value is None:
+                continue
+            incoming = _float_array(source_value, 3, source_key)
+            baseline = (
+                np.zeros(3, dtype=float)
+                if source_key.startswith("base_")
+                else _float_array(current[source_key], 3, f"current.{source_key}")
+            )
+            for axis, value in zip(("x", "y", "z"), incoming - baseline, strict=True):
+                values[f"{prefix}{axis}"] = float(value)
+        return values
 
     def compute_error_metrics(
         self,
@@ -578,16 +782,36 @@ class CalibrationService:
         directions: np.ndarray | None,
         dataset_paths: list[str],
         options: IdentificationOptions,
+        model: MultiSourceRobotModel,
+        nominal_robot: dict[str, Any] | None,
+        initial_vector: np.ndarray | None,
+        initial_parameter_path: Path | None,
     ) -> CalibrationResult:
         parameters = self._geometric_parameters
         zero = zero_error_vector(parameters)
-        nominal = self._model.batch_positions(joints, zero, parameters, payloads, directions)
+        nominal = model.batch_positions(joints, zero, parameters, payloads, directions)
         active = list(range(len(parameters)))
+        start_vector = _initial_vector_or_zero(initial_vector, len(parameters))
+
+        if _debug_fast_enabled(options):
+            return self._run_s1_debug_fast(
+                joints,
+                measured,
+                nominal,
+                payloads=payloads,
+                directions=directions,
+                dataset_paths=dataset_paths,
+                options=options,
+                model=model,
+                nominal_robot=nominal_robot,
+                initial_vector=start_vector,
+                initial_parameter_path=initial_parameter_path,
+            )
 
         independent_indices: list[int] = []
         try:
             redundancy = select_independent_parameters(
-                self._model,
+                model,
                 joints,
                 parameters,
                 payloads=payloads,
@@ -600,9 +824,25 @@ class CalibrationService:
         except Exception:
             independent_indices = []
 
-        partition = self._build_s1_partition(joints, zero, payloads, directions, options)
+        partition = self._build_s1_partition(
+            joints,
+            start_vector,
+            payloads,
+            directions,
+            options,
+            model=model,
+        )
         lambdas = _lambda_grid(options)
-        cv_scores = self._evaluate_s1_cv(joints, measured, payloads, directions, lambdas, options)
+        cv_scores = self._evaluate_s1_cv(
+            joints,
+            measured,
+            payloads,
+            directions,
+            lambdas,
+            options,
+            start_vector,
+            model=model,
+        )
         selected = min(
             cv_scores,
             key=lambda row: (
@@ -613,7 +853,7 @@ class CalibrationService:
         )
         selected_lambda = float(selected["lambda"])
         final_fit = fit_subspace_sequential_l2(
-            self._model,
+            model,
             joints,
             measured,
             parameters,
@@ -622,9 +862,10 @@ class CalibrationService:
             active_indices=active,
             payloads=payloads,
             directions=directions,
+            initial_vector=start_vector,
             max_nfev=options.max_nfev,
         )
-        predicted = self._model.batch_positions(
+        predicted = model.batch_positions(
             joints, final_fit.result.vector, parameters, payloads, directions
         )
         return self._build_result(
@@ -638,6 +879,71 @@ class CalibrationService:
             independent_indices,
             dataset_paths,
             options,
+            initial_parameter_path,
+            nominal_robot,
+        )
+
+    def _run_s1_debug_fast(
+        self,
+        joints: np.ndarray,
+        measured: np.ndarray,
+        nominal: np.ndarray,
+        *,
+        payloads: np.ndarray | float | None,
+        directions: np.ndarray | None,
+        dataset_paths: list[str],
+        options: IdentificationOptions,
+        model: MultiSourceRobotModel,
+        nominal_robot: dict[str, Any] | None,
+        initial_vector: np.ndarray,
+        initial_parameter_path: Path | None,
+    ) -> CalibrationResult:
+        parameters = self._geometric_parameters
+        selected_lambda = max(float(options.fixed_lambda), 0.0)
+        fit = fit_l2_lm(
+            model,
+            joints,
+            measured,
+            parameters,
+            list(range(len(parameters))),
+            lambda_value=selected_lambda,
+            payloads=payloads,
+            directions=directions,
+            initial_vector=initial_vector,
+            max_nfev=options.max_nfev,
+            norm="l2",
+        )
+        predicted = model.batch_positions(
+            joints,
+            fit.vector,
+            parameters,
+            payloads,
+            directions,
+        )
+        fit_errors_mm = np.linalg.norm(predicted - measured, axis=1) * 1000.0
+        cv_scores = [
+            {
+                "lambda": selected_lambda,
+                "fold_rmse_mm": [],
+                "mean_rmse_mm": float(np.sqrt(np.mean(fit_errors_mm**2))),
+                "max_rmse_mm": float(np.max(fit_errors_mm)),
+                "std_rmse_mm": 0.0,
+                "mode": "debug_fast_no_cv",
+            }
+        ]
+        return self._build_result(
+            fit,
+            nominal,
+            predicted,
+            measured,
+            selected_lambda,
+            cv_scores,
+            None,
+            [],
+            dataset_paths,
+            options,
+            initial_parameter_path,
+            nominal_robot,
         )
 
     def _build_s1_partition(
@@ -647,10 +953,13 @@ class CalibrationService:
         payloads: np.ndarray | float | None,
         directions: np.ndarray | None,
         options: IdentificationOptions,
+        *,
+        model: MultiSourceRobotModel | None = None,
     ) -> SubspaceIdentifiabilityPartition:
         parameters = self._geometric_parameters
+        run_model = model or self._model
         pose_metrics = compute_pose_identifiability_metrics(
-            self._model,
+            run_model,
             joints,
             parameters,
             vector,
@@ -667,7 +976,7 @@ class CalibrationService:
             jacobian_method=options.jacobian_method,
         )
         jacobian = output_jacobian(
-            self._model,
+            run_model,
             joints,
             vector,
             parameters,
@@ -700,9 +1009,13 @@ class CalibrationService:
         directions: np.ndarray | None,
         lambdas: np.ndarray,
         options: IdentificationOptions,
+        initial_vector: np.ndarray | None,
+        *,
+        model: MultiSourceRobotModel | None = None,
     ) -> list[dict[str, Any]]:
         folds = random_folds(len(joints), options.cv_folds, seed=options.seed + 11)
-        zero = zero_error_vector(self._geometric_parameters)
+        run_model = model or self._model
+        start_vector = _initial_vector_or_zero(initial_vector, len(self._geometric_parameters))
         active = list(range(len(self._geometric_parameters)))
         fold_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, SubspaceIdentifiabilityPartition]] = {}
 
@@ -721,10 +1034,11 @@ class CalibrationService:
                     train_directions = _subset_or_none(directions, train_indices, len(joints))
                     partition = self._build_s1_partition(
                         joints[train_indices],
-                        zero,
+                        start_vector,
                         train_payloads,
                         train_directions,
                         options,
+                        model=run_model,
                     )
                     fold_cache[fold_index] = (
                         train_indices,
@@ -738,7 +1052,7 @@ class CalibrationService:
                 validation_payloads = _subset_or_none(payloads, validation_indices, len(joints))
                 validation_directions = _subset_or_none(directions, validation_indices, len(joints))
                 fit = fit_subspace_sequential_l2(
-                    self._model,
+                    run_model,
                     joints[train_indices],
                     measured[train_indices],
                     self._geometric_parameters,
@@ -747,9 +1061,10 @@ class CalibrationService:
                     active_indices=active,
                     payloads=train_payloads,
                     directions=train_directions,
+                    initial_vector=start_vector,
                     max_nfev=options.max_nfev,
                 )
-                predicted = self._model.batch_positions(
+                predicted = run_model.batch_positions(
                     joints[validation_indices],
                     fit.result.vector,
                     self._geometric_parameters,
@@ -777,10 +1092,12 @@ class CalibrationService:
         measured: np.ndarray,
         selected_lambda: float,
         cv_scores: list[dict[str, Any]],
-        partition: SubspaceIdentifiabilityPartition,
+        partition: SubspaceIdentifiabilityPartition | None,
         independent_indices: list[int],
         dataset_paths: list[str],
         options: IdentificationOptions,
+        initial_parameter_path: Path | None,
+        nominal_robot_config: dict[str, Any] | None = None,
     ) -> CalibrationResult:
         fit_vectors = predicted - measured
         fit_errors_mm = np.linalg.norm(fit_vectors, axis=1) * 1000.0
@@ -788,23 +1105,44 @@ class CalibrationService:
         positioning_errors_mm = np.linalg.norm(positioning_vectors, axis=1) * 1000.0
         nominal_errors_mm = np.linalg.norm(nominal - measured, axis=1) * 1000.0
         parameter_values = vector_to_named_dict(fit.vector, self._geometric_parameters)
-        nominal_robot = self._current_nominal_robot_config()
-        identified_robot = self._identified_robot_from_error_parameters(parameter_values)
+        nominal_robot = (
+            _plain_dict(nominal_robot_config)
+            if nominal_robot_config is not None
+            else self._current_nominal_robot_config()
+        )
+        identified_robot = self._identified_robot_from_error_parameters(
+            parameter_values,
+            nominal_robot=nominal_robot,
+        )
         best_cv = min(cv_scores, key=lambda row: (row["max_rmse_mm"], row["mean_rmse_mm"], row["lambda"]))
         confidence = _confidence_from_cv(
             float(best_cv["max_rmse_mm"]),
             self._load_thresholds()["position_rms_limit_mm"],
         )
-        subspace_summary = {
-            "K": int(partition.K),
-            "cluster_sizes": [int(size) for size in partition.cluster_sizes],
-            "order": [int(item) for item in partition.order],
-            "summaries": partition.subspace_summaries,
-        }
+        if partition is None:
+            subspace_summary = {
+                "K": 1,
+                "cluster_sizes": [int(len(measured))],
+                "order": [0],
+                "summaries": [
+                    {
+                        "subspace": 0,
+                        "sample_count": int(len(measured)),
+                        "mode": "debug_fast_no_subspace",
+                    }
+                ],
+            }
+        else:
+            subspace_summary = {
+                "K": int(partition.K),
+                "cluster_sizes": [int(size) for size in partition.cluster_sizes],
+                "order": [int(item) for item in partition.order],
+                "summaries": partition.subspace_summaries,
+            }
         return CalibrationResult(
             success=bool(fit.success),
             message=str(fit.message),
-            method="S1",
+            method=_result_method(options),
             nominal_positions=nominal,
             predicted_positions=predicted,
             calibrated_positions=predicted,
@@ -837,9 +1175,16 @@ class CalibrationService:
                 "options": {
                     "max_nfev": int(options.max_nfev),
                     "cv_folds": int(options.cv_folds),
-                    "lambda_count": int(len(_lambda_grid(options))),
+                    "lambda_count": 0
+                    if _debug_fast_enabled(options)
+                    else int(len(_lambda_grid(options))),
+                    "fixed_lambda": float(options.fixed_lambda),
+                    "debug_fast": bool(_debug_fast_enabled(options)),
                     "jacobian_method": options.jacobian_method,
                 },
+                "initial_parameter_path": str(initial_parameter_path)
+                if initial_parameter_path is not None
+                else "",
                 "parameter_count": len(self._geometric_parameters),
                 "independent_count": len(independent_indices),
             },
@@ -893,12 +1238,15 @@ def normalize_joint_configs(joint_configs: np.ndarray, unit: str = "auto") -> np
 
 
 def _load_nominal_config(path: Path | None) -> dict[str, Any] | None:
-    if path is None or not path.exists():
-        return None
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise TypeError(f"Nominal robot config must be a mapping: {path}")
-    return data.get("nominal_robot", data)
+    from core.nominal_parameter_service import DEFAULT_NOMINAL_ROBOT, NominalParameterService
+
+    if path is None:
+        return _plain_dict(DEFAULT_NOMINAL_ROBOT)
+    service = NominalParameterService(
+        path.parent.parent,
+        nominal_path=path,
+    )
+    return service.load_nominal()
 
 
 def _plain_dict(value: Any) -> dict[str, Any]:
@@ -930,6 +1278,74 @@ def _coerce_paths(paths: str | Path | Iterable[str | Path]) -> list[Path]:
     if isinstance(paths, (str, Path)):
         return [Path(paths).resolve()]
     return [Path(path).resolve() for path in paths]
+
+
+def _method_key(options: IdentificationOptions) -> str:
+    return (options.method or "S1").upper()
+
+
+def _debug_fast_enabled(options: IdentificationOptions) -> bool:
+    return bool(options.debug_fast) or _method_key(options) in {"S1_DEBUG", "DEBUG", "DEBUG_FAST"}
+
+
+def _result_method(options: IdentificationOptions) -> str:
+    return "S1_DEBUG" if _debug_fast_enabled(options) else "S1"
+
+
+def _initial_vector_or_zero(vector: np.ndarray | None, parameter_count: int) -> np.ndarray:
+    if vector is None:
+        return np.zeros(parameter_count, dtype=float)
+    return np.asarray(vector, dtype=float).reshape(parameter_count).copy()
+
+
+def _extract_initial_flat_error_parameters(data: dict[str, Any]) -> dict[str, Any] | None:
+    identification = data.get("identification")
+    if isinstance(identification, dict) and isinstance(
+        identification.get("error_parameters"), dict
+    ):
+        return identification["error_parameters"]
+    calibration = data.get("calibration")
+    if isinstance(calibration, dict) and isinstance(calibration.get("error_parameters"), dict):
+        return calibration["error_parameters"]
+    if isinstance(data.get("error_parameters"), dict):
+        return data["error_parameters"]
+    return None
+
+
+def _extract_initial_robot(data: dict[str, Any]) -> dict[str, Any] | None:
+    for section_name in ("initial_parameters", "initial_robot", "identified_robot", "nominal_robot"):
+        section = data.get(section_name)
+        if isinstance(section, dict):
+            return section
+    identification = data.get("identification")
+    if isinstance(identification, dict):
+        identified = identification.get("identified_robot")
+        if isinstance(identified, dict):
+            return identified
+        nominal = identification.get("nominal_robot")
+        if isinstance(nominal, dict):
+            return nominal
+    if isinstance(data.get("mdh"), dict):
+        return data
+    return None
+
+
+def _first_initial_vector3(mapping: dict[str, Any], key: str) -> Any | None:
+    aliases = {
+        "tool_xyz": ("tool_xyz", "hand_eye_xyz", "target_xyz", "target_offset_xyz"),
+        "tool_rpy": ("tool_rpy", "hand_eye_rpy", "target_rpy", "target_offset_rpy"),
+    }.get(key, (key,))
+    for alias in aliases:
+        if alias in mapping:
+            return mapping[alias]
+    return None
+
+
+def _float_array(value: Any, count: int, name: str) -> np.ndarray:
+    values = np.asarray(value, dtype=float).reshape(-1)
+    if values.size != count:
+        raise ValueError(f"{name} must contain {count} numeric values, got {values.size}.")
+    return values
 
 
 def _validate_dataset(joints: np.ndarray, measured: np.ndarray) -> None:

@@ -1,0 +1,24 @@
+{
+  "input_npz": "dataset\\camera_pos_normal50\\robot_poses.npz",
+  "input_laser_txt": "dataset\\base_calib\\camera_pos_normal50.txt",
+  "output_npz": "dataset\\camera_pos_normal50\\robot_poses_laser_enhanced.npz",
+  "num_samples": 51,
+  "replace_mode": "safe",
+  "coord_from": "last3",
+  "max_trans_diff_mm": 15.0,
+  "num_replaced": 51,
+  "num_kept_robot": 0,
+  "trans_diff_mm": {
+    "mean": 10.477645645303534,
+    "std": 0.24027661393306712,
+    "max": 11.116325681657951,
+    "min": 10.082369537791696
+  },
+  "rot_diff_deg": {
+    "mean": 0.0,
+    "std": 0.0,
+    "max": 0.0,
+    "min": 0.0
+  },
+  "warnings": []
+}

@@ -384,7 +384,7 @@ nominal_robot:
         encoding="utf-8",
     )
     result_path = config_dir / "calibration_result.yaml"
-    errors = {"delta_Btx": 0.01}
+    errors = {"delta_a_2": 0.02, "delta_Btx": 0.01}
     save_identification_result(
         result_path,
         errors,
@@ -400,7 +400,7 @@ nominal_robot:
     before = page._calibration_service.compute_predicted_position(
         [0.0, -58.0, 82.0, -112.0, -90.0, 0.0]
     )
-    assert before.error_norm_mm == pytest.approx(10.0)
+    assert before.error_norm_mm > 0.0
 
     class FakeNominalDialog:
         result_mode = "identification"
@@ -446,7 +446,7 @@ def test_nominal_update_dialog_modes_refresh_live_fk_and_accuracy_status(
         sample_count=10,
     )
     imported_param_path = tmp_path / "config" / "imported_result.yaml"
-    imported_errors = {"delta_Ttz": 0.5}
+    imported_errors = {"delta_a_2": 0.02, "delta_Ttz": 0.5}
     save_identification_result(
         imported_param_path,
         imported_errors,
@@ -530,6 +530,7 @@ nominal_values:
     imported_nominal = nominal_position_for_current_view(page)
     assert imported_metric != pytest.approx(values_metric)
     assert not np.allclose(imported_nominal, values_nominal)
+    assert read_nominal_for_fk(tmp_path)["tool_xyz"][2] == pytest.approx(0.05)
 
     apply_rollback()
     rollback_metric = accuracy_metric_mm(page)

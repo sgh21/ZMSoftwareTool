@@ -9,6 +9,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -25,6 +26,7 @@ from core.calibration_persistence import (
     record_identification_history,
     save_identification_result,
 )
+from core.calibration_dataset_packager import pack_raw_calibration_pair
 from core.calibration_service import CalibrationResult, CalibrationService, IdentificationOptions
 
 DEFAULT_JOINT_ANGLES = (0.0, -58.0, 82.0, -112.0, -90.0, 0.0)
@@ -39,11 +41,15 @@ class IdentificationWorker(QObject):
         service: CalibrationService,
         data: dict[str, np.ndarray],
         paths: list[Path],
+        options: IdentificationOptions,
+        initial_parameter_path: Path | None,
     ) -> None:
         super().__init__()
         self._service = service
         self._data = data
         self._paths = list(paths)
+        self._options = options
+        self._initial_parameter_path = initial_parameter_path
 
     @Slot()
     def run(self) -> None:
@@ -54,7 +60,8 @@ class IdentificationWorker(QObject):
                 payloads=self._data.get("payloads"),
                 directions=self._data.get("directions"),
                 dataset_paths=self._paths,
-                options=IdentificationOptions(),
+                options=self._options,
+                initial_parameter_path=self._initial_parameter_path,
             )
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -78,6 +85,7 @@ class CalibrationPage(QWidget):
         self._calib_result: CalibrationResult | None = None
         self._calib_data: dict[str, np.ndarray] | None = None
         self._calib_paths: list[Path] = []
+        self._initial_parameter_path: Path | None = None
         self._nominal_position: np.ndarray | None = None
         self._joint_angles: list[float] = list(DEFAULT_JOINT_ANGLES)
         self._identification_thread: QThread | None = None
@@ -126,6 +134,10 @@ class CalibrationPage(QWidget):
         back_btn = QPushButton("← 返回初始化")
         back_btn.setObjectName("back_button")
         back_btn.clicked.connect(self._on_back)
+        self._load_initial_btn = QPushButton("加载初始参数 YAML")
+        self._load_initial_btn.setObjectName("load_initial_parameters_button")
+        self._load_initial_btn.clicked.connect(self._choose_initial_parameters)
+        layout.addWidget(self._load_initial_btn)
         layout.addWidget(back_btn)
 
         layout.addStretch(1)
@@ -138,34 +150,54 @@ class CalibrationPage(QWidget):
     def _build_data_card(self) -> QWidget:
         card = self._card_frame("data_card")
         card.setObjectName("calibration_toolbar")
-        card.setMaximumHeight(150)
-        layout = QGridLayout(card)
+        card.setMaximumHeight(220)
+        layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 12, 16, 12)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(8)
-        layout.setColumnStretch(2, 1)
+        layout.setSpacing(10)
 
-        layout.addWidget(self._section_title("\u53c2\u6570\u8fa8\u8bc6\u5de5\u5177\u680f"), 0, 0, 1, 3)
+        layout.addWidget(self._section_title("\u53c2\u6570\u8fa8\u8bc6\u5de5\u5177\u680f"))
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(12)
 
         self._load_data_btn = QPushButton("\u52a0\u8f7d\u8fa8\u8bc6\u6570\u636e (.pkl\uff0c\u53ef\u591a\u9009)")
         self._load_data_btn.setObjectName("load_calib_data_button")
         self._load_data_btn.clicked.connect(self._choose_calib_data)
-        layout.addWidget(self._load_data_btn, 1, 0)
+        action_row.addWidget(self._load_data_btn, stretch=1)
+
+        self._convert_raw_btn = QPushButton("CSV/TXT 转换为 PKL")
+        self._convert_raw_btn.setObjectName("convert_raw_data_button")
+        self._convert_raw_btn.clicked.connect(self._choose_raw_data_conversion)
+        action_row.addWidget(self._convert_raw_btn, stretch=1)
 
         self._run_calib_btn = QPushButton("\u6267\u884c S1 \u53c2\u6570\u8fa8\u8bc6")
         self._run_calib_btn.setObjectName("run_calibration_button")
         self._run_calib_btn.setEnabled(False)
         self._run_calib_btn.clicked.connect(self._run_calibration)
-        layout.addWidget(self._run_calib_btn, 1, 1)
+        action_row.addWidget(self._run_calib_btn, stretch=1)
+        layout.addLayout(action_row)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(12)
 
         self._data_info = QLabel("\u5c1a\u672a\u52a0\u8f7d\u8fa8\u8bc6\u6570\u636e")
         self._data_info.setObjectName("data_info_label")
         self._data_info.setWordWrap(True)
-        layout.addWidget(self._data_info, 1, 2)
+        status_row.addWidget(self._data_info, stretch=1)
+
+        self._debug_fast_checkbox = QCheckBox("Debug 快速模式")
+        self._debug_fast_checkbox.setObjectName("debug_fast_checkbox")
+        status_row.addWidget(self._debug_fast_checkbox)
+        layout.addLayout(status_row)
+
+        self._initial_param_info = QLabel("初始名义参数：未选择")
+        self._initial_param_info.setObjectName("initial_parameter_info_label")
+        self._initial_param_info.setWordWrap(True)
+        layout.addWidget(self._initial_param_info)
 
         self._joint_display = QLabel("\u5f53\u524d\u5173\u8282\u89d2\uff1a--")
         self._joint_display.setObjectName("joint_angle_display")
-        layout.addWidget(self._joint_display, 2, 0, 1, 3)
+        layout.addWidget(self._joint_display)
         return card
 
     def _build_result_card(self) -> QWidget:
@@ -256,29 +288,101 @@ class CalibrationPage(QWidget):
             self,
             "加载辨识数据",
             str(self.project_root / "data"),
-            "Calibration data (*.pkl *.pickle);;All files (*)",
+            "Processed PKL (*.pkl *.pickle);;All files (*)",
         )
         if paths:
             self._load_calib_data([Path(path) for path in paths])
 
+    def _choose_raw_data_conversion(self) -> None:
+        csv_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择机器人 CSV 数据",
+            str(self.project_root / "data"),
+            "Robot CSV (*.csv);;All files (*)",
+        )
+        if not csv_path:
+            return
+        txt_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择激光跟踪仪 TXT 数据",
+            str(Path(csv_path).parent),
+            "Laser TXT (*.txt);;All files (*)",
+        )
+        if not txt_path:
+            return
+        output_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择 PKL 保存文件夹",
+            str(self.project_root / "data" / "processed" / "calibration"),
+        )
+        if not output_dir:
+            return
+        try:
+            self._convert_raw_data_to_pkl(Path(csv_path), Path(txt_path), Path(output_dir))
+        except Exception as exc:  # noqa: BLE001
+            self._data_info.setText(f"CSV/TXT 转换失败: {exc}")
+            self._set_status(f"CSV/TXT 转换失败: {exc}")
+
+    def _convert_raw_data_to_pkl(self, csv_path: Path, txt_path: Path, output_dir: Path) -> Path:
+        output_path = output_dir / f"{csv_path.stem}__{txt_path.stem}.pkl"
+        saved = pack_raw_calibration_pair(csv_path, txt_path, output_path)
+        self._data_info.setText(
+            f"CSV/TXT 已转换为 PKL：{saved}\n"
+            "若要辨识，请点击“加载辨识数据”并选择该 PKL 文件。"
+        )
+        self._set_status(f"CSV/TXT 转换完成: {saved.name}")
+        return saved
+
+    def _choose_initial_parameters(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "加载初始参数 YAML",
+            str(self.project_root / "config"),
+            "YAML files (*.yaml *.yml);;All files (*)",
+        )
+        if path:
+            self._load_initial_parameters(Path(path))
+
+    def _load_initial_parameters(self, path: Path) -> None:
+        try:
+            self._service.load_initial_nominal_robot(path)
+            self._initial_parameter_path = path.resolve()
+            self._initial_param_info.setText(
+                f"初始名义参数：{path.name} | 将作为本次辨识的名义模型基准"
+            )
+            self._set_status(f"初始名义参数已加载: {path.name}")
+        except Exception as exc:
+            self._initial_parameter_path = None
+            self._initial_param_info.setText(f"初始名义参数加载失败: {exc}")
+            self._set_status(f"初始名义参数加载失败: {exc}")
+
     def _load_calib_data(self, paths: Path | list[Path]) -> None:
         try:
             path_list = [paths] if isinstance(paths, Path) else list(paths)
+            raw_paths = [
+                path
+                for path in path_list
+                if path.suffix.lower() not in {".pkl", ".pickle"}
+            ]
+            if raw_paths:
+                raise ValueError(
+                    "辨识数据加载只接受 .pkl/.pickle；CSV/TXT 请先使用“CSV/TXT 转换为 PKL”。"
+                )
             data = self._service.load_identification_data(path_list)
             joints = np.asarray(data["joints"])
             positions = np.asarray(data["measured_positions"])
             self._calib_data = data
-            self._calib_paths = path_list
+            self._calib_paths = [Path(path) for path in data.get("dataset_paths", path_list)]
             names = f"{len(path_list)} 个文件: " + ", ".join(path.name for path in path_list[:3])
             if len(path_list) > 3:
                 names += f" ... 共 {len(path_list)} 个文件"
             self._data_info.setText(
-                f"已加载: {names}\n"
+                f"已加载 PKL 辨识数据: {names}\n"
                 f"样本数: {len(joints)} | 关节1范围: [{joints[:, 0].min():.3f}, {joints[:, 0].max():.3f}] rad | "
                 f"位置范围: X[{positions[:, 0].min():.3f}, {positions[:, 0].max():.3f}]m"
             )
             self._run_calib_btn.setEnabled(True)
-            self._set_status(f"辨识数据已加载: {len(path_list)} 个文件，{len(joints)} 个样本")
+            self._set_status(f"PKL 辨识数据已加载: {len(path_list)} 个文件，{len(joints)} 个样本")
         except Exception as exc:
             self._data_info.setText(f"加载失败: {exc}")
             self._set_status(f"数据加载失败: {exc}")
@@ -288,9 +392,17 @@ class CalibrationPage(QWidget):
             self._set_status("请先加载辨识数据")
             return
 
-        self._set_status("正在执行 S1 参数辨识...")
+        options = self._identification_options()
+        mode_name = "S1_DEBUG 快速辨识" if options.debug_fast else "S1 参数辨识"
+        self._set_status(f"正在执行 {mode_name}...")
         self._run_calib_btn.setEnabled(False)
-        self._identification_progress = QProgressDialog("S1 参数辨识正在运行，请稍候...", "", 0, 0, self)
+        self._identification_progress = QProgressDialog(
+            f"{mode_name}正在运行，请稍候...",
+            "",
+            0,
+            0,
+            self,
+        )
         self._identification_progress.setObjectName("identification_progress_dialog")
         self._identification_progress.setWindowTitle("参数辨识进度")
         self._identification_progress.setCancelButton(None)
@@ -299,7 +411,13 @@ class CalibrationPage(QWidget):
         self._identification_progress.show()
 
         thread = QThread(self)
-        worker = IdentificationWorker(self._service, self._calib_data, self._calib_paths)
+        worker = IdentificationWorker(
+            self._service,
+            self._calib_data,
+            self._calib_paths,
+            options,
+            self._initial_parameter_path,
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_identification_finished)
@@ -311,6 +429,11 @@ class CalibrationPage(QWidget):
         self._identification_thread = thread
         self._identification_worker = worker
         thread.start()
+
+    def _identification_options(self) -> IdentificationOptions:
+        if self._debug_fast_checkbox.isChecked():
+            return IdentificationOptions(method="S1_DEBUG", debug_fast=True, max_nfev=30)
+        return IdentificationOptions()
 
     @Slot(object)
     def _on_identification_finished(self, result: CalibrationResult) -> None:
@@ -346,7 +469,7 @@ class CalibrationPage(QWidget):
         self.findChild(QLabel, "nfev_label").setText(str(result.nfev))
 
         if result.success:
-            self.findChild(QLabel, "calib_status_label").setText("✔ S1 辨识成功")
+            self.findChild(QLabel, "calib_status_label").setText(f"✔ {result.method} 辨识成功")
             self._page_status.setText("● 辨识完成")
         else:
             self.findChild(QLabel, "calib_status_label").setText(f"⚠ {result.message}")
@@ -363,7 +486,7 @@ class CalibrationPage(QWidget):
             if significant:
                 lines = [
                     "主要辨识参数:",
-                    f"  S1 λ: {result.selected_lambda:.3g}",
+                    f"  {result.method} λ: {result.selected_lambda:.3g}",
                     f"  拟合残差 RMSE: {result.rmse_mm:.4f} mm",
                     "  定位误差定义: 预测模型位置 - 名义模型位置",
                 ]
@@ -382,7 +505,7 @@ class CalibrationPage(QWidget):
         self._save_btn.setEnabled(True)
         self._report_btn.setEnabled(True)
         self._set_status(
-            f"S1 辨识完成: 定位误差RMSE={result.position_error_rmse_mm:.4f}mm, 拟合RMSE={result.rmse_mm:.4f}mm"
+            f"{result.method} 辨识完成: 定位误差RMSE={result.position_error_rmse_mm:.4f}mm, 拟合RMSE={result.rmse_mm:.4f}mm"
         )
 
     def _persist_identification_result(self, result: CalibrationResult) -> Path | None:
@@ -421,7 +544,7 @@ class CalibrationPage(QWidget):
                 confidence=result.confidence,
                 dataset_paths=result.dataset_paths,
             )
-            self._set_status(f"S1 辨识结果已保存: {saved.name}，历史已入库")
+            self._set_status(f"{result.method} 辨识结果已保存: {saved.name}，历史已入库")
             return saved
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"辨识完成，但持久化失败: {exc}")
@@ -739,7 +862,9 @@ th {{ background: #f0f4f8; }}
                 border-color: #4f8df7;
                 background: #f2f7ff;
             }
-            QPushButton#load_calib_data_button, QPushButton#run_calibration_button {
+            QPushButton#load_calib_data_button,
+            QPushButton#convert_raw_data_button,
+            QPushButton#run_calibration_button {
                 min-height: 40px;
                 color: #0f62d9;
                 border: 1px solid #3982ff;
