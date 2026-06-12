@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
-
-from core.calibration_persistence import load_identification_result
-
 
 TOOL_VECTOR3_KEYS = ("tool_xyz", "tool_rpy")
 CALIBRATION_FRAME_VECTOR3_KEYS = ("base_xyz", "base_rpy", "tool_xyz", "tool_rpy")
@@ -36,33 +30,22 @@ DEFAULT_NOMINAL_ROBOT = {
 }
 
 
-@dataclass(frozen=True)
-class NominalParameterUpdateResult:
-    nominal_path: Path
-    backup_path: Path
-    mode: str
-    applied_error_parameter_hash: str | None = None
-
-
 class NominalParameterService:
-    """Load, update, persist, and roll back the nominal robot parameter file."""
+    """Read the nominal robot parameter file.
+
+    Nominal parameters are the design baseline.  Application code must not
+    update or roll them back through this service; new calibrated parameters
+    belong in timestamped identified-model files.
+    """
 
     def __init__(
         self,
         project_root: str | Path | None = None,
         *,
         nominal_path: str | Path | None = None,
-        backup_path: str | Path | None = None,
     ) -> None:
         self.project_root = Path(project_root or Path.cwd()).resolve()
         self.nominal_path = Path(nominal_path or self.project_root / "config" / "nominal_robot.yaml")
-        self.backup_path = Path(
-            backup_path
-            or self.project_root / "storage" / "model_versions" / "nominal_robot_previous.yaml"
-        )
-
-    def has_backup(self) -> bool:
-        return self.backup_path.exists()
 
     def load_nominal(self) -> dict[str, Any]:
         """Return the current nominal parameters, falling back to built-in defaults."""
@@ -77,144 +60,6 @@ class NominalParameterService:
             raise TypeError(f"Nominal parameter file must contain a mapping: {self.nominal_path}")
         return _normalize_nominal_document(data)
 
-    def dump_current_yaml(self) -> str:
-        return yaml.safe_dump(
-            {"nominal_robot": self.load_nominal()},
-            allow_unicode=True,
-            sort_keys=False,
-            default_flow_style=False,
-        )
-
-    def value_template_yaml(self) -> str:
-        return yaml.safe_dump(
-            {
-                "nominal_values": self.load_nominal()
-            },
-            allow_unicode=True,
-            sort_keys=False,
-            default_flow_style=False,
-        )
-
-    def update_direct_yaml(self, yaml_text: str) -> NominalParameterUpdateResult:
-        return self.update_direct(_load_yaml_text(yaml_text), mode="direct")
-
-    def update_direct(
-        self,
-        nominal_data: dict[str, Any],
-        *,
-        mode: str = "direct",
-    ) -> NominalParameterUpdateResult:
-        updated = _normalize_nominal(_unwrap_nominal(nominal_data))
-        return self._persist(updated, mode=mode)
-
-    def update_values_yaml(self, yaml_text: str) -> NominalParameterUpdateResult:
-        return self.update_values(_load_yaml_text(yaml_text), mode="values")
-
-    def update_values(
-        self,
-        values_data: dict[str, Any],
-        *,
-        mode: str = "values",
-    ) -> NominalParameterUpdateResult:
-        current = self.load_nominal()
-        updated = _merge_nominal_values(current, values_data)
-        return self._persist(updated, mode=mode)
-
-    def update_from_identification_file(
-        self,
-        path: str | Path,
-    ) -> NominalParameterUpdateResult:
-        source_path = Path(path).resolve()
-        loaded = load_identification_result(path)
-        fingerprint = error_parameter_fingerprint(loaded["error_parameters"])
-        update_metadata = {
-            "mode": "identification",
-            "source_path": str(source_path),
-            "source_timestamp": loaded.get("timestamp", ""),
-            "applied_error_parameter_hash": fingerprint,
-        }
-        identified = _unwrap_nominal(loaded["identified_robot"])
-        updated = _merge_nominal_values(
-            self.load_nominal(),
-            {"nominal_values": {"mdh": identified.get("mdh")}},
-        )
-        return self._persist(
-            updated,
-            mode="identification",
-            update_metadata=update_metadata,
-            applied_error_parameter_hash=fingerprint,
-        )
-
-    def rollback(self) -> Path:
-        """Restore the one retained previous nominal file and consume the backup."""
-        if not self.backup_path.exists():
-            raise FileNotFoundError(f"No nominal parameter backup found: {self.backup_path}")
-        data = yaml.safe_load(self.backup_path.read_text(encoding="utf-8")) or {}
-        if not isinstance(data, dict):
-            raise TypeError(f"Backup file must contain a mapping: {self.backup_path}")
-        document = _normalize_nominal_document(data)
-        self.nominal_path.parent.mkdir(parents=True, exist_ok=True)
-        self.nominal_path.write_text(
-            yaml.safe_dump(
-                document,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            ),
-            encoding="utf-8",
-        )
-        self.backup_path.unlink()
-        return self.nominal_path
-
-    def _persist(
-        self,
-        nominal: dict[str, Any],
-        *,
-        mode: str,
-        update_metadata: dict[str, Any] | None = None,
-        applied_error_parameter_hash: str | None = None,
-    ) -> NominalParameterUpdateResult:
-        current_document = self.load_document()
-        self.backup_path.parent.mkdir(parents=True, exist_ok=True)
-        self.backup_path.write_text(
-            yaml.safe_dump(
-                current_document,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            ),
-            encoding="utf-8",
-        )
-
-        self.nominal_path.parent.mkdir(parents=True, exist_ok=True)
-        document: dict[str, Any] = {"nominal_robot": nominal}
-        if update_metadata:
-            document["nominal_update"] = _sanitize_update_metadata(update_metadata)
-        self.nominal_path.write_text(
-            yaml.safe_dump(
-                document,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            ),
-            encoding="utf-8",
-        )
-        return NominalParameterUpdateResult(
-            nominal_path=self.nominal_path,
-            backup_path=self.backup_path,
-            mode=mode,
-            applied_error_parameter_hash=applied_error_parameter_hash,
-        )
-
-
-def error_parameter_fingerprint(parameter_values: dict[str, Any]) -> str:
-    """Return a stable fingerprint for an identified error-parameter mapping."""
-    normalized = {
-        str(key): float(value or 0.0)
-        for key, value in sorted(parameter_values.items(), key=lambda item: str(item[0]))
-    }
-    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def nominal_after_applying_error_parameters(
@@ -253,13 +98,6 @@ def nominal_parameter_sets_close(
     return True
 
 
-def _load_yaml_text(text: str) -> dict[str, Any]:
-    data = yaml.safe_load(text or "") or {}
-    if not isinstance(data, dict):
-        raise TypeError("YAML content must be a mapping.")
-    return data
-
-
 def _unwrap_nominal(data: dict[str, Any]) -> dict[str, Any]:
     section = data.get("nominal_robot", data)
     if not isinstance(section, dict):
@@ -295,49 +133,6 @@ def _normalize_nominal_document(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(metadata, dict):
         document["nominal_update"] = _sanitize_update_metadata(metadata)
     return document
-
-
-def _merge_nominal_values(current: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-    source = _extract_nominal_values_source(data)
-    updated = _plain(_normalize_nominal(_unwrap_nominal(current)))
-    has_value = False
-
-    for key in TOOL_VECTOR3_KEYS:
-        if key in source:
-            updated[key] = _float_list(source, key, 3, required=True)
-            has_value = True
-
-    mdh = source.get("mdh")
-    if mdh is not None:
-        if not isinstance(mdh, dict):
-            raise TypeError("nominal_values.mdh must be a mapping.")
-        for key in MDH_KEYS:
-            if key in mdh:
-                updated["mdh"][key] = _float_list(mdh, key, 6, required=True)
-                has_value = True
-
-    if "joint_limits" in source:
-        updated["joint_limits"] = _joint_limits(source["joint_limits"])
-        has_value = True
-
-    if not has_value:
-        raise KeyError(
-            "nominal_values must contain at least one nominal field: "
-            "tool_xyz/tool_rpy/mdh/joint_limits."
-        )
-    return _normalize_nominal(updated)
-
-
-def _extract_nominal_values_source(data: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(data, dict):
-        raise TypeError("Nominal values must be a mapping.")
-    if "nominal_delta" in data:
-        raise KeyError("nominal_delta is no longer supported. Use nominal_values.")
-    for section_name in ("nominal_values", "nominal_robot"):
-        section = data.get(section_name)
-        if isinstance(section, dict):
-            return section
-    return data
 
 
 def _sanitize_update_metadata(metadata: dict[str, Any]) -> dict[str, Any]:

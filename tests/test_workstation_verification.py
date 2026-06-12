@@ -223,6 +223,7 @@ def test_verification_menu_exposes_workstation_entry(
     assert [action.text() for action in menu_button.menu().actions()] == [
         "加工工位精度校验",
         "标定分析",
+        "模型评估",
     ]
 
     page.show_workstation_verification_dialog()
@@ -233,6 +234,10 @@ def test_verification_menu_exposes_workstation_entry(
     assert page.calibration_dialog is not None
     assert page.calibration_page is not None
     assert "已打开标定分析窗口" in page.footer_status_label.text()
+
+    page.show_model_degradation_dialog()
+    assert page.model_degradation_dialog is not None
+    assert "已打开模型评估窗口" in page.footer_status_label.text()
 
 
 def test_health_value_updates_when_threshold_changes(

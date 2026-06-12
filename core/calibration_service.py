@@ -19,7 +19,7 @@ import yaml
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-from core.accuracy_evaluator import evaluate_position_errors
+from core.accuracy_evaluator import confidence_from_uncertainty, evaluate_position_errors
 from core.calibration_dataset_packager import (
     default_packed_dataset_path,
     pack_raw_calibration_pair,
@@ -137,6 +137,7 @@ class CalibrationResult:
     joint_count: int = 0
     nfev: int = 0
     confidence: float = 100.0
+    position_uncertainty_rmse_mm: float = 0.0
     selected_lambda: float = 0.0
     cv_scores: list[dict[str, Any]] = field(default_factory=list)
     active_indices: list[int] = field(default_factory=list)
@@ -152,13 +153,17 @@ class CurrentAccuracyState:
     """Live state for one current robot configuration."""
 
     nominal_position: np.ndarray
+    controller_position: np.ndarray
     predicted_position: np.ndarray
     positioning_error: np.ndarray
     error_norm_mm: float
+    model_rms_mm: float
+    model_max_error_mm: float
     rms_mm: float
     max_error_mm: float
     over_tolerance_rate: float
     confidence: float
+    position_uncertainty_rmse_mm: float
     health_score: float
     health_level: str
     health_message: str
@@ -186,8 +191,11 @@ class CalibrationService:
         )
         self._active_identified_robot: dict[str, Any] | None = None
         self._active_identified_model: MultiSourceRobotModel | None = None
+        self._active_controller_robot: dict[str, Any] | None = None
+        self._active_controller_model: MultiSourceRobotModel | None = None
         self._active_parameter_source_path: Path | None = None
         self._active_confidence = 0.0
+        self._active_position_uncertainty_rmse_mm = 0.0
 
     @property
     def model(self) -> MultiSourceRobotModel:
@@ -332,8 +340,9 @@ class CalibrationService:
     ) -> CurrentAccuracyState:
         """Predict actual TCP position and current positioning error.
 
-        The positioning error is defined as:
-        ``identified_model_position - nominal_model_position``.
+        The positioning error is defined as ``identified FK - controller FK``.
+        When no controller model is active, the nominal design model is used as
+        a compatibility fallback.
         """
         if parameter_values is None:
             self.reload_nominal_parameters_if_changed()
@@ -351,7 +360,9 @@ class CalibrationService:
         else:
             identified_model = self._active_identified_model or self._model
         predicted = identified_model.position(joints[0], zero, self._geometric_parameters)
-        error = predicted - nominal
+        controller_model = self._active_controller_model or self._model
+        controller = controller_model.position(joints[0], zero, self._geometric_parameters)
+        error = predicted - controller
         thresholds = self._load_thresholds()
         limit_mm = (
             thresholds["position_rms_limit_mm"]
@@ -361,16 +372,26 @@ class CalibrationService:
         tolerance_m = limit_mm / 1000.0
         metrics = evaluate_position_errors(error.reshape(1, 3), tolerance_m)
         norm_mm = float(np.linalg.norm(error) * 1000.0)
-        health = evaluate_positioning_health(norm_mm, limit_mm)
+        uncertainty_mm = max(0.0, float(self._active_position_uncertainty_rmse_mm))
+        model_rms_mm = float(metrics.rms) * 1000.0
+        model_max_error_mm = float(metrics.max_error) * 1000.0
+        rms_mm = float(math.sqrt(model_rms_mm**2 + uncertainty_mm**2))
+        max_error_mm = float(math.sqrt(model_max_error_mm**2 + uncertainty_mm**2))
+        over_tolerance_rate = float(rms_mm > limit_mm)
+        health = evaluate_positioning_health(rms_mm, limit_mm)
         return CurrentAccuracyState(
             nominal_position=nominal,
+            controller_position=controller,
             predicted_position=predicted,
             positioning_error=error,
             error_norm_mm=norm_mm,
-            rms_mm=float(metrics.rms * 1000.0),
-            max_error_mm=float(metrics.max_error * 1000.0),
-            over_tolerance_rate=float(metrics.over_tolerance_rate),
+            model_rms_mm=model_rms_mm,
+            model_max_error_mm=model_max_error_mm,
+            rms_mm=rms_mm,
+            max_error_mm=max_error_mm,
+            over_tolerance_rate=over_tolerance_rate,
             confidence=float(conf),
+            position_uncertainty_rmse_mm=uncertainty_mm,
             health_score=float(health.score),
             health_level=health.level,
             health_message=health.message,
@@ -533,6 +554,7 @@ class CalibrationService:
         parameter_values: dict[str, float],
         *,
         confidence: float = 100.0,
+        position_uncertainty_rmse_mm: float = 0.0,
         identified_robot: dict[str, Any] | None = None,
     ) -> None:
         """Set the active complete identified model used for live prediction."""
@@ -556,6 +578,10 @@ class CalibrationService:
                 self._active_parameter_values
             )
         self._active_confidence = float(confidence)
+        self._active_position_uncertainty_rmse_mm = max(
+            0.0,
+            float(position_uncertainty_rmse_mm),
+        )
 
     def load_active_parameters(self, path: str | Path) -> dict[str, Any]:
         """Load an identified parameter YAML file and activate it."""
@@ -567,10 +593,29 @@ class CalibrationService:
         self.set_active_parameters(
             loaded["error_parameters"],
             confidence=float(loaded.get("confidence", 100.0)),
+            position_uncertainty_rmse_mm=float(
+                loaded.get("position_uncertainty_rmse_mm", 0.0)
+            ),
             identified_robot=loaded["identified_robot"],
         )
         self._active_parameter_source_path = parameter_path
         return loaded
+
+    def load_controller_model(self, path: str | Path | None) -> dict[str, Any] | None:
+        """Load the controller MD-H/tool model used as the live FK baseline."""
+        if path is None:
+            self._active_controller_robot = None
+            self._active_controller_model = None
+            return None
+        controller_path = Path(path).resolve()
+        data = yaml.safe_load(controller_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise TypeError(f"Controller model file must be a mapping: {controller_path}")
+        section = _controller_model_section(data, controller_path)
+        robot = self._robot_section_for_fk(section, "controller_model")
+        self._active_controller_robot = _plain_dict(robot)
+        self._active_controller_model = self._model_from_nominal_dict(robot)
+        return self._active_controller_robot
 
     def _current_nominal_robot_config(self) -> dict[str, Any]:
         from core.nominal_parameter_service import NominalParameterService
@@ -605,14 +650,25 @@ class CalibrationService:
         self,
         identified_robot: dict[str, Any],
     ) -> MultiSourceRobotModel:
+        robot = self._robot_section_for_fk(identified_robot, "identified_robot")
+        return self._model_from_nominal_dict(robot)
+
+    def _robot_section_for_fk(
+        self,
+        source_robot: dict[str, Any],
+        section_name: str,
+    ) -> dict[str, Any]:
         current = self._current_nominal_robot_config()
-        source = _plain_dict(identified_robot)
+        source = _plain_dict(source_robot)
         mdh = source.get("mdh")
         if not isinstance(mdh, dict):
-            raise KeyError("identified_robot.mdh is required for robot FK.")
+            raise KeyError(f"{section_name}.mdh is required for robot FK.")
         robot = _plain_dict(current)
         robot["mdh"] = _plain_dict(mdh)
-        return self._model_from_nominal_dict(robot)
+        for key in ("tool_xyz", "tool_rpy"):
+            if key in source:
+                robot[key] = _plain_value(source[key])
+        return robot
 
     def _model_from_nominal_dict(self, nominal_robot: dict[str, Any]) -> MultiSourceRobotModel:
         return MultiSourceRobotModel(load_nominal_robot(nominal_robot))
@@ -644,14 +700,10 @@ class CalibrationService:
     def load_initial_nominal_robot(self, path: str | Path) -> dict[str, Any]:
         """Load the nominal robot model used as the baseline for identification.
 
-        ``initial_parameter_path`` is a nominal-parameter file, not an initial
-        error vector.  The S1 optimizer estimates errors relative to this
-        model, so the identified model saved after fitting is:
-        ``initial_nominal_robot + identified_error_parameters``.
-
-        For backward compatibility, a document containing only flat
-        ``error_parameters`` is treated as a previous delta from the current
-        nominal model and converted into a nominal baseline first.
+        ``initial_parameter_path`` is a nominal/initial robot model file, not an
+        identified model and not a flat error-parameter file.  The optimizer
+        estimates errors relative to this baseline and saves the final
+        identified model as absolute values.
         """
         parameter_path = Path(path).resolve()
         data = yaml.safe_load(parameter_path.read_text(encoding="utf-8")) or {}
@@ -676,18 +728,15 @@ class CalibrationService:
         return values
 
     def _initial_nominal_robot_from_document(self, data: dict[str, Any]) -> dict[str, Any]:
-        robot = _extract_initial_robot(data)
-        if robot is not None:
-            return self._merge_initial_nominal_robot(robot)
-
-        flat = _extract_initial_flat_error_parameters(data)
-        if flat:
-            values = {str(key): float(value or 0.0) for key, value in flat.items()}
-            return self._identified_robot_from_error_parameters(values)
+        if data.get("kind") is not None:
+            raise ValueError("Initial nominal YAML cannot be a versioned non-nominal parameter file.")
+        for section_name in ("initial_parameters", "initial_robot", "nominal_robot"):
+            section = data.get(section_name)
+            if isinstance(section, dict):
+                return self._merge_initial_nominal_robot(section)
 
         raise KeyError(
-            "Initial nominal YAML must contain initial_parameters/initial_robot/"
-            "identified_robot/nominal_robot, or previous error_parameters."
+            "Initial nominal YAML must contain initial_parameters, initial_robot, or nominal_robot."
         )
 
     def _merge_initial_nominal_robot(self, robot: dict[str, Any]) -> dict[str, Any]:
@@ -1101,6 +1150,7 @@ class CalibrationService:
     ) -> CalibrationResult:
         fit_vectors = predicted - measured
         fit_errors_mm = np.linalg.norm(fit_vectors, axis=1) * 1000.0
+        fit_rmse_mm = float(np.sqrt(np.mean(fit_errors_mm**2)))
         positioning_vectors = predicted - nominal
         positioning_errors_mm = np.linalg.norm(positioning_vectors, axis=1) * 1000.0
         nominal_errors_mm = np.linalg.norm(nominal - measured, axis=1) * 1000.0
@@ -1114,9 +1164,8 @@ class CalibrationService:
             parameter_values,
             nominal_robot=nominal_robot,
         )
-        best_cv = min(cv_scores, key=lambda row: (row["max_rmse_mm"], row["mean_rmse_mm"], row["lambda"]))
-        confidence = _confidence_from_cv(
-            float(best_cv["max_rmse_mm"]),
+        confidence = confidence_from_uncertainty(
+            fit_rmse_mm,
             self._load_thresholds()["position_rms_limit_mm"],
         )
         if partition is None:
@@ -1153,7 +1202,7 @@ class CalibrationService:
             error_parameters=list(self._geometric_parameters),
             parameter_names=[parameter.name for parameter in self._geometric_parameters],
             parameter_values=parameter_values,
-            rmse_mm=float(np.sqrt(np.mean(fit_errors_mm**2))),
+            rmse_mm=fit_rmse_mm,
             max_error_mm=float(np.max(fit_errors_mm)),
             per_sample_errors_mm=fit_errors_mm,
             position_error_rmse_mm=float(np.sqrt(np.mean(positioning_errors_mm**2))),
@@ -1164,6 +1213,7 @@ class CalibrationService:
             joint_count=len(measured),
             nfev=int(fit.nfev),
             confidence=confidence,
+            position_uncertainty_rmse_mm=fit_rmse_mm,
             selected_lambda=float(selected_lambda),
             cv_scores=cv_scores,
             active_indices=independent_indices,
@@ -1247,6 +1297,23 @@ def _load_nominal_config(path: Path | None) -> dict[str, Any] | None:
         nominal_path=path,
     )
     return service.load_nominal()
+
+
+def _controller_model_section(data: dict[str, Any], path: Path) -> dict[str, Any]:
+    if data.get("kind") == "controller_model":
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            raise TypeError(f"controller_model payload must be a mapping: {path}")
+        section = payload.get("controller_model") or payload
+    elif data.get("kind") is not None:
+        raise ValueError(
+            f"Controller model kind mismatch: expected controller_model, got {data.get('kind')!r}."
+        )
+    else:
+        section = data.get("controller_model") or data
+    if not isinstance(section, dict):
+        raise TypeError(f"controller_model section must be a mapping: {path}")
+    return section
 
 
 def _plain_dict(value: Any) -> dict[str, Any]:
@@ -1399,20 +1466,6 @@ def _euclidean_rmse_m(measured: np.ndarray, predicted: np.ndarray) -> float:
         axis=1,
     )
     return float(np.sqrt(np.mean(errors**2)))
-
-
-def _confidence_from_cv(cv_max_rmse_mm: float, limit_mm: float) -> float:
-    """Return an empirical reliability score from cross-validation error.
-
-    This is not a Bayesian posterior probability.  It maps the worst-fold
-    cross-validation RMSE to 0-100 using the configured RMS limit as scale:
-    confidence = 100 / (1 + cv_max_rmse_mm / (10 * limit_mm)).
-    """
-    if not np.isfinite(cv_max_rmse_mm):
-        return 0.0
-    scale = max(float(limit_mm), 1.0e-6)
-    confidence = 100.0 / (1.0 + max(cv_max_rmse_mm, 0.0) / (10.0 * scale))
-    return float(max(0.0, min(100.0, confidence)))
 
 
 def _score_from_error(error_mm: float, limit_mm: float) -> float:

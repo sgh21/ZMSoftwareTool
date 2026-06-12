@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QSpinBox, QWidg
 
 from app.pages.calibration_page import CalibrationPage
 from app.pages.initialization_page import InitializationPage
+from core.accuracy_evaluator import confidence_from_uncertainty
 from core.calibration_persistence import (
     list_identification_history,
     load_identification_result,
@@ -27,6 +28,7 @@ from core.calibration.bayesian_calibration_pipeline.core.parameters import vecto
 from core.calibration_dataset_packager import pack_raw_calibration_pair
 from core.calibration_service import CalibrationResult, CalibrationService, IdentificationOptions
 from core.nominal_parameter_service import nominal_after_applying_error_parameters
+from core.parameter_repository import ParameterFileRepository
 
 RAW_CALIBRATION_CSV = (
     Path("data")
@@ -307,6 +309,10 @@ def test_s1_identification_wraps_algorithm_and_separates_error_concepts() -> Non
     assert result.position_error_rmse_mm == pytest.approx(
         float(np.sqrt(np.mean(expected_position_errors**2)))
     )
+    assert result.position_uncertainty_rmse_mm == pytest.approx(result.rmse_mm)
+    assert result.confidence == pytest.approx(
+        confidence_from_uncertainty(result.rmse_mm, 0.5)
+    )
 
 
 def test_identify_from_files_persists_active_model_for_live_prediction(tmp_path: Path) -> None:
@@ -330,7 +336,7 @@ def test_identify_from_files_persists_active_model_for_live_prediction(tmp_path:
     assert state.health_level in {"good", "warning", "critical"}
 
 
-def test_live_fk_ignores_base_and_target_offset_errors(tmp_path: Path) -> None:
+def test_live_fk_ignores_base_errors_without_controller_model(tmp_path: Path) -> None:
     service = CalibrationService(project_root=tmp_path)
     joints = [0.0, -58.0, 82.0, -112.0, -90.0, 0.0]
 
@@ -346,7 +352,6 @@ def test_live_fk_ignores_base_and_target_offset_errors(tmp_path: Path) -> None:
         **nominal_robot,
         "base_xyz": [9.0, 8.0, 7.0],
         "base_rpy": [0.1, 0.2, 0.3],
-        "tool_xyz": [0.0, 0.0, 9.0],
     }
     yaml_path = save_identification_result(
         tmp_path / "legacy_result.yaml",
@@ -363,6 +368,50 @@ def test_live_fk_ignores_base_and_target_offset_errors(tmp_path: Path) -> None:
     service.load_active_parameters(yaml_path)
     loaded_state = service.compute_predicted_position(joints, joint_unit="degrees")
     assert loaded_state.error_norm_mm == pytest.approx(0.0)
+
+
+def test_live_model_error_compares_identified_fk_with_controller_fk(tmp_path: Path) -> None:
+    service = CalibrationService(project_root=tmp_path)
+    repo = ParameterFileRepository(tmp_path)
+    joints = [0.0, -58.0, 82.0, -112.0, -90.0, 0.0]
+    nominal_robot = service._current_nominal_robot_config()
+    errors = {"delta_a_2": 0.02}
+    identified_robot = nominal_after_applying_error_parameters(nominal_robot, errors)
+    legacy = save_identification_result(
+        tmp_path / "result.yaml",
+        errors,
+        nominal_robot=nominal_robot,
+        identified_robot=identified_robot,
+        fit_rmse_mm=0.1,
+        fit_max_error_mm=0.2,
+        position_error_rmse_mm=0.0,
+        position_error_max_mm=0.0,
+        sample_count=12,
+    )
+    identified_version = repo.import_parameter_file("identified_model", legacy)
+    copied_controller = repo.create_controller_model_from_identified(identified_version)
+
+    service.load_active_parameters(identified_version)
+    service.load_controller_model(copied_controller)
+    copied_state = service.compute_predicted_position(joints, joint_unit="degrees")
+
+    nominal_controller = repo.create_version(
+        "controller_model",
+        {
+            "controller_model": {
+                "mdh": nominal_robot["mdh"],
+                "tool_xyz": nominal_robot["tool_xyz"],
+                "tool_rpy": nominal_robot["tool_rpy"],
+            }
+        },
+    )
+    service.load_controller_model(nominal_controller)
+    nominal_state = service.compute_predicted_position(joints, joint_unit="degrees")
+
+    assert copied_state.model_rms_mm == pytest.approx(0.0)
+    assert copied_state.error_norm_mm == pytest.approx(0.0)
+    assert nominal_state.model_rms_mm > 0.0
+    assert nominal_state.error_norm_mm > 0.0
 
 
 def test_identification_yaml_and_sqlite_history_round_trip(tmp_path: Path) -> None:
@@ -502,8 +551,14 @@ def test_calibration_page_loads_multiple_files_runs_and_persists(
         QTest.qWait(20)
         elapsed += 20
     assert child(page, QLabel, "rmse_label").text() == "0.1000 mm"
-    assert (tmp_path / "config" / "calibration_result.yaml").exists()
-    assert list_identification_history(tmp_path / "storage" / "records" / "identification_history.sqlite")
+    versions = list((tmp_path / "storage" / "parameters" / "identified_model").glob("*.yaml"))
+    assert len(versions) == 1
+    assert not (tmp_path / "config" / "calibration_result.yaml").exists()
+    history = list_identification_history(
+        tmp_path / "storage" / "records" / "identification_history.sqlite"
+    )
+    assert history
+    assert Path(history[0]["result_yaml_path"]) == versions[0].resolve()
 
 
 def test_calibration_page_converts_raw_csv_txt_without_loading_for_identification(

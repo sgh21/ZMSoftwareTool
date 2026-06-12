@@ -28,11 +28,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.dialogs.nominal_parameter_dialog import NominalParameterUpdateDialog
+from app.dialogs.model_degradation_dialog import ModelDegradationDialog
+from app.dialogs.parameter_version_dialog import ParameterVersionDialog
 from app.dialogs.workstation_verification_dialog import WorkstationVerificationDialog
 from app.pages.calibration_page import CalibrationPage
 from app.widgets.robot_simulation_widget import DEFAULT_JOINT_DEGREES, RobotSimulationWidget
 from core.calibration_service import CalibrationService
+from core.parameter_repository import ParameterFileRepository
 from core.workstation_verification import (
     WorkstationAccuracyPreview,
     WorkstationVerificationService,
@@ -122,6 +124,7 @@ class InitializationPage(QWidget):
         self.project_root = Path(project_root or Path.cwd()).resolve()
         self._open_url = open_url or QDesktopServices.openUrl
         self.status_colors = self._load_status_colors()
+        self._parameter_repository = ParameterFileRepository(self.project_root)
         self._calibration_service = CalibrationService(project_root=self.project_root)
         self._workstation_verification_service = WorkstationVerificationService(
             self.project_root,
@@ -137,6 +140,7 @@ class InitializationPage(QWidget):
         self.health_value_labels: list[QLabel] = []
         self.joint_debug_dialog: QDialog | None = None
         self.workstation_verification_dialog: WorkstationVerificationDialog | None = None
+        self.model_degradation_dialog: ModelDegradationDialog | None = None
         self.settings_dialog: QDialog | None = None
         self.calibration_dialog: QDialog | None = None
         self.calibration_page: CalibrationPage | None = None
@@ -174,13 +178,14 @@ class InitializationPage(QWidget):
             self.load_model_file(default_urdf)
 
     def _load_default_identification_parameters(self) -> None:
-        for candidate in (
-            self.project_root / "config" / "calibration_result.yaml",
-            self.project_root / "storage" / "model_versions" / "active_calib_params.yaml",
-        ):
-            if candidate.exists():
-                self.load_param_file(candidate)
-                return
+        try:
+            self._parameter_repository.ensure_initial_versions()
+            self._load_active_controller_model()
+            candidate = self._parameter_repository.active_path_for("identified_model")
+        except Exception:
+            candidate = None
+        if candidate is not None and candidate.exists():
+            self.load_param_file(candidate)
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
@@ -276,15 +281,6 @@ class InitializationPage(QWidget):
         button.setFlat(True)
         menu = QMenu(button)
         menu.setObjectName("file_menu")
-
-        self.update_nominal_parameters_action = QAction("更新名义参数", self)
-        self.update_nominal_parameters_action.setObjectName(
-            "update_nominal_parameters_action"
-        )
-        self.update_nominal_parameters_action.triggered.connect(
-            self.show_nominal_parameter_update_dialog
-        )
-        menu.addAction(self.update_nominal_parameters_action)
         button.setMenu(menu)
         return button
 
@@ -324,33 +320,34 @@ class InitializationPage(QWidget):
             self.show_calibration_analysis_dialog
         )
         menu.addAction(self.calibration_analysis_action)
+
+        self.model_degradation_action = QAction("模型评估", self)
+        self.model_degradation_action.setObjectName("model_degradation_action")
+        self.model_degradation_action.triggered.connect(self.show_model_degradation_dialog)
+        menu.addAction(self.model_degradation_action)
         button.setMenu(menu)
         return button
 
-    def show_nominal_parameter_update_dialog(self) -> None:
-        dialog = NominalParameterUpdateDialog(self.project_root, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        self._calibration_service.reload_nominal_parameters()
-        self._reload_active_parameters_after_nominal_update()
-        self._refresh_realtime_accuracy()
-        if dialog.result_mode == "rollback":
-            self._set_status_message(f"名义参数已回退：{dialog.result_path}")
-        else:
-            self._set_status_message(f"名义参数已更新：{dialog.result_path}")
-
-    def _reload_active_parameters_after_nominal_update(self) -> None:
+    def _reload_active_parameters_from_current_path(self) -> None:
         if not self.params_loaded:
             return
         param_path = Path(self.param_path_edit.text())
         if not param_path.exists():
             return
         try:
+            self._load_active_controller_model()
             self._calibration_service.load_active_parameters(param_path)
             self.active_parameters_loaded = True
         except Exception:
             self.active_parameters_loaded = False
+
+    def _load_active_controller_model(self) -> None:
+        try:
+            controller_path = self._parameter_repository.active_path_for("controller_model")
+            self._calibration_service.load_controller_model(controller_path)
+        except Exception as exc:  # noqa: BLE001
+            self._calibration_service.load_controller_model(None)
+            self._set_status_message(f"控制模型加载失败：{exc}")
 
     def show_workstation_verification_dialog(self) -> None:
         if self.workstation_verification_dialog is None:
@@ -374,6 +371,23 @@ class InitializationPage(QWidget):
         self.settings_dialog.show()
         self.settings_dialog.raise_()
         self._set_status_message("已打开常用设置窗口")
+
+    def show_parameter_version_dialog(self) -> None:
+        dialog = ParameterVersionDialog(
+            self.project_root,
+            repository=self._parameter_repository,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._load_active_controller_model()
+        identified_path = dialog.selected_paths.get("identified_model")
+        if identified_path is not None and identified_path.exists():
+            self.load_param_file(identified_path)
+        else:
+            self._refresh_status()
+        self._refresh_realtime_accuracy()
+        self._set_status_message("参数版本组合已更新")
 
     def show_calibration_analysis_dialog(self) -> None:
         if self.calibration_dialog is None:
@@ -408,6 +422,41 @@ class InitializationPage(QWidget):
         self.calibration_dialog.show()
         self.calibration_dialog.raise_()
         self._set_status_message("已打开标定分析窗口")
+
+    def show_model_degradation_dialog(self) -> None:
+        if self.model_degradation_dialog is None:
+            dialog = ModelDegradationDialog(
+                self.project_root,
+                model_path_getter=self._active_parameter_path_for_monitoring,
+                on_model_updated=self._reload_model_after_degradation_update,
+                parent=self,
+            )
+            dialog.setModal(False)
+            self.model_degradation_dialog = dialog
+        self.model_degradation_dialog.refresh_model_path()
+        self.model_degradation_dialog.show()
+        self.model_degradation_dialog.raise_()
+        self._set_status_message("已打开模型评估窗口")
+
+    def _active_parameter_path_for_monitoring(self) -> Path:
+        try:
+            active = self._parameter_repository.active_path_for("identified_model")
+        except Exception:
+            active = None
+        if active is not None:
+            return active
+        if hasattr(self, "param_path_edit"):
+            text = self.param_path_edit.text().strip()
+            if text:
+                return Path(text)
+        return self.project_root / "config" / "calibration_result.yaml"
+
+    def _reload_model_after_degradation_update(self) -> None:
+        path = self._active_parameter_path_for_monitoring()
+        if path.exists():
+            self.load_param_file(path)
+        self._refresh_realtime_accuracy()
+        self._set_status_message("模型评估结果已写回并刷新")
 
     def _minimize_window(self) -> None:
         self.window().showMinimized()
@@ -538,7 +587,7 @@ class InitializationPage(QWidget):
 
         self.prompt_message_label = QLabel(
             "在当前配置目录中未找到可用的三维模型文件（.urdf/.xacro）\n"
-            "或误差参数文件（calib_params.yaml）。\n"
+            "或辨识模型参数版本文件。\n"
             "请先加载所需文件以继续初始化。"
         )
         self.prompt_message_label.setObjectName("prompt_message_label")
@@ -578,7 +627,10 @@ class InitializationPage(QWidget):
         metrics_layout.setVerticalSpacing(13)
         metrics_layout.addWidget(self._section_title("⚙ 当前精度指标"), 0, 0, 1, 2)
         self.accuracy_value_labels = []
-        for row, label in enumerate(("位置误差 RMS", "最大误差", "超差阈值", "当前结论"), start=1):
+        for row, label in enumerate(
+            ("模型误差 RMS", "评估总 RMS", "超差阈值", "当前结论"),
+            start=1,
+        ):
             metrics_layout.addWidget(QLabel(label), row, 0)
             value = QLabel("未初始化" if label == "当前结论" else "--")
             value.setObjectName(f"accuracy_value_{row}")
@@ -737,7 +789,7 @@ class InitializationPage(QWidget):
             layout,
             3,
             "参数文件",
-            "D:\\Projects\\UR_示例产线\\config\\calib_params.yaml",
+            "D:\\Projects\\UR_示例产线\\storage\\parameters\\identified_model\\",
             self.choose_param_file,
             "param_path_edit",
         )
@@ -745,6 +797,12 @@ class InitializationPage(QWidget):
         self.scan_on_start_checkbox = QCheckBox("启动时扫描配置目录")
         self.scan_on_start_checkbox.setObjectName("scan_on_start_checkbox")
         layout.addWidget(self.scan_on_start_checkbox, 4, 1)
+        self.parameter_versions_button = QPushButton("选择参数版本组合")
+        self.parameter_versions_button.setObjectName("parameter_versions_button")
+        self.parameter_versions_button.clicked.connect(self.show_parameter_version_dialog)
+        layout.addWidget(QLabel("参数版本"), 5, 0)
+        layout.addWidget(self.parameter_versions_button, 5, 1)
+        layout.addWidget(QLabel(""), 5, 2)
         layout.addWidget(QLabel("ⓘ"), 4, 2)
 
         self.config_warning_label = QLabel("⚠ 配置不完整：请加载三维模型与参数文件以完成初始化", card)
@@ -813,9 +871,9 @@ class InitializationPage(QWidget):
     def choose_param_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "加载参数文件",
-            str(self.project_root / "config"),
-            "Parameter file (*.yaml *.yml *.json)",
+            "加载辨识模型参数文件",
+            str(self.project_root / "storage" / "parameters" / "identified_model"),
+            "Identified model (*.yaml *.yml *.json)",
         )
         if path:
             self.load_param_file(Path(path))
@@ -848,6 +906,9 @@ class InitializationPage(QWidget):
             data = self._read_parameter_file(param_path)
             if not isinstance(data, dict):
                 raise TypeError("参数文件顶层必须是映射结构")
+            param_path = self._parameter_repository.ensure_identified_model_version(param_path)
+            self._parameter_repository.activate_version("identified_model", param_path)
+            self._load_active_controller_model()
             self._calibration_service.load_active_parameters(param_path)
         except Exception as exc:  # noqa: BLE001
             self.params_loaded = False
@@ -893,7 +954,7 @@ class InitializationPage(QWidget):
             return
         if not changed:
             return
-        self._reload_active_parameters_after_nominal_update()
+        self._reload_active_parameters_from_current_path()
         self._set_status_message("名义模型文件已更新，当前精度预览已刷新")
 
     def _on_robot_joint_angles_changed(self, _angles: list[float]) -> None:
@@ -945,8 +1006,8 @@ class InitializationPage(QWidget):
             return
 
         is_over_limit = state.rms_mm > threshold_mm
-        self.accuracy_value_labels[0].setText(f"{state.rms_mm:.3f} mm")
-        self.accuracy_value_labels[1].setText(f"{state.max_error_mm:.3f} mm")
+        self.accuracy_value_labels[0].setText(f"{state.model_rms_mm:.3f} mm")
+        self.accuracy_value_labels[1].setText(f"{state.rms_mm:.3f} mm")
         self.accuracy_value_labels[2].setText(f"{threshold_mm:.3f} mm")
         self.accuracy_value_labels[3].setText("超差" if is_over_limit else "正常")
         self._set_accuracy_alarm_dot("critical" if is_over_limit else "good")
@@ -1014,7 +1075,7 @@ class InitializationPage(QWidget):
             self.simulation_status_label.setText("⚠ 配置未加载，等待初始化")
             self.prompt_message_label.setText(
                 "在当前配置目录中未找到可用的三维模型文件（.urdf/.xacro）\n"
-                "或误差参数文件（calib_params.yaml）。\n"
+                "或辨识模型参数版本文件。\n"
                 "请先加载所需文件以继续初始化。"
             )
         self.init_prompt_card.setVisible(not self.model_loaded)

@@ -1,0 +1,52 @@
+schema_version: 1
+kind: camera_monitoring
+created_at: '2026-06-12T16:25:45+08:00'
+updated_at: '2026-06-12T16:25:45+08:00'
+payload:
+  model_monitoring:
+    hand_eye:
+      convention: E_T_C
+      T_tool_camera:
+      - - 0.999934
+        - 0.003458
+        - -0.01094
+        - 4.9e-05
+      - - -0.003407
+        - 0.999983
+        - 0.004657
+        - -0.087182
+      - - 0.010956
+        - -0.00462
+        - 0.999929
+        - 0.072556
+      - - 0.0
+        - 0.0
+        - 0.0
+        - 1.0
+    camera:
+      K:
+      - - 3675.2707
+        - 0.0
+        - 1231.6813
+      - - 0.0
+        - 3674.6618
+        - 1073.9725
+      - - 0.0
+        - 0.0
+        - 1.0
+      D:
+      - -0.1157
+      - 0.3235
+      - 0.001
+      - -0.0006
+      - -2.9623
+      board_grid:
+      - 39
+      - 34
+      square_size_mm: 0.5
+      r_diag_preference: none
+    evaluation:
+      orientation_weight_mm_per_rad: 100.0
+metadata:
+  source_path: config/model_monitoring.yaml
+  imported_from_legacy: true

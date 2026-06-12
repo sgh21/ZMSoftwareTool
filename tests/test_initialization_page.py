@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,25 +13,17 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
-    QDialog,
     QFileDialog,
     QLabel,
     QDoubleSpinBox,
-    QLineEdit,
-    QPlainTextEdit,
     QPushButton,
     QToolButton,
     QWidget,
 )
 
-from app.dialogs.nominal_parameter_dialog import NominalParameterUpdateDialog
 from app.pages.initialization_page import InitializationPage
 from core.calibration_persistence import save_identification_result
-from core.nominal_parameter_service import (
-    NominalParameterService,
-    nominal_after_applying_error_parameters,
-)
+from core.nominal_parameter_service import nominal_after_applying_error_parameters
 
 
 @pytest.fixture(scope="session")
@@ -155,7 +148,10 @@ def test_load_parameter_button_reads_yaml(
 
     assert page.params_loaded is True
     assert child(page, QLabel, "config_status_label").text() == "⚠ 模型未加载"
-    assert page.param_path_edit.text() == str(param_file)
+    assert page.param_path_edit.text() != str(param_file)
+    assert Path(page.param_path_edit.text()).parent == (
+        tmp_path / "storage" / "parameters" / "identified_model"
+    )
     assert "参数文件已加载" in page.footer_status_label.text()
 
 
@@ -200,8 +196,15 @@ def test_complete_configuration_updates_status(qapp: QApplication, tmp_path: Pat
     assert "模型与参数已加载" in page.prompt_message_label.text()
 
 
-def test_default_project_loads_ur10_and_debug_angles(qapp: QApplication) -> None:
-    page = InitializationPage(project_root=Path.cwd())
+def test_default_project_loads_ur10_and_debug_angles(qapp: QApplication, tmp_path: Path) -> None:
+    shutil.copytree(Path.cwd() / "models", tmp_path / "models")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    theme_path = Path.cwd() / "config" / "theme.yaml"
+    if theme_path.exists():
+        shutil.copy2(theme_path, config_dir / "theme.yaml")
+
+    page = InitializationPage(project_root=tmp_path)
 
     assert page.model_loaded is True
     assert page.model_path_edit.text().endswith(str(Path("models") / "urdf" / "ur10.urdf"))
@@ -326,215 +329,21 @@ def test_header_window_control_buttons(qapp: QApplication, tmp_path: Path) -> No
     assert not page.isVisible()
 
 
-def test_file_menu_opens_nominal_parameter_update_dialog(
-    qapp: QApplication,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[Path] = []
-    result_path = tmp_path / "config" / "nominal_robot.yaml"
-
-    class FakeNominalDialog:
-        result_mode = "direct"
-
-        def __init__(self, project_root: Path, parent=None) -> None:
-            self.result_path = result_path
-            calls.append(Path(project_root))
-
-        def exec(self):
-            return QDialog.DialogCode.Accepted
-
-    monkeypatch.setattr(
-        "app.pages.initialization_page.NominalParameterUpdateDialog",
-        FakeNominalDialog,
-    )
+def test_file_menu_no_longer_exposes_nominal_update(qapp: QApplication, tmp_path: Path) -> None:
     page = InitializationPage(project_root=tmp_path)
 
     file_button = child(page, QPushButton, "file_menu_button")
+
     assert file_button.menu() is not None
-    assert [action.text() for action in file_button.menu().actions()] == ["更新名义参数"]
-
-    page.show_nominal_parameter_update_dialog()
-
-    assert calls == [tmp_path.resolve()]
-    assert "名义参数已更新" in page.footer_status_label.text()
+    assert [action.objectName() for action in file_button.menu().actions()] == []
+    assert not hasattr(page, "update_nominal_parameters_action")
+    assert not hasattr(page, "show_nominal_parameter_update_dialog")
 
 
-def test_nominal_update_menu_uses_complete_identified_model_after_nominal_update(
-    qapp: QApplication,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    nominal_path = config_dir / "nominal_robot.yaml"
-    nominal_path.write_text(
-        """
-nominal_robot:
-  base_xyz: [1.0, 2.0, 3.0]
-  base_rpy: [0.1, 0.2, 0.3]
-  tool_xyz: [0.0, 0.0, 0.039]
-  tool_rpy: [0.0, 0.0, 0.0]
-  mdh:
-    alpha: [0.0, 1.57, 0.0, 0.0, 1.57, -1.57]
-    a: [0.0, -0.612, -0.5723, 0.0, 0.0, 0.0]
-    d: [0.1273, 0.0, 0.0, 0.163941, 0.1157, 0.0922]
-    theta_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-""",
-        encoding="utf-8",
-    )
-    result_path = config_dir / "calibration_result.yaml"
-    errors = {"delta_a_2": 0.02, "delta_Btx": 0.01}
-    save_identification_result(
-        result_path,
-        errors,
-        nominal_robot=read_nominal_for_fk(tmp_path),
-        identified_robot=identified_payload(tmp_path, errors),
-        fit_rmse_mm=0.1,
-        fit_max_error_mm=0.2,
-        position_error_rmse_mm=10.0,
-        position_error_max_mm=10.0,
-        sample_count=10,
-    )
+def test_settings_contains_parameter_version_entry(qapp: QApplication, tmp_path: Path) -> None:
     page = InitializationPage(project_root=tmp_path)
-    before = page._calibration_service.compute_predicted_position(
-        [0.0, -58.0, 82.0, -112.0, -90.0, 0.0]
-    )
-    assert before.error_norm_mm > 0.0
 
-    class FakeNominalDialog:
-        result_mode = "identification"
+    page.show_settings_dialog()
+    qapp.processEvents()
 
-        def __init__(self, project_root: Path, parent=None) -> None:
-            self.result_path = result_path
-            NominalParameterService(project_root).update_from_identification_file(result_path)
-
-        def exec(self):
-            return QDialog.DialogCode.Accepted
-
-    monkeypatch.setattr(
-        "app.pages.initialization_page.NominalParameterUpdateDialog",
-        FakeNominalDialog,
-    )
-
-    page.show_nominal_parameter_update_dialog()
-    after = page._calibration_service.compute_predicted_position(
-        [0.0, -58.0, 82.0, -112.0, -90.0, 0.0]
-    )
-
-    assert after.error_norm_mm == pytest.approx(0.0)
-    assert "名义参数已更新" in page.footer_status_label.text()
-
-
-def test_nominal_update_dialog_modes_refresh_live_fk_and_accuracy_status(
-    qapp: QApplication,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    write_nominal_for_fk(tmp_path, tool_z=0.039)
-    active_param_path = tmp_path / "config" / "calibration_result.yaml"
-    active_errors = {"delta_theta_5": 0.01}
-    save_identification_result(
-        active_param_path,
-        active_errors,
-        nominal_robot=read_nominal_for_fk(tmp_path),
-        identified_robot=identified_payload(tmp_path, active_errors),
-        fit_rmse_mm=0.1,
-        fit_max_error_mm=0.2,
-        position_error_rmse_mm=1.0,
-        position_error_max_mm=1.5,
-        sample_count=10,
-    )
-    imported_param_path = tmp_path / "config" / "imported_result.yaml"
-    imported_errors = {"delta_a_2": 0.02, "delta_Ttz": 0.5}
-    save_identification_result(
-        imported_param_path,
-        imported_errors,
-        nominal_robot=read_nominal_for_fk(tmp_path),
-        identified_robot=identified_payload(tmp_path, imported_errors),
-        fit_rmse_mm=0.1,
-        fit_max_error_mm=0.2,
-        position_error_rmse_mm=500.0,
-        position_error_max_mm=500.0,
-        sample_count=10,
-    )
-    page = InitializationPage(project_root=tmp_path)
-    assert page.active_parameters_loaded is True
-
-    initial_metric = accuracy_metric_mm(page)
-    initial_nominal = nominal_position_for_current_view(page)
-
-    def apply_dialog(edit_dialog) -> None:
-        def exec_with_ui_actions(dialog: NominalParameterUpdateDialog):
-            edit_dialog(dialog)
-            QTest.mouseClick(
-                child(dialog, QPushButton, "nominal_update_save_button"),
-                Qt.MouseButton.LeftButton,
-            )
-            assert dialog.result_path == tmp_path / "config" / "nominal_robot.yaml"
-            return QDialog.DialogCode.Accepted
-
-        monkeypatch.setattr(NominalParameterUpdateDialog, "exec", exec_with_ui_actions)
-        page.show_nominal_parameter_update_dialog()
-        qapp.processEvents()
-
-    def apply_rollback() -> None:
-        def exec_with_rollback(dialog: NominalParameterUpdateDialog):
-            rollback_button = child(dialog, QPushButton, "nominal_rollback_button")
-            assert rollback_button.isEnabled()
-            QTest.mouseClick(rollback_button, Qt.MouseButton.LeftButton)
-            assert dialog.result_mode == "rollback"
-            return QDialog.DialogCode.Accepted
-
-        monkeypatch.setattr(NominalParameterUpdateDialog, "exec", exec_with_rollback)
-        page.show_nominal_parameter_update_dialog()
-        qapp.processEvents()
-
-    def set_direct_tool(dialog: NominalParameterUpdateDialog) -> None:
-        child(dialog, QComboBox, "nominal_update_mode_combo").setCurrentIndex(0)
-        edit = child(dialog, QPlainTextEdit, "nominal_direct_yaml_edit")
-        document = yaml.safe_load(edit.toPlainText())
-        document["nominal_robot"]["tool_xyz"][2] = 0.2
-        edit.setPlainText(yaml.safe_dump(document, sort_keys=False))
-
-    apply_dialog(set_direct_tool)
-    direct_metric = accuracy_metric_mm(page)
-    direct_nominal = nominal_position_for_current_view(page)
-    assert direct_metric != pytest.approx(initial_metric)
-    assert not np.allclose(direct_nominal, initial_nominal)
-    assert "名义参数已更新" in page.footer_status_label.text()
-
-    def set_values_tool(dialog: NominalParameterUpdateDialog) -> None:
-        child(dialog, QComboBox, "nominal_update_mode_combo").setCurrentIndex(1)
-        child(dialog, QPlainTextEdit, "nominal_values_yaml_edit").setPlainText(
-            """
-nominal_values:
-  tool_xyz: [0.0, 0.0, 0.05]
-"""
-        )
-
-    apply_dialog(set_values_tool)
-    values_metric = accuracy_metric_mm(page)
-    values_nominal = nominal_position_for_current_view(page)
-    assert values_metric != pytest.approx(direct_metric)
-    assert not np.allclose(values_nominal, direct_nominal)
-
-    def import_identification(dialog: NominalParameterUpdateDialog) -> None:
-        child(dialog, QComboBox, "nominal_update_mode_combo").setCurrentIndex(2)
-        child(dialog, QLineEdit, "nominal_identification_path_edit").setText(
-            str(imported_param_path)
-        )
-
-    apply_dialog(import_identification)
-    imported_metric = accuracy_metric_mm(page)
-    imported_nominal = nominal_position_for_current_view(page)
-    assert imported_metric != pytest.approx(values_metric)
-    assert not np.allclose(imported_nominal, values_nominal)
-    assert read_nominal_for_fk(tmp_path)["tool_xyz"][2] == pytest.approx(0.05)
-
-    apply_rollback()
-    rollback_metric = accuracy_metric_mm(page)
-    rollback_nominal = nominal_position_for_current_view(page)
-    assert rollback_metric == pytest.approx(values_metric)
-    assert np.allclose(rollback_nominal, values_nominal)
-    assert "名义参数已回退" in page.footer_status_label.text()
+    assert child(page, QPushButton, "parameter_versions_button").text() == "选择参数版本组合"

@@ -2,11 +2,45 @@
 PnP 评估核心函数。
 """
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
-from controller.Transforms import invT, makeT, rotvec2rot
+from typing import Optional
 
-import cv2
 import numpy as np
+
+try:
+    import cv2
+except ModuleNotFoundError:  # pragma: no cover - exercised in environments without OpenCV.
+    cv2 = None
+
+
+def _require_cv2():
+    if cv2 is None:
+        raise ImportError("PnP 图像解算需要安装 opencv-python。")
+    return cv2
+
+
+def makeT(R, t):
+    """Build a 4x4 homogeneous transform from rotation and translation."""
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    T[:3, 3] = np.asarray(t, dtype=np.float64).reshape(3)
+    return T
+
+
+def invT(T):
+    """Invert a 4x4 rigid transform."""
+    matrix = np.asarray(T, dtype=np.float64).reshape(4, 4)
+    output = np.eye(4, dtype=np.float64)
+    R = matrix[:3, :3]
+    p = matrix[:3, 3]
+    output[:3, :3] = R.T
+    output[:3, 3] = -R.T @ p
+    return output
+
+
+def rotvec2rot(rvec):
+    cv = _require_cv2()
+    R, _ = cv.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
+    return R
 
 
 @dataclass
@@ -57,38 +91,57 @@ def make_centered_checkerboard_object_points(board_grid, square_size_mm):
 
 
 def detect_checkerboard_corners(image_bgr, board_grid, subpix_win=(11, 11), max_iters=50, eps=1e-3):
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    cv = _require_cv2()
+    gray = cv.cvtColor(image_bgr, cv.COLOR_BGR2GRAY)
 
     flags = (
-        cv2.CALIB_CB_ADAPTIVE_THRESH
-        | cv2.CALIB_CB_NORMALIZE_IMAGE
-        | cv2.CALIB_CB_FILTER_QUADS
+        cv.CALIB_CB_ADAPTIVE_THRESH
+        | cv.CALIB_CB_NORMALIZE_IMAGE
+        | cv.CALIB_CB_FILTER_QUADS
     )
-    ok, corners = cv2.findChessboardCorners(gray, board_grid, flags)
+    ok, corners = cv.findChessboardCorners(gray, board_grid, flags)
 
     if (not ok) or corners is None:
-        if hasattr(cv2, "findChessboardCornersSB"):
-            ok, corners = cv2.findChessboardCornersSB(gray, board_grid, flags=0)
+        if hasattr(cv, "findChessboardCornersSB"):
+            ok, corners = cv.findChessboardCornersSB(gray, board_grid, flags=0)
         if (not ok) or corners is None:
             return False, None
 
     criteria = (
-        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+        cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER,
         int(max_iters),
         float(eps),
     )
-    corners = cv2.cornerSubPix(
+    corners = cv.cornerSubPix(
         gray,
         np.asarray(corners, dtype=np.float32),
         winSize=tuple(subpix_win),
         zeroZone=(-1, -1),
         criteria=criteria,
     )
-    return True, np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+    corners = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+    return True, canonicalize_checkerboard_corner_order(corners, board_grid)
+
+
+def canonicalize_checkerboard_corner_order(image_points, board_grid):
+    """Return a deterministic corner order for symmetric checkerboards.
+
+    OpenCV can return the same checkerboard with the first corner at the
+    opposite end of the grid.  That produces a board pose rotated by 180 deg
+    around the board normal while keeping the reprojection error unchanged.
+    For the fixed-camera monitoring workflow we use the image-frame convention:
+    the first corner is the grid corner closest to image top-left.
+    """
+    cols, rows = board_grid
+    grid = np.asarray(image_points, dtype=np.float64).reshape(rows, cols, 2)
+    if float(np.sum(grid[0, 0])) > float(np.sum(grid[-1, -1])):
+        grid = grid[::-1, ::-1, :]
+    return np.ascontiguousarray(grid.reshape(-1, 2), dtype=np.float64)
 
 
 def _project_and_pack(object_points, image_points, K, dist, rvec, tvec):
-    proj, _ = cv2.projectPoints(object_points, rvec, tvec, K, dist)
+    cv = _require_cv2()
+    proj, _ = cv.projectPoints(object_points, rvec, tvec, K, dist)
     proj = proj.reshape(-1, 2)
     reproj_each = np.linalg.norm(proj - image_points, axis=1)
     reproj_mean = float(np.mean(reproj_each))
@@ -97,6 +150,7 @@ def _project_and_pack(object_points, image_points, K, dist, rvec, tvec):
 
 
 def solve_checkerboard_pose(object_points, image_points, K, dist, use_ippe=True, refine_lm=True, r_diag_preference="none"):
+    cv = _require_cv2()
     object_points = np.asarray(object_points, dtype=np.float64).reshape(-1, 3)
     image_points = np.asarray(image_points, dtype=np.float64).reshape(-1, 2)
     K = np.asarray(K, dtype=np.float64)
@@ -106,35 +160,35 @@ def solve_checkerboard_pose(object_points, image_points, K, dist, use_ippe=True,
 
     if use_ippe:
         try:
-            ok, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+            ok, rvecs, tvecs, _ = cv.solvePnPGeneric(
                 object_points,
                 image_points,
                 K,
                 dist,
-                flags=cv2.SOLVEPNP_IPPE,
+                flags=cv.SOLVEPNP_IPPE,
             )
             if ok:
                 for rvec, tvec in zip(rvecs, tvecs):
                     rvec = np.asarray(rvec, dtype=np.float64).reshape(3, 1)
                     tvec = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
-                    if float(tvec[2]) <= 0.0:
+                    if float(tvec.reshape(3)[2]) <= 0.0:
                         continue
                     proj, reproj_each, reproj_mean, reproj_rms = _project_and_pack(
                         object_points, image_points, K, dist, rvec, tvec
                     )
-                    R, _ = cv2.Rodrigues(rvec)
+                    R, _ = cv.Rodrigues(rvec)
                     # print(f"Rotation matrix:\n{R}\nReprojection mean error: {reproj_mean:.4f} px")
                     candidates.append((reproj_mean, reproj_rms, rvec, tvec, proj, reproj_each))
-        except cv2.error:
+        except cv.error:
             pass
 
     if not candidates:
-        ok, rvec, tvec = cv2.solvePnP(
+        ok, rvec, tvec = cv.solvePnP(
             object_points,
             image_points,
             K,
             dist,
-            flags=cv2.SOLVEPNP_ITERATIVE,
+            flags=cv.SOLVEPNP_ITERATIVE,
         )
         if not ok:
             return PoseEstimate(success=False, message="solvePnP 失败")
@@ -148,7 +202,7 @@ def solve_checkerboard_pose(object_points, image_points, K, dist, use_ippe=True,
         reproj_mean, reproj_rms, rvec = c[0], c[1], c[2]
         
         if r_diag_preference in ["neg", "pos"]:
-            R, _ = cv2.Rodrigues(rvec)
+            R, _ = cv.Rodrigues(rvec)
             # 计算旋转矩阵前两项对角线之和。
             # 如果是 [-1, -1, *]，diag_sum 接近 -2；如果是 [1, 1, *]，diag_sum 接近 2。
             diag_sum = R[0, 0] + R[1, 1]
@@ -182,7 +236,7 @@ def solve_checkerboard_pose(object_points, image_points, K, dist, use_ippe=True,
 
     if refine_lm:
         try:
-            rvec, tvec = cv2.solvePnPRefineLM(
+            rvec, tvec = cv.solvePnPRefineLM(
                 object_points,
                 image_points,
                 K,
@@ -193,7 +247,7 @@ def solve_checkerboard_pose(object_points, image_points, K, dist, use_ippe=True,
             proj, reproj_each, reproj_mean, reproj_rms = _project_and_pack(
                 object_points, image_points, K, dist, rvec, tvec
             )
-        except cv2.error:
+        except cv.error:
             pass
 
     T = makeT(rotvec2rot(rvec), tvec)
@@ -260,7 +314,8 @@ def relative_transform(T_ref, T_cur):
 
 
 def rotation_angle_deg(R):
-    rvec, _ = cv2.Rodrigues(R)
+    cv = _require_cv2()
+    rvec, _ = cv.Rodrigues(R)
     return float(np.linalg.norm(np.degrees(rvec.reshape(3))))
 
 
@@ -291,20 +346,21 @@ def build_gt_translation_mm(stage_x_mm, stage_y_mm, *, swap_xy=False, sign_x=1.0
 
 
 def draw_pose_debug(image_bgr, pose: PoseEstimate, board_grid, text_lines=None):
+    cv = _require_cv2()
     vis = image_bgr.copy()
 
     if pose.image_points is not None:
         for p in pose.image_points:
             x, y = np.round(p).astype(int)
-            cv2.circle(vis, (x, y), 3, (0, 255, 0), -1, cv2.LINE_AA)
+            cv.circle(vis, (x, y), 3, (0, 255, 0), -1, cv.LINE_AA)
 
     if pose.projected_points is not None:
         for p in pose.projected_points:
             x, y = np.round(p).astype(int)
-            cv2.circle(vis, (x, y), 2, (0, 0, 255), -1, cv2.LINE_AA)
+            cv.circle(vis, (x, y), 2, (0, 0, 255), -1, cv.LINE_AA)
 
     if pose.image_points is not None and len(pose.image_points) == board_grid[0] * board_grid[1]:
-        cv2.drawChessboardCorners(
+        cv.drawChessboardCorners(
             vis,
             board_grid,
             pose.image_points.reshape(-1, 1, 2).astype(np.float32),
@@ -321,15 +377,15 @@ def draw_pose_debug(image_bgr, pose: PoseEstimate, board_grid, text_lines=None):
 
     y0 = 30
     for i, line in enumerate(lines):
-        cv2.putText(
+        cv.putText(
             vis,
             line,
             (20, y0 + 28 * i),
-            cv2.FONT_HERSHEY_SIMPLEX,
+            cv.FONT_HERSHEY_SIMPLEX,
             0.8,
             (255, 255, 255),
             2,
-            cv2.LINE_AA,
+            cv.LINE_AA,
         )
     return vis
 

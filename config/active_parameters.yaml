@@ -1,0 +1,7 @@
+schema_version: 1
+updated_at: '2026-06-12T17:17:02+08:00'
+active_parameters:
+  nominal_robot: config/nominal_robot.yaml
+  identified_model: storage/parameters/identified_model/identified_model_20260612_171603.yaml
+  camera_monitoring: storage/parameters/camera_monitoring/camera_monitoring_20260612_162545.yaml
+  controller_model: storage/parameters/controller_model/controller_model_20260612_164532.yaml

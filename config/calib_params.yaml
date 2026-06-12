@@ -1,7 +1,0 @@
-calibration:
-  active_param_file: config/calibration_result.yaml
-  nominal_param_file: config/nominal_robot.yaml
-  history_db: storage/records/identification_history.sqlite
-  backup_dir: storage/model_versions
-  algorithm_package: core.calibration.bayesian_calibration_pipeline
-  default_method: S1

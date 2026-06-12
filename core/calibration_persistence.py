@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import yaml
 
+from core.parameter_repository import ParameterFileRepository
+
 
 def save_identification_result(
     output_path: str | Path,
@@ -23,6 +25,7 @@ def save_identification_result(
     position_error_rmse_mm: float,
     position_error_max_mm: float,
     sample_count: int,
+    position_uncertainty_rmse_mm: float | None = None,
     confidence: float = 100.0,
     method: str = "S1",
     selected_lambda: float = 0.0,
@@ -35,38 +38,75 @@ def save_identification_result(
     path = Path(output_path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now(timezone.utc).isoformat()
-    identification: dict[str, Any] = {
-        "timestamp": timestamp,
-        "method": str(method),
-        "confidence": float(confidence),
-        "sample_count": int(sample_count),
-        "selected_lambda": float(selected_lambda),
-        "dataset_paths": list(dataset_paths or []),
-        "metrics": {
-            "fit_rmse_mm": float(fit_rmse_mm),
-            "fit_max_error_mm": float(fit_max_error_mm),
-            "position_error_rmse_mm": float(position_error_rmse_mm),
-            "position_error_max_mm": float(position_error_max_mm),
-            # Backward-compatible metric aliases.
-            "rmse_mm": float(fit_rmse_mm),
-            "max_error_mm": float(fit_max_error_mm),
-        },
-        "error_parameters": _serialize_parameters(parameter_values),
+    document = {
+        "identification": _build_identification_section(
+            parameter_values,
+            nominal_robot=nominal_robot,
+            identified_robot=identified_robot,
+            fit_rmse_mm=fit_rmse_mm,
+            fit_max_error_mm=fit_max_error_mm,
+            position_error_rmse_mm=position_error_rmse_mm,
+            position_error_max_mm=position_error_max_mm,
+            sample_count=sample_count,
+            position_uncertainty_rmse_mm=position_uncertainty_rmse_mm,
+            confidence=confidence,
+            method=method,
+            selected_lambda=selected_lambda,
+            dataset_paths=dataset_paths,
+            cv_scores=cv_scores,
+            subspace_summary=subspace_summary,
+            extra_metadata=extra_metadata,
+        )
     }
-    identification["nominal_robot"] = _sanitize_metadata(nominal_robot)
-    identification["identified_robot"] = _sanitize_metadata(identified_robot)
-    if cv_scores:
-        identification["cv_scores"] = _sanitize_metadata({"rows": cv_scores})["rows"]
-    if subspace_summary:
-        identification["subspace_summary"] = _sanitize_metadata(subspace_summary)
-    if extra_metadata:
-        identification["metadata"] = _sanitize_metadata(extra_metadata)
-
-    document = {"identification": identification}
     with path.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(document, fh, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return path
+
+
+def save_identification_version(
+    project_root: str | Path,
+    parameter_values: dict[str, float],
+    *,
+    nominal_robot: dict[str, Any],
+    identified_robot: dict[str, Any],
+    fit_rmse_mm: float,
+    fit_max_error_mm: float,
+    position_error_rmse_mm: float,
+    position_error_max_mm: float,
+    sample_count: int,
+    position_uncertainty_rmse_mm: float | None = None,
+    confidence: float = 100.0,
+    method: str = "S1",
+    selected_lambda: float = 0.0,
+    dataset_paths: list[str] | None = None,
+    cv_scores: list[dict[str, Any]] | None = None,
+    subspace_summary: dict[str, Any] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
+) -> Path:
+    """Create a timestamped identified-model parameter version."""
+    section = _build_identification_section(
+        parameter_values,
+        nominal_robot=nominal_robot,
+        identified_robot=identified_robot,
+        fit_rmse_mm=fit_rmse_mm,
+        fit_max_error_mm=fit_max_error_mm,
+        position_error_rmse_mm=position_error_rmse_mm,
+        position_error_max_mm=position_error_max_mm,
+        sample_count=sample_count,
+        position_uncertainty_rmse_mm=position_uncertainty_rmse_mm,
+        confidence=confidence,
+        method=method,
+        selected_lambda=selected_lambda,
+        dataset_paths=dataset_paths,
+        cv_scores=cv_scores,
+        subspace_summary=subspace_summary,
+        extra_metadata=extra_metadata,
+    )
+    return ParameterFileRepository(project_root).create_version(
+        "identified_model",
+        {"identification": section},
+        metadata={"source": "calibration_identification"},
+    )
 
 
 def load_identification_result(path: str | Path) -> dict[str, Any]:
@@ -79,7 +119,17 @@ def load_identification_result(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise TypeError(f"Identification file must contain a mapping: {file_path}")
 
-    section = data.get("identification") or data.get("calibration") or data
+    if data.get("kind") == "identified_model":
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            raise TypeError(f"identified_model payload must be a mapping: {file_path}")
+        section = payload.get("identification") or payload
+    elif data.get("kind") is not None:
+        raise ValueError(
+            f"Identification file kind mismatch: expected identified_model, got {data.get('kind')!r}."
+        )
+    else:
+        section = data.get("identification") or data.get("calibration") or data
     if not isinstance(section, dict):
         raise TypeError(f"Identification section must be a mapping: {file_path}")
     metrics = section.get("metrics", {}) if isinstance(section.get("metrics", {}), dict) else {}
@@ -93,7 +143,7 @@ def load_identification_result(path: str | Path) -> dict[str, Any]:
     return {
         "timestamp": str(section.get("timestamp", "")),
         "method": str(section.get("method", "S1")),
-        "confidence": float(section.get("confidence", 100.0)),
+        "confidence": _section_confidence(section),
         "sample_count": int(section.get("sample_count", 0)),
         "selected_lambda": float(section.get("selected_lambda", 0.0)),
         "dataset_paths": list(section.get("dataset_paths", [])),
@@ -103,6 +153,12 @@ def load_identification_result(path: str | Path) -> dict[str, Any]:
         ),
         "position_error_rmse_mm": float(metrics.get("position_error_rmse_mm", 0.0)),
         "position_error_max_mm": float(metrics.get("position_error_max_mm", 0.0)),
+        "position_uncertainty_rmse_mm": float(
+            metrics.get(
+                "position_uncertainty_rmse_mm",
+                metrics.get("fit_rmse_mm", metrics.get("rmse_mm", 0.0)),
+            )
+        ),
         "rmse_mm": float(metrics.get("rmse_mm", metrics.get("fit_rmse_mm", 0.0))),
         "max_error_mm": float(metrics.get("max_error_mm", metrics.get("fit_max_error_mm", 0.0))),
         "error_parameters": dict(section.get("error_parameters", {})),
@@ -252,6 +308,83 @@ def _ensure_history_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _build_identification_section(
+    parameter_values: dict[str, float],
+    *,
+    nominal_robot: dict[str, Any],
+    identified_robot: dict[str, Any],
+    fit_rmse_mm: float,
+    fit_max_error_mm: float,
+    position_error_rmse_mm: float,
+    position_error_max_mm: float,
+    sample_count: int,
+    position_uncertainty_rmse_mm: float | None,
+    confidence: float,
+    method: str,
+    selected_lambda: float,
+    dataset_paths: list[str] | None,
+    cv_scores: list[dict[str, Any]] | None,
+    subspace_summary: dict[str, Any] | None,
+    extra_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    confidence_value = float(confidence)
+    uncertainty_value = (
+        float(fit_rmse_mm)
+        if position_uncertainty_rmse_mm is None
+        else float(position_uncertainty_rmse_mm)
+    )
+    identification: dict[str, Any] = {
+        "timestamp": timestamp,
+        "updated_at": timestamp,
+        "method": str(method),
+        "confidence": confidence_value,
+        "confidence_current": confidence_value,
+        "confidence_history": [
+            {
+                "timestamp": timestamp,
+                "value": confidence_value,
+                "source": "calibration_identification",
+                "reason": "initial identification result",
+            }
+        ],
+        "sample_count": int(sample_count),
+        "selected_lambda": float(selected_lambda),
+        "dataset_paths": list(dataset_paths or []),
+        "metrics": {
+            "fit_rmse_mm": float(fit_rmse_mm),
+            "fit_max_error_mm": float(fit_max_error_mm),
+            "position_error_rmse_mm": float(position_error_rmse_mm),
+            "position_error_max_mm": float(position_error_max_mm),
+            "position_uncertainty_rmse_mm": uncertainty_value,
+            # Backward-compatible metric aliases.
+            "rmse_mm": float(fit_rmse_mm),
+            "max_error_mm": float(fit_max_error_mm),
+        },
+        "error_parameters": _serialize_parameters(parameter_values),
+        "nominal_robot": _sanitize_metadata(nominal_robot),
+        "identified_robot": _sanitize_metadata(identified_robot),
+    }
+    if cv_scores:
+        identification["cv_scores"] = _sanitize_metadata({"rows": cv_scores})["rows"]
+    if subspace_summary:
+        identification["subspace_summary"] = _sanitize_metadata(subspace_summary)
+    if extra_metadata:
+        identification["metadata"] = _sanitize_metadata(extra_metadata)
+    return identification
+
+
+def _section_confidence(section: dict[str, Any]) -> float:
+    if "confidence_current" in section:
+        return float(section["confidence_current"])
+    history = section.get("confidence_history")
+    if isinstance(history, list) and history:
+        latest = history[-1]
+        if isinstance(latest, dict) and "value" in latest:
+            return float(latest["value"])
+    return float(section.get("confidence", 100.0))
 
 
 def _serialize_parameters(values: dict[str, float]) -> dict[str, float]:

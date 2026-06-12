@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from core.calibration_persistence import (
     record_identification_history,
+    save_identification_version,
     save_identification_result,
 )
 from core.calibration_dataset_packager import pack_raw_calibration_pair
@@ -90,6 +91,8 @@ class CalibrationPage(QWidget):
         self._joint_angles: list[float] = list(DEFAULT_JOINT_ANGLES)
         self._identification_thread: QThread | None = None
         self._identification_worker: IdentificationWorker | None = None
+        self._finished_identification_threads: list[QThread] = []
+        self._finished_identification_workers: list[IdentificationWorker] = []
         self._identification_progress: QProgressDialog | None = None
         self.setObjectName("calibration_page")
         self._build_ui()
@@ -388,9 +391,13 @@ class CalibrationPage(QWidget):
             self._set_status(f"数据加载失败: {exc}")
 
     def _run_calibration(self) -> None:
+        if self._identification_thread is not None:
+            return
         if self._calib_data is None:
             self._set_status("请先加载辨识数据")
             return
+        self._finished_identification_threads.clear()
+        self._finished_identification_workers.clear()
 
         options = self._identification_options()
         mode_name = "S1_DEBUG 快速辨识" if options.debug_fast else "S1 参数辨识"
@@ -424,7 +431,6 @@ class CalibrationPage(QWidget):
         worker.failed.connect(self._on_identification_failed)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._on_identification_thread_finished)
         self._identification_thread = thread
         self._identification_worker = worker
@@ -458,6 +464,10 @@ class CalibrationPage(QWidget):
 
     @Slot()
     def _on_identification_thread_finished(self) -> None:
+        if self._identification_thread is not None:
+            self._finished_identification_threads.append(self._identification_thread)
+        if self._identification_worker is not None:
+            self._finished_identification_workers.append(self._identification_worker)
         self._identification_thread = None
         self._identification_worker = None
 
@@ -510,9 +520,8 @@ class CalibrationPage(QWidget):
 
     def _persist_identification_result(self, result: CalibrationResult) -> Path | None:
         try:
-            yaml_path = self.project_root / "config" / "calibration_result.yaml"
-            saved = save_identification_result(
-                yaml_path,
+            saved = save_identification_version(
+                self.project_root,
                 result.parameter_values,
                 nominal_robot=result.nominal_robot,
                 identified_robot=result.identified_robot,
@@ -521,6 +530,7 @@ class CalibrationPage(QWidget):
                 position_error_rmse_mm=result.position_error_rmse_mm,
                 position_error_max_mm=result.position_error_max_mm,
                 sample_count=result.joint_count,
+                position_uncertainty_rmse_mm=result.position_uncertainty_rmse_mm,
                 confidence=result.confidence,
                 method=result.method,
                 selected_lambda=result.selected_lambda,
@@ -629,6 +639,7 @@ class CalibrationPage(QWidget):
                 position_error_rmse_mm=result.position_error_rmse_mm,
                 position_error_max_mm=result.position_error_max_mm,
                 sample_count=result.joint_count,
+                position_uncertainty_rmse_mm=result.position_uncertainty_rmse_mm,
                 confidence=result.confidence,
                 method=result.method,
                 selected_lambda=result.selected_lambda,

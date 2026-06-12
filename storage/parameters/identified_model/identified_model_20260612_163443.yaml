@@ -1,0 +1,203 @@
+schema_version: 1
+kind: identified_model
+created_at: '2026-06-12T16:34:43+08:00'
+updated_at: '2026-06-12T16:34:43+08:00'
+payload:
+  identification:
+    timestamp: '2026-06-12T08:34:43.406019+00:00'
+    updated_at: '2026-06-12T08:34:43.406019+00:00'
+    method: S1_DEBUG
+    confidence: 84.47602105846317
+    confidence_current: 84.47602105846317
+    confidence_history:
+    - timestamp: '2026-06-12T08:34:43.406019+00:00'
+      value: 84.47602105846317
+      source: calibration_identification
+      reason: initial identification uncertainty from fit_rmse_mm against laser tracker truth
+    sample_count: 250
+    selected_lambda: 1.0e-10
+    dataset_paths:
+    - data/calibration/bayesian_calibration_pipeline/real_world_normal50_nongeometric.pkl
+    - data/calibration/bayesian_calibration_pipeline/real_world200_nongeometric.pkl
+    metrics:
+      fit_rmse_mm: 0.21434077758779366
+      fit_max_error_mm: 0.7232813068916554
+      position_error_rmse_mm: 17.8568846852511
+      position_error_max_mm: 21.78335016299353
+      position_uncertainty_rmse_mm: 0.21434077758779366
+      rmse_mm: 0.21434077758779366
+      max_error_mm: 0.7232813068916554
+    error_parameters:
+      delta_alpha_1: 0.0016532018313624582
+      delta_alpha_2: -0.003977106525234087
+      delta_alpha_3: -0.011192959383144702
+      delta_alpha_4: 0.001289145392215666
+      delta_alpha_5: 0.0007162642517302858
+      delta_alpha_6: -5.318202826195759e-05
+      delta_a_1: -0.002361327307242118
+      delta_a_2: 0.005206759408184279
+      delta_a_3: -0.006574229652221107
+      delta_a_4: -0.005800777951275956
+      delta_a_5: 0.0025656617919257068
+      delta_a_6: 0.0007044820269671732
+      delta_d_1: 0.000370833312008643
+      delta_d_2: -0.00014816687376384606
+      delta_d_3: -0.00021295660705691723
+      delta_d_4: -0.00010398363598575432
+      delta_d_5: -5.6974869881507904e-05
+      delta_d_6: 0.006260397017682823
+      delta_theta_1: -0.0014348311831977214
+      delta_theta_2: -0.0009712875639505748
+      delta_theta_3: -0.0006981709318459839
+      delta_theta_4: -0.01131610531987477
+      delta_theta_5: 0.0002034626279717718
+      delta_theta_6: -3.337118496920531e-08
+      delta_Btx: -0.0022474639621863643
+      delta_Bty: -0.005405618308518234
+      delta_Btz: 0.0008200298555148407
+      delta_Bux: 0.0016529650658538293
+      delta_Buy: -0.0016949166436132758
+      delta_Buz: -0.0014518204076048003
+      delta_Ttx: -0.00024680269894379684
+      delta_Tty: -3.145988296814027e-05
+      delta_Ttz: 0.0015648188615806475
+    nominal_robot:
+      tool_xyz:
+      - 0.00029050997818602897
+      - 0.00013698541080123426
+      - 0.032022413204404895
+      tool_rpy:
+      - 0.0
+      - 0.0
+      - 0.0
+      mdh:
+        alpha:
+        - 0.0
+        - 1.5707
+        - 0.0
+        - 0.0
+        - 1.5707
+        - -1.5707
+        a:
+        - 0.0
+        - 0.0
+        - -0.612
+        - -0.5723
+        - 0.0
+        - 0.0
+        d:
+        - 0.1273
+        - 0.0
+        - 0.0
+        - 0.163941
+        - 0.1157
+        - 0.0922
+        theta_offset:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+      joint_limits:
+      - - -3.141592653589793
+        - 3.141592653589793
+      - - -2.4
+        - -0.4
+      - - -2.6
+        - 0.2
+      - - -3.141592653589793
+        - 3.141592653589793
+      - - -3.141592653589793
+        - 3.141592653589793
+      - - -3.141592653589793
+        - 3.141592653589793
+      base_xyz:
+      - 3.335740524
+      - 1.591246404
+      - -0.475598057
+      base_rpy:
+      - 0.0189015
+      - -0.0114514
+      - 1.6069778
+    identified_robot:
+      tool_xyz:
+      - 0.00029050997818602897
+      - 0.00013698541080123426
+      - 0.032022413204404895
+      tool_rpy:
+      - 0.0
+      - 0.0
+      - 0.0
+      mdh:
+        alpha:
+        - 0.0016532018313624582
+        - 1.566722893474766
+        - -0.011192959383144702
+        - 0.001289145392215666
+        - 1.5714162642517302
+        - -1.5707531820282619
+        a:
+        - -0.002361327307242118
+        - 0.005206759408184279
+        - -0.6185742296522211
+        - -0.578100777951276
+        - 0.0025656617919257068
+        - 0.0007044820269671732
+        d:
+        - 0.12767083331200865
+        - -0.00014816687376384606
+        - -0.00021295660705691723
+        - 0.16383701636401424
+        - 0.1156430251301185
+        - 0.09846039701768283
+        theta_offset:
+        - -0.0014348311831977214
+        - -0.0009712875639505748
+        - -0.0006981709318459839
+        - -0.01131610531987477
+        - 0.0002034626279717718
+        - -3.337118496920531e-08
+      joint_limits:
+      - - -3.141592653589793
+        - 3.141592653589793
+      - - -2.4
+        - -0.4
+      - - -2.6
+        - 0.2
+      - - -3.141592653589793
+        - 3.141592653589793
+      - - -3.141592653589793
+        - 3.141592653589793
+      - - -3.141592653589793
+        - 3.141592653589793
+    cv_scores:
+    - lambda: 1.0e-10
+      fold_rmse_mm: []
+      mean_rmse_mm: 0.21434077758779366
+      max_rmse_mm: 0.7232813068916554
+      std_rmse_mm: 0.0
+      mode: debug_fast_no_cv
+    subspace_summary:
+      K: 1
+      cluster_sizes:
+      - 250
+      order:
+      - 0
+      summaries:
+      - subspace: 0
+        sample_count: 250
+        mode: debug_fast_no_subspace
+    metadata:
+      options:
+        max_nfev: 30
+        cv_folds: 3
+        lambda_count: 0
+        fixed_lambda: 1.0e-10
+        debug_fast: true
+        jacobian_method: analytic
+      initial_parameter_path: config/nominal_robot.yaml
+      parameter_count: 33
+      independent_count: 0
+metadata:
+  source: calibration_identification

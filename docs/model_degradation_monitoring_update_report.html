@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>模型退化监控改动与测试报告</title>
+  <style>
+    body {
+      margin: 32px auto;
+      max-width: 980px;
+      color: #172033;
+      font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+      line-height: 1.65;
+      background: #f7faff;
+    }
+    h1, h2 { color: #0f2747; }
+    h1 { font-size: 28px; margin-bottom: 8px; }
+    h2 { font-size: 20px; margin-top: 28px; border-bottom: 1px solid #d7e2f0; }
+    code {
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: #eef3fb;
+      color: #0f3b78;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 20px;
+      background: #ffffff;
+    }
+    th, td {
+      padding: 8px 10px;
+      border: 1px solid #d7e2f0;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eaf2fb; }
+    .pass { color: #0f7a3d; font-weight: 700; }
+    .warn { color: #9a5b00; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>模型退化监控改动与测试报告</h1>
+  <p>日期：2026-06-12。本文档为本次长期退化监控功能的手写总结，未通过脚本生成。追加更新：模型评估已增加进度条和后台线程，监控硬件参数已从模型结果 YAML 中拆分出来；置信度和总 RMS 已统一按模型不确定度计算。</p>
+
+  <h2>模型定义</h2>
+  <p><code>config/nominal_robot.yaml</code> 是机器人定义模型，也是辨识模型的默认初始值。它保存辨识所需的名义 MD-H 参数、基坐标初值、靶球/工具偏置和关节限位；该文件不应被辨识后绝对模型覆盖。</p>
+  <p><code>identified_model</code> 是辨识输出模型，保存在 <code>storage/parameters/identified_model/</code>。它包含最终绝对 MD-H、工具偏置、误差参数、拟合指标、初始定位不确定度和置信度历史。</p>
+  <p><code>controller_model</code> 是控制器前向运动学基准，保存在 <code>storage/parameters/controller_model/</code>。实时“模型误差 RMS”定义为 <code>p_identified(q) - p_controller(q)</code> 的 RMS，而不是辨识模型与名义模型的差。</p>
+
+  <h2>改动范围</h2>
+  <table>
+    <tr><th>文件</th><th>改动摘要</th></tr>
+    <tr>
+      <td><code>docs/model_degradation_monitoring_plan.md</code></td>
+      <td>新增任务理解和实施计划，梳理 PDF 推导、业务流程、YAML 字段、UI 分工和测试策略。</td>
+    </tr>
+    <tr>
+      <td><code>core/model_degradation_monitoring.py</code></td>
+      <td>新增长期退化监控服务层，实现 PnP 观测加载、末端相对漂移计算、SE(3) 对数、RMS 指标、推荐置信度和不确定性更新、模型备份写回；追加进度回调，图片目录会逐张报告 PnP 序号和重投影误差。</td>
+    </tr>
+    <tr>
+      <td><code>core/vision/pnp.py</code></td>
+      <td>移除外部 <code>controller.Transforms</code> 依赖，内置齐次变换工具；延迟检查 OpenCV；修复 OpenCV 4.13 下 <code>tvec</code> 形状兼容问题。</td>
+    </tr>
+    <tr>
+      <td><code>config/active_parameters.yaml</code>、<code>storage/parameters/*</code></td>
+      <td>当前生效参数由 <code>active_parameters.yaml</code> 指向版本化文件。辨识模型、控制模型和相机监控参数分别存入 <code>identified_model</code>、<code>controller_model</code> 和 <code>camera_monitoring</code> 目录。</td>
+    </tr>
+    <tr>
+      <td><code>config/model_monitoring.yaml</code></td>
+      <td>新增长期监控专用配置，保存手眼矩阵 <code>E_T_C</code>、相机内参、畸变、棋盘格参数和姿态等效权重。</td>
+    </tr>
+    <tr>
+      <td><code>core/calibration_persistence.py</code></td>
+      <td>保存和读取辨识 YAML 时兼容新的定位不确定性字段，默认值为 0。</td>
+    </tr>
+    <tr>
+      <td><code>core/calibration_service.py</code></td>
+      <td>加载 active model 时读取定位不确定性，并用均方根方式得到评估总 RMS；新增 <code>model_rms_mm</code> 和 <code>model_max_error_mm</code>，把辨识模型与控制模型的 FK 差值和含不确定性的评估值分开。</td>
+    </tr>
+    <tr>
+      <td><code>app/dialogs/model_degradation_dialog.py</code></td>
+      <td>新增模型评估对话框，支持选择参考/当前 PnP 结果文件或图片目录；评估计算放入 <code>QThread</code>，进度弹窗显示当前阶段和图片 PnP 序号，完成后再写回模型。</td>
+    </tr>
+    <tr>
+      <td><code>app/pages/initialization_page.py</code></td>
+      <td>在顶部 <code>校验</code> 菜单增加 <code>模型评估</code> 入口，写回后刷新当前参数和实时状态；实时精度面板改为显示“模型误差 RMS”和“评估总 RMS”。</td>
+    </tr>
+    <tr>
+      <td><code>app/pages/calibration_page.py</code></td>
+      <td>调整标定分析线程清理方式，完成的线程对象先保留到下一次任务前再释放，避免全量 Qt 测试中在 <code>finished</code> 信号栈内释放对象导致进程级 abort。</td>
+    </tr>
+    <tr>
+      <td><code>tests/test_model_degradation_monitoring.py</code>、<code>tests/test_workstation_verification.py</code></td>
+      <td>新增退化监控核心测试，并更新菜单入口测试。</td>
+    </tr>
+  </table>
+
+  <h2>公式实现</h2>
+  <p>服务层按 PDF 中的核心式实现：</p>
+  <p><code>Delta_T_i(k) = E_T_C * C_T_B(i,0) * inv(C_T_B(i,k)) * C_T_E</code></p>
+  <p>其中 <code>E_T_C</code> 为工具/末端到相机的手眼变换，<code>C_T_E = inv(E_T_C)</code>。随后使用 <code>Log(Delta_T)^vee</code> 得到 6 维残差，并输出位置漂移 RMS、姿态漂移 RMS 和综合等效漂移。</p>
+  <p>本次没有直接修改 MD-H 或误差参数。写回动作只更新模型置信度和 <code>metrics.position_uncertainty_rmse_mm</code>，并把旧 YAML 备份到 <code>storage/model_versions/</code>。</p>
+
+  <h2>参数管理调整</h2>
+  <p>旧的 <code>calibration_result.yaml</code> 只作为导入兼容格式；当前生效模型应从 <code>config/active_parameters.yaml</code> 找到对应的版本化参数文件。<code>model_monitoring.yaml</code> 的旧职责已迁移到 <code>camera_monitoring</code> 参数版本，服务层仍兼容旧版模型文件内嵌的 <code>identification.monitoring</code> 字段。</p>
+  <p>退化评估写回时只更新 active <code>identified_model</code> 中的 <code>confidence</code>、<code>metrics.position_uncertainty_rmse_mm</code> 和最近一次 <code>last_degradation_evaluation</code> 记录，不再把手眼或相机内参写回机器人模型文件。</p>
+
+  <h2>置信度与总 RMS</h2>
+  <p>辨识完成时，初始模型不确定度取最终辨识模型预测位置与激光跟踪仪真值之间的拟合残差 RMS：</p>
+  <p><code>u_initial_mm = fit_rmse_mm = rms(p_identified(q_i) - p_tracker(q_i))</code></p>
+  <p>初始置信度由该不确定度和超差阈值 <code>L</code> 计算：</p>
+  <p><code>confidence = 100 * L^2 / (L^2 + u_initial_mm^2)</code></p>
+  <p>模型校验时，固定标定板 PnP 观测得到当前位置退化 RMS：</p>
+  <p><code>u_degradation_mm = position_drift_rms_mm</code></p>
+  <p>写回模型时，不确定度按均方根合成：</p>
+  <p><code>position_uncertainty_rmse_mm = sqrt(u_previous_mm^2 + u_degradation_mm^2)</code></p>
+  <p>校验后的置信度不再用旧置信度乘衰减系数，而是用合成后的不确定度重新代入同一公式：</p>
+  <p><code>confidence_after = 100 * L^2 / (L^2 + position_uncertainty_rmse_mm^2)</code></p>
+  <p>实时界面的“模型误差 RMS”表示辨识模型和控制模型前向运动学位置差；“评估总 RMS”再合成当前模型不确定度：</p>
+  <p><code>model_rms_mm = rms(p_identified(q) - p_controller(q))</code></p>
+  <p><code>evaluated_rms_mm = sqrt(model_rms_mm^2 + position_uncertainty_rmse_mm^2)</code></p>
+
+  <h2>执行的验证</h2>
+  <table>
+    <tr><th>命令</th><th>结果</th></tr>
+    <tr>
+      <td><code>D:\Softwares\miniconda3\envs\ZMSoftware\python.exe -m pytest -vv</code></td>
+      <td><span class="pass">通过</span>，53 passed in 5.87s。</td>
+    </tr>
+    <tr>
+      <td><code>D:\Softwares\miniconda3\envs\ZMSoftware\python.exe -m ruff check core/vision/pnp.py core/model_degradation_monitoring.py core/calibration_persistence.py core/calibration_service.py app/dialogs/model_degradation_dialog.py app/pages/calibration_page.py app/pages/initialization_page.py tests/test_model_degradation_monitoring.py tests/test_workstation_verification.py</code></td>
+      <td><span class="pass">通过</span>，All checks passed。</td>
+    </tr>
+    <tr>
+      <td>真实图片 PnP smoke：<code>data/calibration/camera_pos_normal50/calibration_images/calib_00.jpg</code></td>
+      <td><span class="pass">通过</span>，PnP 成功，平均重投影误差 0.1042889882 px，RMS 重投影误差 0.1380436200 px；与已有 <code>camera_board_poses.npz</code> 的平移差为 [0.0, 0.0, 0.0] mm。</td>
+    </tr>
+    <tr>
+      <td><code>D:\Softwares\miniconda3\envs\ZMSoftware\python.exe -c "from core.model_degradation_monitoring import ModelDegradationMonitoringService; cfg=ModelDegradationMonitoringService('.').load_monitoring_config('config/calibration_result.yaml'); print(cfg.camera.board_grid, cfg.camera.square_size_mm, cfg.T_tool_camera.shape)"</code></td>
+      <td><span class="pass">通过</span>，输出 <code>(39, 34) 0.5 (4, 4)</code>，确认新的监控配置文件可解析。</td>
+    </tr>
+    <tr>
+      <td><code>D:\Softwares\miniconda3\envs\ZMSoftware\python.exe -m ruff check .</code></td>
+      <td><span class="warn">未通过</span>，失败来自既有归档算法文件的历史 ruff 问题和编码损坏实验脚本，不属于本次改动范围。</td>
+    </tr>
+  </table>
+
+  <h2>当前边界</h2>
+  <ul>
+    <li>本次实现的是加载式评估，不包含自动定时请求机器人运动和相机拍照。</li>
+    <li>没有实现参数漂移反演；该部分需要补充模型参数雅可比和噪声协方差。</li>
+    <li>Mahalanobis 统计量在没有健康基线均值和协方差时会跳过，只输出 RMS 退化指标。</li>
+    <li>图片目录 PnP 需要运行环境安装 <code>opencv-python</code>；项目推荐的 <code>ZMSoftware</code> 环境已验证可用。</li>
+    <li>当前线程任务不提供取消按钮；若后续要支持取消，需要在 PnP 循环和服务层增加取消标志检查。</li>
+  </ul>
+</body>
+</html>
