@@ -1,0 +1,38 @@
+# Python and development caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local environments and editor settings
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build outputs and local logs
+build/
+dist/
+*.egg-info/
+*.log
+
+# Runtime data: retain directories through .gitkeep only
+/data/**
+!/data/**/
+!/data/**/.gitkeep
+/storage/**
+!/storage/**/
+!/storage/**/.gitkeep
+
+# Experiment outputs
+/experiments/**/outputs/
+/experiments/**/checkpoints/
