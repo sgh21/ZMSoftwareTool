@@ -1,0 +1,129 @@
+QWidget {
+    color: @text@;
+    font-family: "@font_family@";
+    font-size: 16px;
+    font-weight: 400;
+}
+
+QWidget#ApplicationRoot, QWidget#PrecisionMonitorPage {
+    background: @background@;
+}
+
+QFrame#ApplicationHeader {
+    background: #fafafa;
+    border: none;
+    border-bottom: 1px solid @border@;
+}
+
+QLabel#Clock {
+    color: @navigation@;
+    font-size: 16px;
+}
+
+QPushButton[windowControl="true"] {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+
+QPushButton[windowControl="true"]:hover {
+    background: #e7e7e7;
+}
+
+QPushButton#CloseWindowButton:hover {
+    background: #f5cccc;
+}
+
+QFrame#Sidebar {
+    background: #fafafa;
+    border: none;
+    border-right: 1px solid @border@;
+}
+
+QPushButton#MonitorNavigation {
+    text-align: left;
+    padding: 8px 8px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: @navigation@;
+    font-size: 16px;
+    font-weight: 400;
+}
+
+QPushButton#MonitorNavigation:checked {
+    background: #f0f0f0;
+}
+
+QFrame#NavigationMarker {
+    background: @navigation_accent@;
+    border: none;
+}
+
+QTabBar#PrecisionTabs {
+    background: #ffffff;
+    border: none;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+QTabBar#PrecisionTabs::tab {
+    background: #ffffff;
+    color: @inactive@;
+    font-size: 20px;
+    font-weight: 700;
+    padding: 10px 18px;
+    border: none;
+    border-bottom: 3px solid @border@;
+}
+
+QTabBar#PrecisionTabs::tab:hover {
+    background: #f8fafb;
+}
+
+QTabBar#PrecisionTabs::tab:selected {
+    background: @accent_soft@;
+    color: @text@;
+    border-bottom: 3px solid @accent@;
+}
+
+QFrame#PlaceholderPanel {
+    background: #ffffff;
+    border: 1px solid @border@;
+    border-radius: 6px;
+}
+
+QFrame#PanelHeading {
+    background: #f8fafc;
+    border: none;
+    border-bottom: 1px solid @border@;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    min-height: 44px;
+    max-height: 44px;
+}
+
+QFrame#PanelHeading QLabel {
+    font-size: 18px;
+    font-weight: 700;
+    color: @text@;
+}
+
+QFrame#HeadingMarker {
+    border: none;
+    border-radius: 1px;
+    background: @accent@;
+}
+
+QLabel#PendingIllustration {
+    background: @background@;
+    border: 1px solid @border@;
+    border-radius: 14px;
+}
+
+QLabel#PlaceholderMessage {
+    color: @inactive@;
+    font-size: 22px;
+    font-weight: 600;
+}

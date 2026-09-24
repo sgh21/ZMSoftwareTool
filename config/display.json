@@ -1,0 +1,23 @@
+{
+  "title": "精度监控系统",
+  "window_size": [1280, 800],
+  "minimum_size": [1040, 640],
+  "sidebar_width": 168,
+  "font_family": "Microsoft YaHei",
+  "branding": {
+    "image": "icons/branding/reference-interface.png",
+    "source_rect": [108, 3, 270, 54],
+    "display_size": [220, 44]
+  },
+  "colors": {
+    "accent": "#46a960",
+    "accent_soft": "#f3f9f5",
+    "navigation": "#333333",
+    "navigation_accent": "#5b519b",
+    "text": "#293e52",
+    "inactive": "#4a5868",
+    "placeholder": "#718092",
+    "border": "#dbe3eb",
+    "background": "#f4f6f8"
+  }
+}
