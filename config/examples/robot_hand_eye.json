@@ -1,0 +1,12 @@
+{
+  "hand_eye": [
+    [-1.0, 0.0, 0.0, -75.0],
+    [0.0, -1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 70.0],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "length_unit": "mm",
+  "transform_convention": "E_T_C",
+  "end_frame": "tool0",
+  "source_note": "格式模板，已填入 approved_30poses_three_inertias 仿真手眼真值；实机使用时替换为相机到被评估 TCP 的标定变换。"
+}

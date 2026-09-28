@@ -1,0 +1,31 @@
+{
+  "camera_matrix": [[5000.0, 0.0, 1536.0], [0.0, 5000.0, 1024.0], [0.0, 0.0, 1.0]],
+  "dist_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0],
+  "image_size_px": [3072, 2048],
+  "hand_eye": [
+    [-1.0, 0.0, 0.0, -75.0],
+    [0.0, -1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 70.0],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "target_pose_base": [
+    [-1.0, 0.0, 0.0, 1050.0],
+    [0.0, 1.0, 0.0, 300.0],
+    [0.0, 0.0, -1.0, 26.100000000000023],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "board_type": "charuco",
+  "square_size_mm": 20.0,
+  "charuco": {
+    "dictionary": "DICT_5X5_1000",
+    "squares_xy": [9, 7],
+    "marker_length_mm": 14.0
+  },
+  "reference_rotation": null,
+  "max_reprojection_error_px": null,
+  "length_unit": "mm",
+  "transform_convention": "E_T_C",
+  "end_frame": "tool0",
+  "target_id": "fixed_charuco",
+  "source_note": "approved_30poses_three_inertias 的固定仿真真值参数；标定板原点为图案左上角，仅用于对照测试。"
+}
