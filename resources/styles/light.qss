@@ -139,7 +139,7 @@ QLabel#RobotPageTitle, QLabel[monitorTitle="true"] {
     font-weight: 700;
 }
 
-QLabel#PositionConclusion, QLabel#SpindleConclusion {
+QLabel#SpindleConclusion {
     background: #e8edf2;
     color: @inactive@;
     border-radius: 4px;

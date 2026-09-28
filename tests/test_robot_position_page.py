@@ -73,7 +73,7 @@ def test_missing_reference_and_single_arrival_do_not_fabricate_metrics(applicati
     page.result_metric.setCurrentIndex(0)
     assert page.axis_values["distance"].text() == "—"
     assert "初始" in page.result_hint.text() and "误差" in page.result_hint.text()
-    assert "正常" not in page.conclusion.text()
+    assert "正常" not in page.alarm_status.text()
     page.close()
 
 
@@ -96,9 +96,8 @@ def test_metric_switch_and_history_use_matching_reference(application):
     for index, name, values in expected:
         page.result_metric.setCurrentIndex(index)
         assert page._metric_name() == name
-        assert name in page.trend_title.text()
-        assert name in page.measured_title.text()
-        assert name in page.conclusion.text()
+        assert page.trend_title.text() == "定位精度趋势"
+        assert name in page.alarm_status.text()
         for column, (key, value) in enumerate(zip(("X", "Y", "Z", "distance"), values), start=1):
             assert page.axis_values[key].text() == f"{value:.4f}"
             assert page.measured_table.item(0, column).text() == f"{value:.4f}"
@@ -134,11 +133,10 @@ def test_historical_metrics_use_saved_thresholds_and_ignore_drift_alarms(applica
     page._evaluation_completed(data)
     assert page.axis_thresholds["X"].text() == "阈值：0.7000"
     assert "1 项超限" not in page.alarm_status.text()
-    assert "定位漂移" not in page.conclusion.text()
+    assert "定位漂移" not in page.alarm_status.text()
     page.result_metric.setCurrentIndex(1)
     assert page.axis_thresholds["X"].text() == "阈值：0.1000"
     assert "1 项超限" in page.alarm_status.text()
-    assert "超限" in page.conclusion.text()
     page.result_metric.setCurrentIndex(0)
     assert page.axis_thresholds["X"].text() == "阈值：3.0000"
     assert "1 项超限" not in page.alarm_status.text()
@@ -147,7 +145,7 @@ def test_historical_metrics_use_saved_thresholds_and_ignore_drift_alarms(applica
     data.pop("metric_thresholds")
     page._evaluation_completed(data)
     assert "未设置" in page.axis_thresholds["X"].text()
-    assert "未设" in page.conclusion.text()
+    assert "未设" in page.alarm_status.text()
     assert "1 项超限" not in page.alarm_status.text()
     page.close()
 
@@ -341,7 +339,7 @@ def test_debug_baseline_and_retest_use_real_service_and_persist_results(applicat
     assert page.result["groups"][0]["drift_base"] == pytest.approx([0.4, -0.3, 0], abs=1e-10)
     assert page.measured_table.item(0, 1).text() == "0.3000"
     assert page.axis_values["Y"].text() == "0.0000"
-    assert "调试比较" in page.conclusion.text()
+    assert "调试比较" in page.alarm_status.text()
     assert len(page.result["alarms"]) == 1
     assert len(page.trend_chart.history) == 1
     assert page._metric_mode() == "repeatability"

@@ -219,11 +219,6 @@ class RobotPositionPage(QWidget):
             content.addWidget(threshold)
             metrics.addWidget(metric, 1)
         body.addLayout(metrics)
-
-        self.conclusion = QLabel("尚未评估 · 等待基准与本次观测")
-        self.conclusion.setObjectName("PositionConclusion")
-        self.conclusion.setWordWrap(True)
-        body.addWidget(self.conclusion)
         layout.addWidget(summary)
         layout.addWidget(self._trend_view(), 1)
 
@@ -249,8 +244,6 @@ class RobotPositionPage(QWidget):
         page = QWidget()
         body = QVBoxLayout(page)
         body.setContentsMargins(0, 10, 0, 0)
-        self.measured_title = self._note("")
-        body.addWidget(self.measured_title)
         self.measured_table = self._table(RESULT_COLUMNS)
         self.measured_table.setMinimumHeight(114)
         self.measured_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
@@ -269,7 +262,7 @@ class RobotPositionPage(QWidget):
         body = QVBoxLayout(area)
         body.setContentsMargins(0, 2, 0, 0)
         body.setSpacing(8)
-        self.trend_title = QLabel("")
+        self.trend_title = QLabel("定位精度趋势")
         self.trend_title.setProperty("robotSectionTitle", True)
         body.addWidget(self.trend_title)
         self.trend_metric = QComboBox()
@@ -702,7 +695,6 @@ class RobotPositionPage(QWidget):
     def _task_failed(self, message):
         self._finish_task()
         self.append_log(message, "ERROR")
-        self.conclusion.setText(f"任务未完成 · {message}")
 
     def _finish_task(self):
         self.task = None
@@ -899,8 +891,6 @@ class RobotPositionPage(QWidget):
         mode = self._metric_mode()
         name = self._metric_name()
         hint = METRIC_HINTS[mode]
-        self.trend_title.setText(f"{name}趋势")
-        self.measured_title.setText(f"{name} · 逐点结果")
         self.prediction_title.setText(f"{name} · 加工点位预测")
         assessment = assess_metric(self.result, mode) if self.result is not None else None
         thresholds = (assessment["thresholds"] if assessment else
@@ -922,8 +912,6 @@ class RobotPositionPage(QWidget):
             )
             self.batch_label.setToolTip("")
             pending = "等待本次观测并评估" if mode == "repeatability" else "需要基准与本次观测并评估"
-            self.conclusion.setText(f"{name} · 尚未评估 · {pending}")
-            self.conclusion.setToolTip("")
             self.result_hint.setText(pending)
             self.result_hint.setToolTip(hint)
             self.alarm_status.setText(f"{name} · 尚未评估")
@@ -944,9 +932,7 @@ class RobotPositionPage(QWidget):
             self._fill_table(self.measured_table, self._metric_rows())
             unavailable = self._unavailable_reasons()
             self.result_hint.setText("；".join(unavailable) if unavailable else "逐点等权汇总 · 单位 mm")
-            self.conclusion.setText(f"{name} · {assessment['status']}")
             warnings = result.get("warnings", [])
-            self.conclusion.setToolTip("\n".join(warnings))
             self.result_hint.setToolTip(hint + "\n" + "\n".join(warnings))
             alarms = assessment["alarms"]
             alarm_count = f" · {len(alarms)} 项超限" if alarms else ""
