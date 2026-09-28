@@ -151,6 +151,7 @@ $$
 - Windows 原生 Qt 检查 1920×1030、1280×800 主窗口，三个标签完整显示，默认当前重复定位，页面无横向溢出。正式 UI 回归另检查 640px 业务页窄窗口的纵向堆叠和标签完整性。
 - 截图位于 `data/reports/robot_position_three_metrics/desktop.png` 与 `compact.png`，为当前应用无评估结果的界面；未填充虚构指标。截图检查经 Python 标准输入执行，没有新增临时脚本，应用参数、基准及历史未修改。
 - 修改位置为机器人页面、服务、现有算法中的单期统计入口、集中样式、两份使用文档及正式回归测试；主轴页和用户已有未跟踪 `debug/` 目录未改动。
+- 用户随后要求将横向标签改回标题右上角下拉菜单；经确认记录该次验证：`python -m pytest -q tests/test_robot_position_page.py` 9 项通过，修改文件 Ruff 与 `git diff --check` 通过。Windows 原生 Qt 下检查 1920×1030、1280×800，菜单与标题同一行、位于区域 1 之外；三个选项均联动趋势和逐点结果，默认当前重复定位，文字完整且无横向溢出。截图为 `data/reports/robot_position_metric_dropdown/desktop.png` 与 `compact.png`。本次只调整控件、样式及相应文档/测试，未改算法、参数或观测；验证经标准输入执行，没有新增临时脚本。
 
 ## 主轴回转监控约定（2026-09-24 用户要求）
 
