@@ -71,7 +71,7 @@ def test_existing_parameters_fill_individual_fields_with_units(open_dialog):
 
 def test_save_updates_fields_and_preserves_old_version_and_metadata(service, open_dialog):
     original = deepcopy(service.parameters)
-    original_file = service.storage / "parameters" / f"{original['version']}.json"
+    original_file = service.parameter_path
     original_bytes = original_file.read_bytes()
     current_batch = {"batch_id": "待重新导入"}
     service.current_batch = current_batch
@@ -86,7 +86,7 @@ def test_save_updates_fields_and_preserves_old_version_and_metadata(service, ope
     dialog._save()
     assert dialog.result() == QDialog.DialogCode.Accepted
     assert service.parameters["version"] != original["version"]
-    assert original_file.read_bytes() == original_bytes
+    assert service.previous_parameter_path.read_bytes() == original_bytes
     assert len(list((service.storage / "parameters").glob("*.json"))) == 2
     assert service.current_batch is None
     np.testing.assert_array_equal(

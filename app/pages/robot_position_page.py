@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -30,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from app.resources import DISPLAY, fit_dialog
 from core.services.position_monitoring_service import (
-    METRIC_LABELS, PositionMonitoringService, assess_metric, metric_values, read_document,
+    METRIC_LABELS, MULTIDIRECTIONAL_LABELS, PositionMonitoringService, assess_metric, metric_values, read_document,
 )
 
 
@@ -40,6 +41,11 @@ METRIC_HINTS = {
     "absolute_change": "各轴误差大小及空间 AP 的变化；正值为增大，负值为减小。",
     "repeatability_change": "各轴 3σ 及空间 RP 的变化；正值为散布增大，负值为减小。",
     "repeatability": "各轴为 3σ 补充统计，空间指标为 RP；按同点、同方向重复到达计算。",
+}
+MULTIDIRECTIONAL_HINTS = {
+    "absolute_change": "相同点位、方向的位置误差大小变化；先按方向计算，再逐点等权汇总。正值增大，负值改善。",
+    "repeatability_change": "多方向到位散布的跨期变化；正值增大，负值改善，属于工程监控指标。",
+    "repeatability": "同点不同方向各一次到达：空间为平均到重心距离加3倍距离标准差，XYZ为3σ；非国标同方向RP。",
 }
 
 
@@ -227,7 +233,20 @@ class RobotPositionPage(QWidget):
         return self.result_metric.currentData()
 
     def _metric_name(self):
-        return METRIC_LABELS[self._metric_mode()]
+        return self._metric_labels()[self._metric_mode()]
+
+    def _multidirectional(self):
+        context = self.result or self.service.current_batch or (self.service.baseline or {}).get("batch", {})
+        return context.get("sampling_protocol") == "multidirectional"
+
+    def _metric_labels(self):
+        return MULTIDIRECTIONAL_LABELS if self._multidirectional() else METRIC_LABELS
+
+    def _metric_hint(self, mode=None):
+        return (MULTIDIRECTIONAL_HINTS if self._multidirectional() else METRIC_HINTS)[mode or self._metric_mode()]
+
+    def _threshold_key(self):
+        return "multidirectional_thresholds" if self._multidirectional() else "metric_thresholds"
 
     def _measured_results(self):
         page = QWidget()
@@ -329,6 +348,7 @@ class RobotPositionPage(QWidget):
         self.observation_sample.setProperty("robotInput", True)
         self.observation_sample.setAccessibleName("观测样本")
         row.addWidget(self.observation_sample, 1)
+        row.addWidget(self._button("观测结果", self._show_observation_results))
         body.addLayout(row)
         image_area = QFrame()
         image_area.setObjectName("ObservationImage")
@@ -438,10 +458,14 @@ class RobotPositionPage(QWidget):
         )
         acquisition.setToolTip(acquisition_hint)
         actions.addWidget(acquisition, 1)
-        actions.addWidget(
-            self._mutation_button("导入观测", self._import_observations, True),
-            1,
-        )
+        import_button = self._mutation_button("导入观测", self._import_observations, True)
+        import_button.clicked.disconnect()
+        menu = QMenu(import_button)
+        menu.addAction("选择采集图片", self._import_observations)
+        menu.addAction("选择批次目录", self._import_image_directory)
+        menu.addAction("加载观测结果或记录文件", self._import_observation_file)
+        import_button.setMenu(menu)
+        actions.addWidget(import_button, 1)
         actions.addWidget(self._button("清空日志", self.process_log.clear, True), 1)
         actions.addWidget(
             self._mutation_button("评估精度", self._evaluate, True),
@@ -596,12 +620,12 @@ class RobotPositionPage(QWidget):
         layout.addWidget(self._note("三项指标分别设置上限；逐测点、接近方向判定，留空不判定该项。"))
         tabs = QTabWidget()
         fields = {}
-        for mode, label in METRIC_LABELS.items():
+        for mode, label in self._metric_labels().items():
             tab = QWidget()
             form = QFormLayout(tab)
             form.setSpacing(12)
             fields[mode] = {}
-            thresholds = self.service.settings.get("metric_thresholds", {}).get(mode, {})
+            thresholds = self.service.settings.get(self._threshold_key(), {}).get(mode, {})
             for key, name in (("X", "X 方向阈值 / mm"), ("Y", "Y 方向阈值 / mm"),
                               ("Z", "Z 方向阈值 / mm"), ("distance", "空间指标阈值 / mm")):
                 field = QLineEdit()
@@ -612,7 +636,7 @@ class RobotPositionPage(QWidget):
                 field.setAccessibleName(f"{label} · {name}")
                 fields[mode][key] = field
                 form.addRow(name, field)
-            form.addRow(self._note(METRIC_HINTS[mode]))
+            form.addRow(self._note(self._metric_hint(mode)))
             tabs.addTab(tab, label)
         tabs.setCurrentIndex(self.result_metric.currentIndex())
         layout.addWidget(tabs)
@@ -629,7 +653,7 @@ class RobotPositionPage(QWidget):
                 if any(value is not None and (not isfinite(value) or value < 0)
                        for mode_values in values.values() for value in mode_values.values()):
                     raise ValueError("阈值必须是有限非负数。")
-                self.service.save_settings({"metric_thresholds": values})
+                self.service.save_settings({self._threshold_key(): values})
             except (ValueError, OSError) as error:
                 error_label.setText(str(error))
                 return
@@ -727,7 +751,7 @@ class RobotPositionPage(QWidget):
             )
         else:
             self._set_status_light("baseline", "missing", "尚未建立测量基准")
-        metric_thresholds = self.service.settings.get("metric_thresholds", {})
+        metric_thresholds = self.service.settings.get(self._threshold_key(), {})
         counts = {mode: sum(metric_thresholds.get(mode, {}).get(axis) is not None
                             for axis in self.axis_cards) for mode in METRIC_LABELS}
         point_count = len(self.processing_points)
@@ -738,7 +762,7 @@ class RobotPositionPage(QWidget):
             state = "partial"
         self._set_status_light("conditions", state,
             "\n".join(f"{label}：已设置 {counts[mode]}/4 项阈值"
-                      for mode, label in METRIC_LABELS.items())
+                      for mode, label in self._metric_labels().items())
             + f"\n加工点位：{point_count} 个"
         )
 
@@ -765,24 +789,48 @@ class RobotPositionPage(QWidget):
         if not path:
             return
         try:
+            previous_version = self.service.parameters["version"]
             self.service.load_parameters(path)
         except (ValueError, TypeError, OSError, KeyError) as error:
             self.append_log(f"参数加载失败：{error}", "ERROR")
             return
-        self._invalidate_result()
-        self.append_log(f"参数已加载：{Path(path).name}；请重新导入观测并建立或选择匹配基准。")
+        if previous_version != self.service.parameters["version"]:
+            self._invalidate_result()
+            self.append_log(f"参数已加载：{Path(path).name}；请重新导入观测并建立或选择匹配基准。")
+        else:
+            self.append_log("参数内容未变化，保留当前观测与基准。")
 
     def _show_parameters(self):
         from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog
 
         dialog = RobotPositionParametersDialog(self.service, self)
+        previous_version = self.service.parameters["version"]
         fit_dialog(dialog, 980, 720)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._invalidate_result()
-            self.append_log("参数已保存；请重新导入观测，原参数和历史基准仍保留。")
+            if previous_version != self.service.parameters["version"]:
+                self._invalidate_result()
+                self.append_log("默认参数已更新，上一版已备份；请重新导入观测。")
+            else:
+                self.append_log("参数未修改，保留当前观测与基准。")
 
     def _import_observations(self):
-        path, _ = QFileDialog.getOpenFileName(self, "导入观测清单", "", "观测清单 (*.json *.yaml *.yml)")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择同一批次的采集图片", "", "采集图片 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
+        )
+        if paths:
+            self._import_source(paths)
+
+    def _import_image_directory(self):
+        path = QFileDialog.getExistingDirectory(self, "选择单个批次目录，例如 B001")
+        if path:
+            self._import_source(path)
+
+    def _import_observation_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "加载观测结果或记录文件", "", "观测文件 (*.json *.yaml *.yml)")
+        if path:
+            self._import_source(path)
+
+    def _import_source(self, path):
         if not path:
             return
         self._invalidate_result()
@@ -790,9 +838,12 @@ class RobotPositionPage(QWidget):
                        self._observations_loaded)
 
     def _observations_loaded(self, batch):
+        self._refresh_settings()
         self._refresh_observations()
         self._render_result()
         self.append_log(f"已导入 {len(batch['samples'])} 个观测样本。")
+        if batch.get("saved_path"):
+            self.append_log(f"观测结果已保存：{batch['saved_path']}")
         for warning in batch.get("warnings", []):
             self.append_log(warning, "WARN")
 
@@ -880,21 +931,25 @@ class RobotPositionPage(QWidget):
             periods = ("current",) if mode == "repeatability" else ("baseline", "current")
             if any((group.get(period) or {}).get("count", 0) < 2
                    for group in self.result["groups"] for period in periods):
-                reasons.append("同点同方向重复到达样本不足")
+                reasons.append("同点不同方向到达样本不足" if self._multidirectional() else "同点同方向重复到达样本不足")
             if any(group["current"].get("mean_base") is None for group in self.result["groups"]):
                 reasons.append("缺参考朝向 Qᵢ，基座三轴不可用")
         elif any(value is None for value in values):
-            reasons.append("缺初始绝对误差向量或参考朝向 Qᵢ")
+            reasons.append("缺固定靶标基座位姿或目标位姿" if self._multidirectional() else "缺初始绝对误差向量或参考朝向 Qᵢ")
         return reasons
 
     def _render_result(self):
         mode = self._metric_mode()
+        for index, (key, label) in enumerate(self._metric_labels().items()):
+            self.result_metric.setItemText(index, label)
+            self.result_metric.setItemData(index, self._metric_hint(key), Qt.ItemDataRole.ToolTipRole)
+        self.measured_table.horizontalHeaderItem(5).setText("接近方向数" if self._multidirectional() else "到达次数")
         name = self._metric_name()
-        hint = METRIC_HINTS[mode]
+        hint = self._metric_hint()
         self.prediction_title.setText(f"{name} · 加工点位预测")
         assessment = assess_metric(self.result, mode) if self.result is not None else None
         thresholds = (assessment["thresholds"] if assessment else
-                      self.service.settings.get("metric_thresholds", {}).get(mode, {}))
+                      self.service.settings.get(self._threshold_key(), {}).get(mode, {}))
         alarm_axes = {alarm["axis"] for alarm in assessment["alarms"]} if assessment else set()
         for key, card in self.axis_cards.items():
             over_limit = key in alarm_axes
@@ -950,6 +1005,8 @@ class RobotPositionPage(QWidget):
                 + "\n请核对测量条件与安装稳定性，再按设备维护流程检查并复测。"
                 if alarms else "；".join(unavailable) or assessment["status"]
             )
+        if context.get("comparison_status") == "simulation":
+            self.result_hint.setText("仿真数据 · " + self.result_hint.text())
         self._refresh_history()
 
     def _refresh_history(self):
@@ -964,16 +1021,20 @@ class RobotPositionPage(QWidget):
             "暂无历史评估记录" if origin.isValid() else "缺少基准建立时间，无法显示相对时间趋势"
         )
         groups = context.get("groups", context.get("samples", []))
-        point_directions = {(group["point_id"], group["direction_id"]) for group in groups}
+        point_directions = {(entry["point_id"], entry["direction_id"])
+                            for group in groups for entry in group.get("directions", [group])}
         records = []
         for result in history:
+            if result.get("sampling_protocol") != context.get("sampling_protocol"):
+                continue
             if (result.get("parameter_version") != parameter_version
                     or result.get("baseline_id") != baseline_id):
                 continue
             if any(context.get(field) and result.get(field) != context[field]
                    for field in ("program_id", "target_id")):
                 continue
-            record_points = {(group["point_id"], group["direction_id"]) for group in result["groups"]}
+            record_points = {(entry["point_id"], entry["direction_id"])
+                             for group in result["groups"] for entry in group.get("directions", [group])}
             if point_directions and record_points != point_directions:
                 continue
             timestamp = QDateTime.fromString(str(result.get("created_at")), Qt.DateFormat.ISODateWithMs)
@@ -1014,6 +1075,42 @@ class RobotPositionPage(QWidget):
             self.image_message.setText(f"图像无法读取：{Path(path).name}")
         self.image_message.setToolTip(path or "")
 
+    def _show_observation_results(self):
+        source = "current" if self.observation_source.currentIndex() == 0 else "baseline"
+        if self.history_batches is not None:
+            batch = self.history_batches[source]
+        elif source == "current":
+            batch = self.service.current_batch
+        else:
+            batch = (self.service.baseline or {}).get("batch")
+        if not batch:
+            self.append_log("尚无可查看的观测结果。", "WARN")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("观测结果 · 视觉六维位姿")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(self._note(
+            f"批次：{batch['batch_id']} · {len(batch['samples'])} 张图像。"
+            "位姿表示标定板相对于相机的位置与旋转；RPY 使用固定轴 XYZ 顺序。"
+        ))
+        columns = ["图片", "点位", "方向", "X/mm", "Y/mm", "Z/mm", "Roll/°", "Pitch/°", "Yaw/°", "重投影/px", "角点"]
+        table = self._table(columns)
+        rows = []
+        for sample in batch["samples"]:
+            rows.append([
+                Path(sample.get("image_path", "")).name, sample["point_id"], sample["direction_id"],
+                *[self._number(value) for value in sample.get("vision_xyz_mm", [None] * 3)],
+                *[self._number(value) for value in sample.get("vision_rpy_deg", [None] * 3)],
+                self._number(sample.get("reprojection_error_px")), str(sample.get("corner_count", "—")),
+            ])
+        self._fill_table(table, rows)
+        layout.addWidget(table, 1)
+        if batch.get("saved_path"):
+            layout.addWidget(self._note(f"观测文件：{batch['saved_path']}"))
+        layout.addWidget(self._button("关闭", dialog.reject))
+        fit_dialog(dialog, 1180, 590)
+        dialog.exec()
+
     def _show_result_details(self):
         if self.result is None:
             self.append_log("尚无评估结果。", "WARN")
@@ -1021,7 +1118,7 @@ class RobotPositionPage(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{self._metric_name()} · 评估明细")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note(METRIC_HINTS[self._metric_mode()]))
+        layout.addWidget(self._note(self._metric_hint()))
         table = self._table(RESULT_COLUMNS)
         self._fill_table(table, self._metric_rows())
         layout.addWidget(table, 1)
@@ -1038,7 +1135,7 @@ class RobotPositionPage(QWidget):
         dialog.exec()
 
     def _result_details_text(self):
-        lines = [METRIC_HINTS[self._metric_mode()],
+        lines = [self._metric_hint(),
                  "单位 mm。以下诊断用 Δp 表达在各测点的固定初始参考末端系，不能混称基座 XYZ。"]
         for group in self.result["groups"]:
             if group.get("drift_local") is None:
@@ -1066,10 +1163,10 @@ class RobotPositionPage(QWidget):
             self.append_log(f"评估结果已导出：{path}")
 
     def _show_debug(self):
-        from app.dialogs.robot_position_debug_dialog import RobotPositionDebugDialog
+        from app.dialogs.robot_position_simulation_dialog import RobotPositionSimulationDialog
 
-        dialog = RobotPositionDebugDialog(self)
-        fit_dialog(dialog, 920, 620)
+        dialog = RobotPositionSimulationDialog(self)
+        fit_dialog(dialog, 1080, 710)
         dialog.exec()
 
 
@@ -1327,12 +1424,14 @@ class PositionTrendChart(QWidget):
         for step in range(5):
             day = first_day + (last_day - first_day) * step / 4
             x = plot.left() + plot.width() * step / 4
-            tick_width = margin
+            tick_label = f"{day:.3g}"
+            tick_width = max(margin, painter.fontMetrics().horizontalAdvance(tick_label) + 6)
+            tick_left = max(0, min(x - tick_width / 2, self.width() - tick_width))
             painter.drawLine(QPointF(x, plot.bottom()), QPointF(x, plot.bottom() + 3))
             painter.drawText(
-                QRectF(x - tick_width / 2, plot.bottom() + 3, tick_width, line_height),
+                QRectF(tick_left, plot.bottom() + 3, tick_width, line_height),
                 Qt.AlignmentFlag.AlignCenter,
-                f"{day:.3g}",
+                tick_label,
             )
         color_keys = {
             "X": "action",

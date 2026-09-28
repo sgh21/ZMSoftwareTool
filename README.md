@@ -74,9 +74,9 @@ SoftwareTools_PyQt/
 - **界面层**：负责展示、用户输入和任务状态；耗时计算接入后台任务，避免阻塞界面。
 - **配置与资源**：业务参数和路径放在 `config/`，图标、样式和 Designer 文件放在 `resources/`。
 
-机器人定位的纯算法位于 `core/algorithms/position_monitoring.py` 和 `board_pose.py`；服务入口为 `core/services/position_monitoring_service.py`；页面调用服务，PnP 与评估在后台执行。独立调试窗口位于 `app/dialogs/robot_position_debug_dialog.py`，旧数据适配与命令入口放在 `experiments/`。
+机器人定位的纯算法位于 `core/algorithms/position_monitoring.py` 和 `board_pose.py`；服务入口为 `core/services/position_monitoring_service.py`；页面调用服务，棋盘/ChArUco PnP 与评估在后台执行。仿真核验窗口位于 `app/dialogs/robot_position_simulation_dialog.py`，原手眼调试作为窗口内的次级入口保留，旧数据适配与命令入口放在 `experiments/`。
 
-机器人参数版本、基准、阈值、加工点位配置和评估历史保存在 `storage/position_monitoring/`。点位预测模型、相机在线采集及设备运动接口尚未接入，预测指标保持空白；可以导入包含图像路径或已解算位姿的观测清单。主轴示意图不参与计算或历史保存。界面不控制机器人运动。
+机器人默认参数、基准、观测、阈值、加工点位配置和评估历史保存在 `storage/position_monitoring/`。参数采用 `parameters/current.json` 和一份 `previous.json` 备份；支持图片、批次目录及已解算观测文件，导入图片后自动保存六维观测结果。每点不同方向各一次采用多方向工程散布，旧同方向重复协议继续兼容，详见 [使用说明](docs/robot_position_monitoring.md)。点位预测、相机在线采集及设备运动接口尚未接入；主轴示意图不参与计算或历史保存，界面不控制机器人运动。
 
 ## 界面与图标
 

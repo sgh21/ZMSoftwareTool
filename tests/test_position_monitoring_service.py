@@ -153,7 +153,7 @@ def test_alarm_checks_each_group_even_when_overall_average_is_below_limit(servic
 def test_parameter_update_preserves_previous_version_and_requires_matching_baseline(service, tmp_path):
     baseline = establish_baseline(service, tmp_path / "initial.json")
     old_version = service.parameters["version"]
-    old_parameter_path = service.storage / "parameters" / f"{old_version}.json"
+    old_parameter_path = service.parameter_path
     old_parameter_bytes = old_parameter_path.read_bytes()
     current_path = batch_file(tmp_path / "current.json", repeated((101, 200, 300)))
     service.load_observations(current_path)
@@ -162,7 +162,8 @@ def test_parameter_update_preserves_previous_version_and_requires_matching_basel
     service.save_parameters({"hand_eye": changed.tolist()})
     assert service.current_batch is None
     assert service.parameters["version"] != old_version
-    assert old_parameter_path.read_bytes() == old_parameter_bytes
+    assert service.previous_parameter_path.read_bytes() == old_parameter_bytes
+    assert read_document(baseline["path"])["parameters"]["version"] == old_version
     service.load_observations(current_path)
     with pytest.raises(ValueError, match="参数版本已变化"):
         service.evaluate()
@@ -504,7 +505,9 @@ def test_current_repeatability_can_bypass_an_incompatible_baseline(service, tmp_
     baseline = establish_baseline(service, tmp_path / "initial.json")
     metadata = {}
     if incompatibility == "parameters":
-        service.save_parameters({"hand_eye": HAND_EYE.tolist()})
+        changed = HAND_EYE.copy()
+        changed[0, 3] += 1
+        service.save_parameters({"hand_eye": changed.tolist()})
     elif incompatibility == "program":
         metadata["program_id"] = "another-program"
     elif incompatibility == "target":

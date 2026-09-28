@@ -284,3 +284,186 @@ def evaluate_position_monitoring(
         group["current"]["axis_3sigma_base"] for group in groups
     ])
     return {"groups": groups, "points": points, "summary": summary, "warnings": warnings}
+
+
+def _multidirectional_samples(samples, period):
+    """每点每方向只接受一条观测，并核对同点的固定指令位姿。"""
+    groups = defaultdict(dict)
+    ideals = {}
+    for sample in samples:
+        point, direction = str(sample["point_id"]), str(sample["direction_id"])
+        if direction in groups[point]:
+            raise ValueError(f"{period}/{point}/{direction} 重复；多方向模式每方向只允许一条观测")
+        pose = validate_transform(sample["vision_pose"], f"{period}/{point}/{direction}")
+        ideal = sample.get("ideal_pose")
+        if ideal is not None:
+            ideal = validate_transform(ideal, f"{period}/{point}/{direction} 理想位姿")
+            if point in ideals and not np.allclose(ideals[point], ideal, atol=1e-6, rtol=0):
+                raise ValueError(f"{period}/{point} 各方向的理想位姿不一致")
+            ideals[point] = ideal
+        groups[point][direction] = {"vision_pose": pose, "ideal_pose": ideal}
+    if not groups:
+        raise ValueError(f"{period}没有观测数据")
+    return groups, ideals
+
+
+def evaluate_multidirectional(
+    current_samples,
+    hand_eye,
+    *,
+    baseline_samples=None,
+    base_rotations=None,
+    target_pose_base=None,
+) -> dict:
+    """评价同点不同接近方向各一次的工程散布，不作为国标同方向 RP。
+
+    散布沿用 mean(radius) + 3*std(radius, ddof=1)，轴向为 3σ。
+    有基准时，两期必须包含相同的点位/方向，且使用同一个点位参考。
+    Q 对应基准（单期时为当前）每点第一条观测的末端朝向。
+    target_pose_base 是固定靶标的 ^B T_M；提供它时由视觉恢复末端位置，
+    与各条 sample.ideal_pose (^B T_E) 比较。绝不读取仿真 truth/actual。
+    mean_base 仍表示相对参考的基座分量；mean_position_base 为可用的绝对位置。
+    """
+    hand_eye = validate_transform(hand_eye, "手眼变换")
+    inverse_hand_eye = np.linalg.inv(hand_eye)
+    target = (
+        validate_transform(target_pose_base, "靶标基座外参 A")
+        if target_pose_base is not None else None
+    )
+    current, current_ideals = _multidirectional_samples(current_samples, "当前时期")
+    baseline = None
+    if baseline_samples is not None:
+        baseline, baseline_ideals = _multidirectional_samples(baseline_samples, "初始时期")
+        initial_keys = {(point, direction) for point, items in baseline.items() for direction in items}
+        current_keys = {(point, direction) for point, items in current.items() for direction in items}
+        if initial_keys != current_keys:
+            raise ValueError(
+                "两期测点/接近方向不匹配；"
+                f"复测缺少 {sorted(initial_keys - current_keys)}，"
+                f"新增 {sorted(current_keys - initial_keys)}"
+            )
+        for point in baseline_ideals.keys() & current_ideals.keys():
+            if not np.allclose(baseline_ideals[point], current_ideals[point], atol=1e-6, rtol=0):
+                raise ValueError(f"测点 {point} 两期理想位姿不一致")
+    references = baseline if baseline is not None else current
+    rotations = {
+        str(point): _rotation(value, f"测点 {point} 的 Q")
+        for point, value in (base_rotations or {}).items()
+    }
+    warnings = ["多方向工程散布：每方向一次，不是国标同方向重复定位试验"]
+    if target is None:
+        warnings.append("缺少靶标基座外参 A；绝对定位误差及其退化不可用")
+    groups, points = [], []
+    for point in sorted(current):
+        reference = next(iter(references[point].values()))["vision_pose"]
+        reference_chain = hand_eye @ reference
+        rotation = rotations.get(point)
+        if target is not None:
+            reference_pose = target @ np.linalg.inv(reference) @ inverse_hand_eye
+            rotation = reference_pose[:3, :3]
+        elif rotation is None:
+            warnings.append(f"测点 {point} 缺少参考末端朝向 Q；基座 XYZ 结果不可用")
+
+        statistics, measurements = {}, {}
+        for period, samples in (("baseline", baseline), ("current", current)):
+            if samples is None:
+                statistics[period] = None
+                measurements[period] = {}
+                continue
+            measured = {}
+            for direction, sample in samples[point].items():
+                camera_chain = np.linalg.inv(sample["vision_pose"]) @ inverse_hand_eye
+                local = (reference_chain @ camera_chain)[:3, 3]
+                position = (target @ camera_chain)[:3, 3] if target is not None else None
+                ideal = sample["ideal_pose"]
+                error = position - ideal[:3, 3] if position is not None and ideal is not None else None
+                measured[direction] = {
+                    "local": local,
+                    "base": rotation @ local if rotation is not None else None,
+                    "position": position,
+                    "error": error,
+                }
+            stats = _statistics(np.asarray([item["local"] for item in measured.values()]), rotation)
+            stats["mean_position_base"] = (
+                np.mean([item["position"] for item in measured.values()], axis=0).tolist()
+                if target is not None else None
+            )
+            statistics[period], measurements[period] = stats, measured
+            if stats["count"] < 2:
+                label = "初始" if period == "baseline" else "当前"
+                warnings.append(f"{point} {label}少于 2 个接近方向，不能计算多方向散布")
+            if target is not None and any(item["error"] is None for item in measured.values()):
+                warnings.append(f"{point}/{period} 缺少理想位姿；对应绝对定位误差不可用")
+
+        details = []
+        for direction in sorted(current[point]):
+            measured = measurements["current"][direction]
+            initial = measurements["baseline"].get(direction)
+            error = measured["error"]
+            initial_error = initial["error"] if initial is not None else None
+            drift_local = _difference(measured["local"], initial["local"] if initial else None)
+            drift_base = _difference(measured["base"], initial["base"] if initial else None)
+            absolute_ap = float(np.linalg.norm(error)) if error is not None else None
+            initial_ap = float(np.linalg.norm(initial_error)) if initial_error is not None else None
+            details.append({
+                "point_id": point, "direction_id": direction,
+                "baseline_position_base": initial["position"].tolist()
+                if initial is not None and initial["position"] is not None else None,
+                "current_position_base": measured["position"].tolist()
+                if measured["position"] is not None else None,
+                "initial_error_base": initial_error.tolist() if initial_error is not None else None,
+                "current_error_base": error.tolist() if error is not None else None,
+                "initial_absolute_ap": initial_ap, "absolute_ap": absolute_ap,
+                "absolute_ap_change": _difference(absolute_ap, initial_ap),
+                "absolute_axis": np.abs(error).tolist() if error is not None else None,
+                "absolute_axis_change": _difference(
+                    np.abs(error) if error is not None else None,
+                    np.abs(initial_error) if initial_error is not None else None,
+                ),
+                "drift_local": drift_local, "drift_base": drift_base,
+                "mean_abs_drift_base": np.abs(drift_base).tolist() if drift_base is not None else None,
+                "drift_distance": float(np.linalg.norm(drift_local)) if drift_local is not None else None,
+            })
+        initial, measured = statistics["baseline"], statistics["current"]
+        group = {
+            "point_id": point, "direction_id": "多方向", "directions": details,
+            "baseline": initial, "current": measured,
+            "rp_current": measured["rp"],
+            "rp_baseline": initial["rp"] if initial is not None else None,
+            "rp_change": _difference(measured["rp"], initial["rp"] if initial else None),
+            "axis_3sigma_change_local": _difference(
+                measured["axis_3sigma_local"], initial["axis_3sigma_local"] if initial else None
+            ),
+            "axis_3sigma_change_base": _difference(
+                measured["axis_3sigma_base"], initial["axis_3sigma_base"] if initial else None
+            ),
+        }
+        for name in (
+            "drift_local", "drift_base", "drift_distance", "mean_abs_drift_base",
+            "initial_error_base", "current_error_base", "initial_absolute_ap",
+            "absolute_ap", "absolute_ap_change", "absolute_axis", "absolute_axis_change",
+        ):
+            group[name] = _mean_by_point(details, [item[name] for item in details])
+        groups.append(group)
+        initial_vap = _vap([item["local"] for item in measurements["baseline"].values()])
+        current_vap = _vap([item["local"] for item in measurements["current"].values()])
+        points.append({
+            "point_id": point, "baseline_vap": initial_vap, "current_vap": current_vap,
+            "vap_change": _difference(current_vap, initial_vap),
+        })
+
+    summary = {
+        name: _mean_by_point(groups, [group[name] for group in groups])
+        for name in (
+            "drift_base", "drift_distance", "mean_abs_drift_base", "rp_baseline", "rp_current",
+            "rp_change", "axis_3sigma_change_base", "absolute_ap", "absolute_ap_change",
+            "absolute_axis", "absolute_axis_change",
+        )
+    }
+    summary["axis_3sigma_base"] = _mean_by_point(groups, [
+        group["current"]["axis_3sigma_base"] for group in groups
+    ])
+    return {
+        "sampling_protocol": "multidirectional", "is_standard_repeatability": False,
+        "groups": groups, "points": points, "summary": summary, "warnings": warnings,
+    }

@@ -1,4 +1,4 @@
-"""Checkerboard PnP and eye-in-hand calibration, with translations in mm.
+"""Checkerboard/ChArUco PnP and eye-in-hand calibration, in mm.
 
 The corner detection, centred board and IPPE/LM pipeline follow the original
 master implementation in core/vision/pnp.py. No robot model or UI is required.
@@ -46,27 +46,8 @@ def _rotation_angle(rotation):
     return float(np.degrees(np.arccos(cosine)))
 
 
-def solve_board_pose(
-    image_points, camera_matrix, dist_coeffs, board_grid, square_size_mm,
-    reference_rotation=None,
-):
-    """Solve C_T_M from known corners, with the board origin at its centre.
-
-    A symmetric checkerboard has no physical first-corner identity. By default,
-    the first corner is the endpoint with smaller image x+y. For a later view
-    of the same target, reference_rotation chooses the nearer of the two 180°
-    corner orders. It does not resolve arbitrary board rotations, and does not
-    choose a poorer planar-PnP solution merely to match an expected orientation.
-    """
-    objects = checkerboard_points(board_grid, square_size_mm)
-    points = np.asarray(image_points, dtype=np.float64).reshape(-1, 2)
-    if len(points) != len(objects):
-        raise ValueError("角点数量与棋盘内角点行列数不匹配。")
-    if points[0].sum() > points[-1].sum():
-        points = points[::-1]
-    points = np.ascontiguousarray(points)
-    matrix = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
-    distortion = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1, 1)
+def _solve_planar_pose(objects, points, matrix, distortion):
+    """Select a positive-depth IPPE solution, then refine it using pixels only."""
     if not np.isfinite(matrix).all() or matrix[0, 0] <= 0 or matrix[1, 1] <= 0:
         raise ValueError("相机矩阵必须有效，焦距必须为正。")
 
@@ -88,20 +69,10 @@ def solve_board_pose(
     candidates.sort(key=lambda entry: entry[0])
     _, rvec, tvec = candidates[0]
     rvec, tvec = cv2.solvePnPRefineLM(objects, points, matrix, distortion, rvec, tvec)
-    rotation = cv2.Rodrigues(rvec)[0]
+    return rvec, tvec, candidates
 
-    order = "image_top_left"
-    if reference_rotation is not None:
-        reference = np.asarray(reference_rotation, dtype=np.float64).reshape(3, 3)
-        flipped = rotation @ np.diag([-1.0, -1.0, 1.0])
-        if _rotation_angle(reference.T @ flipped) < _rotation_angle(reference.T @ rotation):
-            rotation = flipped
-            points = np.ascontiguousarray(points[::-1])
-            rvec = cv2.Rodrigues(rotation)[0]
-            order = "reference_rotation_reversed"
-        else:
-            order = "reference_rotation_original"
 
+def _pose_result(objects, points, matrix, distortion, rvec, tvec, rotation, candidates, order):
     projection = cv2.projectPoints(objects, rvec, tvec, matrix, distortion)[0].reshape(-1, 2)
     errors = np.linalg.norm(projection - points, axis=1)
     pose = np.eye(4)
@@ -121,6 +92,43 @@ def solve_board_pose(
     }
 
 
+def solve_board_pose(
+    image_points, camera_matrix, dist_coeffs, board_grid, square_size_mm,
+    reference_rotation=None,
+):
+    """Solve C_T_M from known corners, with the board origin at its centre.
+
+    A symmetric checkerboard has no physical first-corner identity. By default,
+    the first corner is the endpoint with smaller image x+y. For a later view
+    of the same target, reference_rotation chooses the nearer of the two 180°
+    corner orders. It does not resolve arbitrary board rotations, and does not
+    choose a poorer planar-PnP solution merely to match an expected orientation.
+    """
+    objects = checkerboard_points(board_grid, square_size_mm)
+    points = np.asarray(image_points, dtype=np.float64).reshape(-1, 2)
+    if len(points) != len(objects):
+        raise ValueError("角点数量与棋盘内角点行列数不匹配。")
+    if points[0].sum() > points[-1].sum():
+        points = points[::-1]
+    points = np.ascontiguousarray(points)
+    matrix = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+    distortion = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1, 1)
+    rvec, tvec, candidates = _solve_planar_pose(objects, points, matrix, distortion)
+    rotation = cv2.Rodrigues(rvec)[0]
+    order = "image_top_left"
+    if reference_rotation is not None:
+        reference = np.asarray(reference_rotation, dtype=np.float64).reshape(3, 3)
+        flipped = rotation @ np.diag([-1.0, -1.0, 1.0])
+        if _rotation_angle(reference.T @ flipped) < _rotation_angle(reference.T @ rotation):
+            rotation = flipped
+            points = np.ascontiguousarray(points[::-1])
+            rvec = cv2.Rodrigues(rotation)[0]
+            order = "reference_rotation_reversed"
+        else:
+            order = "reference_rotation_original"
+    return _pose_result(objects, points, matrix, distortion, rvec, tvec, rotation, candidates, order)
+
+
 def estimate_board_pose(
     image, camera_matrix, dist_coeffs, board_grid, square_size_mm,
     reference_rotation=None,
@@ -131,6 +139,80 @@ def estimate_board_pose(
         corners, camera_matrix, dist_coeffs, board_grid, square_size_mm,
         reference_rotation=reference_rotation,
     )
+
+
+def make_charuco_board(charuco, square_size_mm):
+    """Validate the persisted ChArUco specification and build its board in mm."""
+    name = charuco.get("dictionary")
+    if not isinstance(name, str) or not name.startswith("DICT_") or not hasattr(cv2.aruco, name):
+        raise ValueError(f"不支持的 ChArUco 字典：{name}")
+    grid = np.asarray(charuco.get("squares_xy"), dtype=float)
+    if (grid.shape != (2,) or not np.isfinite(grid).all()
+            or np.any(grid != np.floor(grid)) or np.any(grid < 2)):
+        raise ValueError("ChArUco 方格列数和行数必须为至少 2 的整数。")
+    square = float(square_size_mm)
+    marker = float(charuco["marker_length_mm"])
+    if not np.isfinite([square, marker]).all() or not 0 < marker < square:
+        raise ValueError("ChArUco 标记边长必须大于 0 且小于方格边长，单位 mm。")
+    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, name))
+    marker_ids = charuco.get("marker_ids")
+    if marker_ids is not None:
+        marker_ids = np.asarray(marker_ids, dtype=float)
+        if (marker_ids.shape != (int(np.prod(grid)) // 2,)
+                or not np.isfinite(marker_ids).all()
+                or np.any(marker_ids != np.floor(marker_ids))
+                or len(np.unique(marker_ids)) != len(marker_ids)
+                or np.any(marker_ids < 0) or np.any(marker_ids >= len(dictionary.bytesList))):
+            raise ValueError("ChArUco 标记编号与方格配置不匹配；须数量正确、互不重复且在字典范围内。")
+        marker_ids = marker_ids.astype(np.int32)
+    legacy = charuco.get("legacy_pattern", False)
+    if not isinstance(legacy, bool):
+        raise ValueError("ChArUco legacy_pattern 必须为布尔值。")
+    try:
+        board = cv2.aruco.CharucoBoard(tuple(int(value) for value in grid), square, marker,
+                                      dictionary, marker_ids)
+        board.setLegacyPattern(legacy)
+    except cv2.error as error:
+        raise ValueError("ChArUco 标记编号与方格配置不匹配。") from error
+    return board
+
+
+def _solve_charuco_pose(image_points, corner_ids, board, camera_matrix, dist_coeffs):
+    """Use ID-matched points in the top-left board frame; partial visibility is valid."""
+    ids = np.asarray(corner_ids, dtype=np.int32).reshape(-1)
+    points = np.ascontiguousarray(image_points, dtype=np.float64).reshape(-1, 2)
+    all_objects = board.getChessboardCorners()
+    if (len(ids) < 4 or len(ids) != len(points) or len(np.unique(ids)) != len(ids)
+            or np.any(ids < 0) or np.any(ids >= len(all_objects))):
+        raise ValueError("ChArUco 需要至少 4 个有效且不重复的角点编号，并与图像角点一一对应。")
+    objects = all_objects[ids].astype(np.float64)
+    if np.linalg.matrix_rank(objects[:, :2] - objects[0, :2]) < 2:
+        raise ValueError("ChArUco 可见角点共线，无法解算位姿。")
+    matrix = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+    distortion = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1, 1)
+    rvec, tvec, candidates = _solve_planar_pose(objects, points, matrix, distortion)
+    rotation = cv2.Rodrigues(rvec)[0]
+    if (not np.isfinite(rvec).all() or not np.isfinite(tvec).all()
+            or np.any((objects @ rotation.T + tvec.reshape(3))[:, 2] <= 0)):
+        raise ValueError("ChArUco PnP 未得到位于相机前方的有效位姿。")
+    result = _pose_result(objects, points, matrix, distortion, rvec, tvec,
+                          rotation, candidates, "charuco_ids")
+    result["charuco_corner_ids"] = ids.tolist()
+    result["board_origin"] = "charuco_top_left"
+    return result
+
+
+def estimate_charuco_pose(image, camera_matrix, dist_coeffs, charuco, square_size_mm):
+    """Estimate C_T_M from ChArUco pixels and IDs only; origin is top-left, units mm."""
+    board = make_charuco_board(charuco, square_size_mm)
+    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    corners, ids, _, marker_ids = cv2.aruco.CharucoDetector(board).detectBoard(gray)
+    if corners is None or ids is None:
+        raise ValueError("未检测到可用 ChArUco 角点，请核对字典、标定板参数和图像。")
+    result = _solve_charuco_pose(corners, ids, board, camera_matrix, dist_coeffs)
+    result["marker_ids"] = [] if marker_ids is None else marker_ids.reshape(-1).tolist()
+    result["marker_count"] = len(result["marker_ids"])
+    return result
 
 
 def calibrate_hand_eye(base_tool_poses, camera_board_poses, method="PARK"):

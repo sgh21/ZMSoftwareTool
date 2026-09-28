@@ -9,12 +9,17 @@ import cv2
 import numpy as np
 import yaml
 
-from core.algorithms.board_pose import calibrate_hand_eye, estimate_board_pose
+from core.algorithms.board_pose import (
+    calibrate_hand_eye, estimate_board_pose, estimate_charuco_pose, make_charuco_board,
+)
+from core.algorithms.pose_fields import rotation_to_rpy_degrees
 from core.algorithms.position_monitoring import (
     evaluate_current_repeatability,
+    evaluate_multidirectional,
     evaluate_position_monitoring,
     validate_transform,
 )
+from core.services.position_image_input import IMAGE_SUFFIXES, image_batch, simulation_parameters
 
 
 METRIC_LABELS = {
@@ -23,6 +28,11 @@ METRIC_LABELS = {
     "repeatability": "当前重复定位精度",
 }
 METRIC_AXES = ("X", "Y", "Z", "distance")
+MULTIDIRECTIONAL_LABELS = {
+    "absolute_change": "绝对定位精度退化",
+    "repeatability_change": "多方向到位散布退化",
+    "repeatability": "当前多方向到位散布",
+}
 
 
 def metric_values(result, mode, group=None):
@@ -49,7 +59,10 @@ def assess_metric(result, mode):
     thresholds = {axis: stored.get(axis) for axis in METRIC_AXES}
     alarms = []
     values = []
-    for group in result.get("groups", []):
+    groups = result.get("groups", [])
+    if mode == "absolute_change":
+        groups = [entry for group in groups for entry in group.get("directions", [group])]
+    for group in groups:
         group_values = metric_values(result, mode, group)
         values.extend(group_values)
         for axis, value in zip(METRIC_AXES, group_values):
@@ -117,40 +130,63 @@ class PositionMonitoringService:
     def __init__(self, root=None):
         self.root = Path(root or Path(__file__).resolve().parents[2]).resolve()
         self.storage = self.root / "storage" / "position_monitoring"
-        defaults = Path(__file__).resolve().parents[2] / "config" / "robot_position.json"
-        configured = self.root / "config" / "robot_position.json"
-        self.parameters = read_document(configured if configured.exists() else defaults)
+        self.parameter_path = self.storage / "parameters" / "current.json"
+        self.previous_parameter_path = self.storage / "parameters" / "previous.json"
+        state_path = self.storage / "state.json"
+        state = read_document(state_path) if state_path.exists() else {}
+        if self.parameter_path.exists():
+            self.parameters = read_document(self.parameter_path)
+        else:
+            if "parameters" in state:
+                self.parameters = state["parameters"]
+            else:
+                defaults = Path(__file__).resolve().parents[2] / "config" / "robot_position.json"
+                configured = self.root / "config" / "robot_position.json"
+                self.parameters = read_document(configured if configured.exists() else defaults)
+            write_document(self.parameter_path, self.parameters)
         self.settings = {
             "thresholds": dict.fromkeys(("X", "Y", "Z", "distance")),
             "metric_thresholds": {mode: dict.fromkeys(METRIC_AXES) for mode in METRIC_LABELS},
+            "multidirectional_thresholds": {mode: dict.fromkeys(METRIC_AXES) for mode in METRIC_LABELS},
             "processing_points": [],
         }
         self.baseline = None
         self.current_batch = None
-        state_path = self.storage / "state.json"
-        if state_path.exists():
-            state = read_document(state_path)
-            self.parameters = state["parameters"]
-            self.settings.update(state["settings"])
-            if state.get("baseline_path"):
-                self.baseline = read_document(state["baseline_path"])
-                self.baseline["path"] = state["baseline_path"]
+        self.settings.update(state.get("settings", {}))
+        if state.get("baseline_path"):
+            self.baseline = read_document(state["baseline_path"])
+            self.baseline["path"] = state["baseline_path"]
+        if "parameters" in state or not state_path.exists():
+            self._save_state()
 
     def _save_state(self):
         write_document(self.storage / "state.json", {
-            "parameters": self.parameters,
             "settings": self.settings,
             "baseline_path": self.baseline["path"] if self.baseline else None,
         })
 
     def load_parameters(self, path):
         document = read_document(path)
+        if document.get("schema") == "ur10_simulated_camera_parameters_v1":
+            document = simulation_parameters(document)
         # 旧 master 的手眼输出 T_tool_cam 明确使用 m；只在此导入边界换算。
         if "T_tool_cam" in document:
             legacy = validate_transform(document["T_tool_cam"], "旧手眼参数").copy()
             legacy[:3, 3] *= 1000
             document = {**self.parameters, "hand_eye": legacy.tolist(), "length_unit": "mm"}
             document["source_note"] = "旧 master T_tool_cam 导入，平移由 m 转为 mm"
+        elif ("camera_matrix" in document and "hand_eye" in document
+              and any(key in document for key in ("board_grid", "charuco", "board_type"))):
+            # 完整配置替换测量条件；未声明的新字段不能继承上一次仿真配置。
+            defaults = read_document(Path(__file__).resolve().parents[2] / "config" / "robot_position.json")
+            defaults.update({
+                "board_type": "checkerboard", "charuco": {}, "target_pose_base": None,
+                "image_size_px": None, "end_frame": None, "target_id": "configured_target",
+                "source_note": "",
+            })
+            reset = {key: value for key, value in defaults.items()
+                     if key in self.parameters or key in document}
+            document = {**reset, **document}
         document["source_path"] = str(Path(path).resolve())
         return self.save_parameters(document)
 
@@ -183,15 +219,31 @@ class PositionMonitoringService:
         if not np.isfinite(size) or size <= 0:
             raise ValueError("棋盘格长必须为正数，单位 mm")
         parameters["square_size_mm"] = size
+        if parameters.get("board_type", "checkerboard") not in ("checkerboard", "charuco"):
+            raise ValueError("标定板类型只支持普通棋盘或 ChArUco")
+        if parameters.get("board_type") == "charuco":
+            make_charuco_board(parameters.get("charuco", {}), size)
+        if parameters.get("target_pose_base") is not None:
+            target = validate_transform(parameters["target_pose_base"], "固定靶标基座位姿").copy()
+            if "target_pose_base" in document and document.get("length_unit") == "m":
+                target[:3, 3] *= 1000
+            parameters["target_pose_base"] = target.tolist()
         if parameters.get("reference_rotation") is not None:
             parameters["reference_rotation"] = _rotation(parameters["reference_rotation"], "棋盘参考旋转")
         limit = parameters.get("max_reprojection_error_px")
         if limit is not None and (not np.isfinite(float(limit)) or float(limit) <= 0):
             raise ValueError("重投影误差限值必须为正数或 null")
+        parameters["max_reprojection_error_px"] = float(limit) if limit is not None else None
         parameters["length_unit"] = "mm"
         parameters["transform_convention"] = "E_T_C"
+        metadata = {"version", "source_path", "source_note", "created_at", "updated_at", "description", "notes"}
+        effective = {key: value for key, value in parameters.items() if key not in metadata}
+        previous_effective = {key: value for key, value in self.parameters.items() if key not in metadata}
+        if effective == previous_effective:
+            return deepcopy(self.parameters)
         parameters["version"] = _stamp()
-        write_document(self.storage / "parameters" / f"{parameters['version']}.json", parameters)
+        write_document(self.previous_parameter_path, self.parameters)
+        write_document(self.parameter_path, parameters)
         self.parameters = parameters
         self.current_batch = None
         self._save_state()
@@ -199,13 +251,15 @@ class PositionMonitoringService:
 
     def save_settings(self, settings):
         updated = deepcopy({**self.settings, **settings})
-        if "metric_thresholds" in settings:
-            updated["metric_thresholds"] = deepcopy(self.settings["metric_thresholds"])
-            for mode, thresholds in settings["metric_thresholds"].items():
-                if mode not in METRIC_LABELS:
-                    raise ValueError(f"未知评价指标：{mode}")
-                updated["metric_thresholds"][mode].update(thresholds)
-        threshold_groups = [updated["thresholds"], *updated["metric_thresholds"].values()]
+        threshold_groups = [updated["thresholds"]]
+        for key in ("metric_thresholds", "multidirectional_thresholds"):
+            if key in settings:
+                updated[key] = deepcopy(self.settings[key])
+                for mode, thresholds in settings[key].items():
+                    if mode not in METRIC_LABELS:
+                        raise ValueError(f"未知评价指标：{mode}")
+                    updated[key][mode].update(thresholds)
+            threshold_groups.extend(updated[key].values())
         for thresholds in threshold_groups:
             for axis in METRIC_AXES:
                 value = thresholds.get(axis)
@@ -218,10 +272,18 @@ class PositionMonitoringService:
         self._save_state()
 
     def load_observations(self, path, progress=None):
-        """读取标准观测清单；图像在后台逐幅 PnP，矩阵输入无须相机内参。"""
+        """导入单批图片/目录/观测文件，逐图解算后立即保存可复用的观测结果。"""
         self.current_batch = None
-        source = Path(path).resolve()
-        batch = read_document(source)
+        if isinstance(path, (list, tuple)) or Path(path).is_dir() or Path(path).suffix.lower() in IMAGE_SUFFIXES:
+            batch = image_batch(path, self.parameters)
+            source = Path(batch["source_path"])
+        else:
+            source = Path(path).resolve()
+            batch = read_document(source)
+            if "frames" in batch:
+                batch = image_batch(source, self.parameters)
+        if batch.get("parameter_version") and batch["parameter_version"] != self.parameters["version"]:
+            raise ValueError("观测结果的参数版本与当前参数不一致，请恢复对应参数或重新导入原图")
         if batch.get("length_unit") not in ("mm", "m"):
             raise ValueError("观测清单需声明 length_unit 为 mm 或 m")
         for field in ("program_id", "target_id"):
@@ -268,15 +330,24 @@ class PositionMonitoringService:
                 image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
                 if image is None:
                     raise ValueError(f"无法读取图像 {image_path}")
+                image_size = self.parameters.get("image_size_px")
+                if image_size and list(image.shape[:2][::-1]) != image_size:
+                    raise ValueError(f"图像 {image_path.name} 尺寸与相机内参对应分辨率不一致")
                 reference = references.get(sample["point_id"])
                 if reference is None:
                     reference = self.parameters.get("reference_rotation")
                 try:
-                    estimate = estimate_board_pose(
-                        image, self.parameters["camera_matrix"], self.parameters["dist_coeffs"],
-                        self.parameters["board_grid"], self.parameters["square_size_mm"],
-                        reference_rotation=reference,
-                    )
+                    if self.parameters.get("board_type") == "charuco":
+                        estimate = estimate_charuco_pose(
+                            image, self.parameters["camera_matrix"], self.parameters["dist_coeffs"],
+                            self.parameters["charuco"], self.parameters["square_size_mm"],
+                        )
+                    else:
+                        estimate = estimate_board_pose(
+                            image, self.parameters["camera_matrix"], self.parameters["dist_coeffs"],
+                            self.parameters["board_grid"], self.parameters["square_size_mm"],
+                            reference_rotation=reference,
+                        )
                     limit = self.parameters.get("max_reprojection_error_px")
                     if limit is not None and estimate["reprojection_error_px"] > float(limit):
                         raise ValueError(f"重投影误差 {estimate['reprojection_error_px']:.4f}px 超出设置限值")
@@ -296,6 +367,20 @@ class PositionMonitoringService:
                                for key, value in estimate.items()
                                if key not in ("image_points", "projected_points")})
             references.setdefault(sample["point_id"], np.asarray(sample["vision_pose"])[:3, :3])
+            vision = np.asarray(sample["vision_pose"])
+            sample["vision_xyz_mm"] = vision[:3, 3].tolist()
+            sample["vision_rpy_deg"] = rotation_to_rpy_degrees(vision[:3, :3]).tolist()
+            if "ideal_pose" in sample:
+                ideal = validate_transform(sample["ideal_pose"], "指令目标位姿").copy()
+                ideal[:3, 3] *= factor
+                sample["ideal_pose"] = ideal.tolist()
+            if self.parameters.get("target_pose_base") is not None and self.parameters.get("hand_eye") is not None:
+                end_pose = (np.asarray(self.parameters["target_pose_base"]) @ np.linalg.inv(vision)
+                            @ np.linalg.inv(np.asarray(self.parameters["hand_eye"])))
+                sample["end_pose"] = end_pose.tolist()
+                sample["position_base_mm"] = end_pose[:3, 3].tolist()
+                if "ideal_pose" in sample:
+                    sample["error_base_mm"] = (end_pose[:3, 3] - np.asarray(sample["ideal_pose"])[:3, 3]).tolist()
             if "robot_pose" in sample:
                 robot = validate_transform(sample["robot_pose"], "机器人记录位姿").copy()
                 robot[:3, 3] *= factor
@@ -316,7 +401,7 @@ class PositionMonitoringService:
                     raise ValueError("初始绝对误差须为基座三轴有限数值向量")
                 directions[direction] = (value * factor).tolist()
         batch.update({
-            "schema_version": 1, "batch_id": str(batch.get("batch_id") or _stamp()),
+            "schema_version": 2, "batch_id": str(batch.get("batch_id") or _stamp()),
             "label": batch.get("label") or source.stem, "samples": resolved,
             "length_unit": "mm", "source_path": str(source),
             "parameter_version": self.parameters["version"], "rejected_samples": rejected,
@@ -324,6 +409,11 @@ class PositionMonitoringService:
         batch.setdefault("warnings", [])
         if batch.get("orientation_source") == "controller_approximation":
             batch["warnings"].append("基座方向来自控制器记录，属于近似朝向，非独立实测姿态")
+        batch["parameters"] = deepcopy(self.parameters)
+        batch["imported_at"] = datetime.now(timezone.utc).isoformat()
+        saved_path = self.storage / "observations" / f"{_stamp()}.json"
+        batch["saved_path"] = str(saved_path)
+        write_document(saved_path, batch)
         self.current_batch = batch
         return deepcopy(batch)
 
@@ -361,6 +451,9 @@ class PositionMonitoringService:
         if not all(key in baseline for key in ("id", "batch", "parameters")):
             raise ValueError("所选文件不是定位监控基准")
         baseline["path"] = str(Path(path).resolve())
+        if self.parameters != baseline["parameters"]:
+            write_document(self.previous_parameter_path, self.parameters)
+            write_document(self.parameter_path, baseline["parameters"])
         self.baseline = baseline
         self.parameters = deepcopy(baseline["parameters"])
         self.current_batch = None
@@ -409,6 +502,8 @@ class PositionMonitoringService:
             return False
         initial = self.baseline["batch"]
         current = self.current_batch
+        if initial.get("sampling_protocol") != current.get("sampling_protocol"):
+            return False
         if any(initial[field] != current[field] for field in ("program_id", "target_id")):
             return False
         initial_groups = {(item["point_id"], item["direction_id"]) for item in initial["samples"]}
@@ -430,11 +525,21 @@ class PositionMonitoringService:
         for field in ("program_id", "target_id"):
             if baseline_batch[field] != current[field]:
                 raise ValueError(f"基准与复测的 {field} 不一致，不能直接比较")
-        result = evaluate_position_monitoring(
-            baseline_batch["samples"], current["samples"], self.parameters["hand_eye"],
-            base_rotations=baseline_batch.get("base_rotations"),
-            initial_errors=baseline_batch.get("initial_errors"),
-        )
+        if baseline_batch.get("sampling_protocol") != current.get("sampling_protocol"):
+            raise ValueError("基准与复测的采样方式不一致，不能比较不同口径的指标")
+        if current.get("sampling_protocol") == "multidirectional":
+            result = evaluate_multidirectional(
+                current["samples"], self.parameters["hand_eye"],
+                baseline_samples=baseline_batch["samples"],
+                base_rotations=baseline_batch.get("base_rotations"),
+                target_pose_base=self.parameters.get("target_pose_base"),
+            )
+        else:
+            result = evaluate_position_monitoring(
+                baseline_batch["samples"], current["samples"], self.parameters["hand_eye"],
+                base_rotations=baseline_batch.get("base_rotations"),
+                initial_errors=baseline_batch.get("initial_errors"),
+            )
         result["warnings"] = list(dict.fromkeys(
             baseline_batch.get("warnings", []) + current.get("warnings", []) + result["warnings"]
         ))
@@ -459,10 +564,17 @@ class PositionMonitoringService:
             raise ValueError("参数版本已变化，请重新导入本次观测")
         if current.get("comparison_status") == "calibration_only":
             raise ValueError("手眼标定数据不能直接作为重复定位观测")
-        result = evaluate_current_repeatability(
-            current["samples"], self.parameters["hand_eye"],
-            base_rotations=current.get("base_rotations"),
-        )
+        if current.get("sampling_protocol") == "multidirectional":
+            result = evaluate_multidirectional(
+                current["samples"], self.parameters["hand_eye"],
+                base_rotations=current.get("base_rotations"),
+                target_pose_base=self.parameters.get("target_pose_base"),
+            )
+        else:
+            result = evaluate_current_repeatability(
+                current["samples"], self.parameters["hand_eye"],
+                base_rotations=current.get("base_rotations"),
+            )
         result["warnings"] = list(dict.fromkeys(current.get("warnings", []) + result["warnings"]))
         result.update({
             "baseline_id": None, "baseline_label": None, "baseline_path": None,
@@ -486,7 +598,9 @@ class PositionMonitoringService:
             "batch_id": current["batch_id"], "batch_label": current["label"],
             "program_id": current["program_id"], "target_id": current["target_id"],
             "current_source": current["source_path"], "comparison_status": comparison_status,
-            "metric_thresholds": deepcopy(self.settings["metric_thresholds"]),
+            "metric_thresholds": deepcopy(self.settings[
+                "multidirectional_thresholds" if current.get("sampling_protocol") == "multidirectional" else "metric_thresholds"
+            ]),
         })
         assessments = {mode: assess_metric(result, mode) for mode in METRIC_LABELS}
         result["metric_assessments"] = assessments
