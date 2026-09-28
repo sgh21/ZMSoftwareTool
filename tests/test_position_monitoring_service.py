@@ -237,7 +237,10 @@ def test_duplicate_arrival_id_is_rejected(service, tmp_path):
         service.load_observations(path)
 
 
-def test_hand_eye_calibration_is_serializable_and_does_not_replace_active_parameters(service, tmp_path):
+@pytest.mark.parametrize("with_pnp_metadata", [False, True])
+def test_hand_eye_calibration_is_serializable_and_does_not_replace_active_parameters(
+    service, tmp_path, monkeypatch, with_pnp_metadata,
+):
     rotvecs = [
         (0, 0, 0), (0.3, 0, 0), (0, -0.4, 0), (0, 0, 0.5),
         (0.2, -0.3, 0.1), (-0.25, 0.1, -0.4),
@@ -250,18 +253,49 @@ def test_hand_eye_calibration_is_serializable_and_does_not_replace_active_parame
             "point_id": str(index), "direction_id": "calibration", "sample_id": "1",
             "robot_pose": robot.tolist(), "vision_pose": vision.tolist(),
         })
+        if with_pnp_metadata:
+            samples[-1].update({
+                "image_path": f"capture_{index}.png", "reprojection_error_px": 0.1 + index * 0.01,
+                "corner_count": 100, "corner_order": "reference_rotation_original",
+            })
+    accepted_count = len(samples)
+    if with_pnp_metadata:
+        image = tmp_path / "rejected.bin"
+        image.write_bytes(b"unclear board")
+        samples.append({
+            "point_id": "rejected", "direction_id": "calibration", "sample_id": "1",
+            "robot_pose": transform().tolist(), "image_path": image.name,
+        })
+        service.save_parameters({"camera_matrix": [[1000, 0, 320], [0, 1000, 240], [0, 0, 1]]})
+        monkeypatch.setattr(service_module.cv2, "imdecode", lambda *_: np.zeros((20, 20), dtype=np.uint8))
+
+        def reject_board(*args, **kwargs):
+            raise ValueError("board not detected")
+
+        monkeypatch.setattr(service_module, "estimate_board_pose", reject_board)
     path = write_json(tmp_path / "calibration.json", {
         "length_unit": "mm", "program_id": "calibration", "target_id": "fixed-target",
         "comparison_status": "calibration_only", "samples": samples,
     })
     parameters_before = deepcopy(service.parameters)
     source_before = path.read_bytes()
-    service.load_observations(path)
+    imported = service.load_observations(path)
     result = service.calibrate_hand_eye()
     saved = read_document(result["path"])
     assert np.asarray(saved["hand_eye"]) == pytest.approx(HAND_EYE, abs=1e-7)
     assert saved["translation_rms_mm"] < 1e-7
-    assert saved["sample_count"] == len(samples)
+    assert saved["sample_count"] == accepted_count
+    snapshot = read_document(saved["input_batch_path"])
+    assert snapshot == imported
+    assert saved["parameters"] == parameters_before
+    assert saved["rejected_samples"] == imported["rejected_samples"]
+    if with_pnp_metadata:
+        assert len(saved["pnp_summary"]) == accepted_count
+        assert saved["pnp_summary"][0]["reprojection_error_px"] == pytest.approx(0.1)
+        assert saved["rejected_samples"][0]["point_id"] == "rejected"
+        assert saved["rejected_samples"][0]["reason"] == "board not detected"
+    else:
+        assert saved["pnp_summary"] is None
     assert service.parameters == parameters_before
     assert path.read_bytes() == source_before
     with pytest.raises(ValueError, match="手眼标定数据"):
@@ -291,6 +325,45 @@ def test_image_observation_arrays_are_serializable_at_service_boundary(service, 
     assert isinstance(saved["batch"]["samples"][0]["vision_pose"], list)
     assert "image_points" not in saved["batch"]["samples"][0]
     assert image.read_bytes() == raw_before
+
+
+def test_mixed_batch_images_use_first_matrix_observation_as_board_reference(service, tmp_path, monkeypatch):
+    image = tmp_path / "second.bin"
+    image.write_bytes(b"image bytes")
+    first_pose = transform((10, 20, 300), (0.1, -0.2, 1.7))
+    source = write_json(tmp_path / "mixed.json", {
+        "length_unit": "mm", "program_id": "fixed", "target_id": "fixed-target",
+        "samples": [
+            {"point_id": "P1", "direction_id": "D1", "sample_id": "1", "vision_pose": first_pose.tolist()},
+            {"point_id": "P1", "direction_id": "D1", "sample_id": "2", "image_path": image.name},
+        ],
+    })
+    service.save_parameters({"camera_matrix": [[1000, 0, 320], [0, 1000, 240], [0, 0, 1]]})
+    monkeypatch.setattr(service_module.cv2, "imdecode", lambda *_: np.zeros((20, 20), dtype=np.uint8))
+    used_references = []
+
+    def estimate(*args, reference_rotation=None, **kwargs):
+        used_references.append(reference_rotation)
+        return {"vision_pose": first_pose.copy(), "reprojection_error_px": 0.1}
+
+    monkeypatch.setattr(service_module, "estimate_board_pose", estimate)
+    imported = service.load_observations(source)
+    assert len(imported["samples"]) == 2
+    assert len(used_references) == 1
+    assert used_references[0] == pytest.approx(first_pose[:3, :3])
+
+
+def test_failed_import_clears_old_batch_before_evaluation(service, tmp_path):
+    establish_baseline(service, tmp_path / "initial.json")
+    service.load_observations(batch_file(tmp_path / "valid.json", repeated((101, 200, 300))))
+    assert service.current_batch is not None
+    invalid = write_json(tmp_path / "invalid.json", {"length_unit": "mm"})
+    with pytest.raises(ValueError, match="program_id"):
+        service.load_observations(invalid)
+    assert service.current_batch is None
+    with pytest.raises(ValueError, match="本次复测观测"):
+        service.evaluate()
+    assert service.list_history() == []
 
 
 def test_debug_batches_remain_explicitly_unverified(service, tmp_path):

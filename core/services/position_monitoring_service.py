@@ -213,14 +213,18 @@ class PositionMonitoringService:
                     # 标定清单可显式记录剔除；监测数据不静默删掉失效到达。
                     if batch.get("comparison_status") != "calibration_only":
                         raise ValueError(f"{image_path.name}: {error}") from error
-                    rejected.append({"sample_id": sample["sample_id"], "reason": str(error)})
+                    rejected.append({
+                        "point_id": sample["point_id"], "direction_id": sample["direction_id"],
+                        "sample_id": sample["sample_id"], "image_path": str(image_path.resolve()),
+                        "reason": str(error),
+                    })
                     if progress:
                         progress(round(100 * (index + 1) / len(samples)), f"跳过 {image_path.name}: {error}")
                     continue
                 sample.update({key: value.tolist() if isinstance(value, np.ndarray) else value
                                for key, value in estimate.items()
                                if key not in ("image_points", "projected_points")})
-                references.setdefault(sample["point_id"], np.asarray(sample["vision_pose"])[:3, :3])
+            references.setdefault(sample["point_id"], np.asarray(sample["vision_pose"])[:3, :3])
             if "robot_pose" in sample:
                 robot = validate_transform(sample["robot_pose"], "机器人记录位姿").copy()
                 robot[:3, 3] *= factor
@@ -307,7 +311,19 @@ class PositionMonitoringService:
         validate_transform(result["hand_eye"], "标定得到的手眼变换")
         result["batch_id"] = self.current_batch["batch_id"]
         result["source_path"] = self.current_batch["source_path"]
-        path = self.storage / "calibrations" / f"{_stamp()}.json"
+        result["parameters"] = deepcopy(self.parameters)
+        result["rejected_samples"] = deepcopy(self.current_batch.get("rejected_samples", []))
+        result["pnp_summary"] = [{
+            key: sample.get(key) for key in (
+                "point_id", "direction_id", "sample_id", "image_path",
+                "reprojection_error_px", "reprojection_mean_px", "corner_count", "corner_order",
+            )
+        } for sample in samples if sample.get("image_path")] or None
+        identifier = _stamp()
+        path = self.storage / "calibrations" / f"{identifier}.json"
+        snapshot_path = self.storage / "calibrations" / f"{identifier}_observations.json"
+        result["input_batch_path"] = str(snapshot_path)
+        write_document(snapshot_path, self.current_batch)
         write_document(path, result)
         result["path"] = str(path)
         # 返回待审阅结果，不自动替换当前手眼及已建立基准。
