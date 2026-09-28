@@ -1,4 +1,4 @@
-"""操作真实 Qt 页面复现初始建模和后续复测；两阶段分进程执行以检查重启。"""
+"""操作真实 Qt 页面完成 B001 基准、B002/B003 复测和自动恢复；保留最终状态。"""
 
 import argparse
 from pathlib import Path
@@ -9,9 +9,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtCore import Qt, QTimer  # noqa: E402
+from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
-from PyQt6.QtWidgets import QPushButton, QTableWidget  # noqa: E402
+from PyQt6.QtWidgets import QPushButton  # noqa: E402
 
 from main import create_application  # noqa: E402
 from app.main_window import MainWindow  # noqa: E402
@@ -27,7 +27,7 @@ def click(page, text):
     QTest.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
 
 
-def wait_task(application, page):
+def wait_task(application, page, progress_capture=None):
     started = time.monotonic()
     errors = []
     if page.task is not None:
@@ -38,6 +38,8 @@ def wait_task(application, page):
             if percent // 5 != last_percent[0]:
                 last_percent[0] = percent // 5
                 print(f"{percent}% {message}", flush=True)
+            if progress_capture is not None and 25 <= percent <= 50 and not progress_capture.exists():
+                page.window().grab().save(str(progress_capture))
 
         page.task.signals.progress.connect(progress)
     while page.task is not None:
@@ -62,6 +64,9 @@ def main():
     parser.add_argument("--parameters", type=Path)
     parser.add_argument("--report-root", type=Path, required=True)
     parser.add_argument("--stage", choices=("calibration", "initial", "current", "reopen"), required=True)
+    parser.add_argument("--batch", choices=("B002", "B003"), default="B003")
+    parser.add_argument("--bias-reference", type=Path,
+                        help="仅事后核验用的生成偏置表，不传给测量服务")
     options = parser.parse_args()
     output = options.report_root.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -121,7 +126,9 @@ def main():
         page._create_baseline()
         wait_task(application, page)
         assert service.baseline["batch"]["batch_id"] == "B001"
-        assert service.current_batch is None
+        assert page.result is not None and page.result["batch_id"] == "B001"
+        assert len(service.list_history()) == 1
+        record["baseline_evaluation_id"] = page.result["id"]
         record["baseline_id"] = service.baseline["id"]
         record["baseline_path"] = service.baseline["path"]
         capture(window, output / "03_baseline.png")
@@ -129,54 +136,62 @@ def main():
         previous = read_document(output / "initial.json")
         assert service.baseline["id"] == previous["baseline_id"]
         assert service.parameters["version"] == previous["parameter_version"]
-        assert service.current_batch is None
+        assert page.result is not None, "启动未自动恢复上次结果"
         record["restart_restored_baseline"] = True
         with patch("app.pages.robot_position_page.QFileDialog.getExistingDirectory",
-                   return_value=str((options.dataset / "B002").resolve())):
+                   return_value=str((options.dataset / options.batch).resolve())):
             page._import_image_directory()
-        wait_task(application, page)
+        wait_task(application, page, output / "image_progress.png")
         assert len(service.current_batch["samples"]) == 600
-        assert service.current_batch["batch_id"] == "B002"
+        assert service.current_batch["batch_id"] == options.batch
+        # 已导入但尚未评估，也必须能从磁盘恢复。
+        restored = type(service)(root=service.root)
+        assert restored.current_batch["batch_id"] == options.batch
+        assert len(restored.current_batch["samples"]) == 600
         click(page, "评估精度")
         wait_task(application, page)
         assert page.result is not None and page.result["baseline_id"] == previous["baseline_id"]
         assert len(page.result["groups"]) == 30
-        for index, mode in enumerate(("absolute_change", "repeatability_change", "repeatability"), 4):
+        for mode in ("absolute_change", "repeatability_change", "repeatability"):
             page.result_metric.setCurrentIndex(page.result_metric.findData(mode))
-            capture(window, output / f"{index:02d}_{mode}.png")
-        report = verify_dataset(options.dataset, service.baseline["batch"], service.current_batch, page.result)
-        write_document(output / "verification.json", report)
+            if options.batch == "B003":
+                capture(window, output / f"{mode}.png")
+        bias = read_document(options.bias_reference) if options.bias_reference else None
+        report = verify_dataset(options.dataset, service.baseline["batch"], service.current_batch,
+                                page.result, bias_reference=bias)
+        verification_path = output / f"verification_{options.batch}.json"
+        write_document(verification_path, report)
         assert report["statistics_check"]["passed"], "独立统计与软件结果不一致"
-        record.update({"result": page.result, "verification_path": str(output / "verification.json")})
+        record.update({"result_id": page.result["id"], "baseline_id": page.result["baseline_id"],
+                       "verification_path": str(verification_path),
+                       "import_without_evaluation_restored": True})
+        if options.batch == "B003":
+            b002 = next(item for item in service.list_history() if item["batch_id"] == "B002")
+            second = read_document(b002["current_batch_path"])
+            comparison = verify_dataset(options.dataset, second, service.current_batch, bias_reference=bias)
+            write_document(output / "comparison_B002_B003.json", comparison)
+            page.result_metric.setCurrentIndex(page.result_metric.findData("absolute_change"))
         print(report["metric_comparison"], flush=True)
     else:
-        previous = read_document(output / "current.json")
+        previous = read_document(output / "current_B003.json")
         histories = service.list_history()
-        saved = next(item for item in histories if item["id"] == previous["result"]["id"])
-        assert saved == previous["result"]
+        saved = next(item for item in histories if item["id"] == previous["result_id"])
+        assert saved["baseline_id"] == previous["baseline_id"]
         assert service.baseline["id"] == saved["baseline_id"]
-        history_index = next(index for index, item in enumerate(histories) if item["id"] == saved["id"])
-
-        def select_history():
-            dialog = application.activeModalWidget()
-            table = dialog.findChild(QTableWidget)
-            table.cellDoubleClicked.emit(history_index, 0)
-
-        QTimer.singleShot(200, select_history)
-        click(page, "历史记录")
+        assert [item["batch_id"] for item in histories] == ["B001", "B002", "B003"]
         assert page.result == saved
-        assert page.history_batches["current"]["batch_id"] == "B002"
-        assert page.history_batches["baseline"]["batch_id"] == "B001"
-        for index, batch in ((0, "B002"), (1, "B001")):
+        assert service.current_batch["batch_id"] == "B003"
+        for index, batch in ((0, "B003"), (1, "B001")):
             page.observation_source.setCurrentIndex(index)
             assert page.observation_sample.count() == 600
             assert page.observation_sample.currentData()["sample_id"].startswith(batch)
         page.observation_source.setCurrentIndex(0)
-        capture(window, output / "07_restored_history.png")
-        record["restart_restored_history"] = True
-        record["history_ui_and_images_restored"] = True
+        capture(window, output / "final_restored.png")
+        record["automatic_restart_restore"] = True
+        record["history_and_images_restored"] = True
         record["history_id"] = saved["id"]
-    write_document(output / f"{options.stage}.json", record)
+    name = f"current_{options.batch}" if options.stage == "current" else options.stage
+    write_document(output / f"{name}.json", record)
     window.close()
     application.processEvents()
     print(f"COMPLETED {options.stage}: {output}", flush=True)

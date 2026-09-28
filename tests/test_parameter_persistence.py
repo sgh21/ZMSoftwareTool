@@ -39,7 +39,10 @@ def test_first_start_creates_current_and_later_starts_ignore_template_changes(tm
     assert service.parameters == initial
     assert read_document(service.parameter_path) == initial
     assert not service.previous_parameter_path.exists()
-    assert set(read_document(service.storage / "state.json")) == {"settings", "baseline_path"}
+    state = read_document(service.storage / "state.json")
+    assert state["baseline_path"] is None
+    assert state["current_batch_path"] is None
+    assert state["latest_result"] is None
     current_bytes = service.parameter_path.read_bytes()
     current_mtime = service.parameter_path.stat().st_mtime_ns
     write_document(configured, {**initial, "square_size_mm": 9})

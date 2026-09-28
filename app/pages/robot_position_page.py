@@ -1,10 +1,10 @@
 """机器人定位监控：按用户约定的区域 1—8 组织结果、设置和日志。"""
 
-from math import isfinite
+from math import ceil, isfinite
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QRunnable, QDateTime, QPointF, QRectF, Qt, QThreadPool, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtCore import QObject, QRunnable, QDateTime, QPointF, QRectF, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -31,7 +32,7 @@ from PyQt6.QtWidgets import (
 
 from app.resources import DISPLAY, fit_dialog
 from core.services.position_monitoring_service import (
-    METRIC_LABELS, MULTIDIRECTIONAL_LABELS, PositionMonitoringService, assess_metric, metric_values, read_document,
+    METRIC_LABELS, PositionMonitoringService, assess_metric, metric_values, read_document,
 )
 
 
@@ -78,6 +79,7 @@ class RobotPositionPage(QWidget):
         self.result = None
         self.history_batches = None
         self.task = None
+        self._restore_log_scroll_pending = True
         self.mutation_buttons = []
         self.setObjectName("RobotPositionPage")
         page_layout = QVBoxLayout(self)
@@ -104,8 +106,44 @@ class RobotPositionPage(QWidget):
         page_layout.addWidget(self.scroll_area, 1)
         self._refresh_settings()
         self._fill_table(self.point_table, self._prediction_rows())
-        self._render_result()
-        self.append_log("页面已就绪，等待手眼参数、基准及观测数据。")
+        for entry in self.service.list_logs():
+            self._display_log(entry)
+        if self.service.latest_result is not None:
+            self._show_saved_result(self.service.latest_result)
+            batch = self.history_batches["current"] or {}
+            self.task_progress.setValue(100)
+            self.task_progress_note.setText(
+                f"已恢复 {self.result['batch_id']} 评估 · {len(batch.get('samples', []))} 个观测"
+            )
+        else:
+            self._render_result()
+            self._refresh_observations()
+            if self.service.current_batch is not None:
+                self.task_progress.setValue(100)
+                self.task_progress_note.setText(f"已恢复 {self.service.current_batch['batch_id']} 观测，待评估")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._restore_log_scroll_pending:
+            self._restore_log_scroll_pending = False
+            QTimer.singleShot(0, self._restore_log_position)
+
+    def _restore_log_position(self):
+        scale_timer = getattr(self.window(), "scale_timer", None)
+        if scale_timer is not None and scale_timer.isActive():
+            def after_scale():
+                scale_timer.timeout.disconnect(after_scale)
+                QTimer.singleShot(0, self._show_latest_log)
+
+            scale_timer.timeout.connect(after_scale)
+        else:
+            self._show_latest_log()
+
+    def _show_latest_log(self):
+        self.process_log.moveCursor(QTextCursor.MoveOperation.End)
+        self.process_log.ensureCursorVisible()
+        scrollbar = self.process_log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -122,8 +160,11 @@ class RobotPositionPage(QWidget):
         return button
 
     def append_log(self, message: str, level: str = "INFO") -> None:
-        timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
-        self.process_log.appendPlainText(f"{timestamp} [{level}] {message}")
+        self._display_log(self.service.append_log(message, level))
+
+    def _display_log(self, entry):
+        timestamp = self._display_time(entry["timestamp"])
+        self.process_log.appendPlainText(f"{timestamp} [{entry['level']}] {entry['message']}")
 
     @staticmethod
     def _note(text: str) -> QLabel:
@@ -240,7 +281,7 @@ class RobotPositionPage(QWidget):
         return context.get("sampling_protocol") == "multidirectional"
 
     def _metric_labels(self):
-        return MULTIDIRECTIONAL_LABELS if self._multidirectional() else METRIC_LABELS
+        return METRIC_LABELS
 
     def _metric_hint(self, mode=None):
         return (MULTIDIRECTIONAL_HINTS if self._multidirectional() else METRIC_HINTS)[mode or self._metric_mode()]
@@ -295,10 +336,10 @@ class RobotPositionPage(QWidget):
         self.trend_chart = PositionTrendChart()
         body.addWidget(self.trend_chart, 1)
         self.trend_metric.currentIndexChanged.connect(self._change_trend_metric)
-        caption = self._note("评估时间 / 天")
-        caption.setToolTip("相对于基准建立时间的经过天数，1 天 = 24 小时")
-        caption.setAlignment(Qt.AlignmentFlag.AlignRight)
-        body.addWidget(caption)
+        self.trend_time_caption = self._note("评估时间 / 天")
+        self.trend_time_caption.setToolTip("相对于基准建立时间的经过天数，1 天 = 24 小时")
+        self.trend_time_caption.setAlignment(Qt.AlignmentFlag.AlignRight)
+        body.addWidget(self.trend_time_caption)
         return area
 
     def _change_trend_metric(self) -> None:
@@ -441,6 +482,13 @@ class RobotPositionPage(QWidget):
         self.process_log.setPlaceholderText("操作过程、提示与错误将在这里显示")
         log_layout.addLayout(heading)
         log_layout.addWidget(self.process_log, 1)
+        self.task_progress = QProgressBar()
+        self.task_progress.setRange(0, 100)
+        self.task_progress.setValue(0)
+        self.task_progress.setAccessibleName("当前任务进度")
+        log_layout.addWidget(self.task_progress)
+        self.task_progress_note = self._note("尚未开始处理")
+        log_layout.addWidget(self.task_progress_note)
         body.addWidget(log_area, 1)
         body.addWidget(self._action_bar())
         return panel
@@ -570,18 +618,7 @@ class RobotPositionPage(QWidget):
         layout.addWidget(table)
 
         def select(row, _column):
-            self.result = records[row]
-            self.history_batches = {"current": None, "baseline": None}
-            for source, field in (("current", "current_batch_path"), ("baseline", "baseline_path")):
-                path = self.result.get(field)
-                if path:
-                    try:
-                        document = read_document(path)
-                        self.history_batches[source] = document["batch"] if source == "baseline" else document
-                    except (OSError, ValueError, KeyError) as error:
-                        self.append_log(f"历史图像快照未能载入：{error}", "WARN")
-            self._render_result()
-            self._refresh_observations()
+            self._show_saved_result(records[row])
             self.append_log(f"查看历史结果：{self.result['id']}。")
             dialog.accept()
 
@@ -589,6 +626,16 @@ class RobotPositionPage(QWidget):
         layout.addWidget(self._button("关闭", dialog.reject))
         fit_dialog(dialog, 960, 460)
         dialog.exec()
+
+    def _show_saved_result(self, result):
+        self.result = result
+        try:
+            self.history_batches = self.service.load_evaluation_samples(result)
+        except (OSError, ValueError, KeyError) as error:
+            self.history_batches = {"current": None, "baseline": None}
+            self.append_log(f"历史图像快照未能载入：{error}", "WARN")
+        self._render_result()
+        self._refresh_observations()
 
     def _show_alarms(self) -> None:
         rows = []
@@ -704,6 +751,8 @@ class RobotPositionPage(QWidget):
             self.append_log("当前任务仍在执行，请等待完成。", "WARN")
             return
         self.append_log(f"{title}开始。")
+        self.task_progress.setValue(0)
+        self.task_progress_note.setText(f"{title}：准备处理")
         for button in self.mutation_buttons:
             button.setEnabled(False)
         self._task_completed_callback = completed
@@ -714,15 +763,19 @@ class RobotPositionPage(QWidget):
         QThreadPool.globalInstance().start(self.task)
 
     def _task_progress(self, percent, message):
-        self.append_log(f"{percent}% · {message}")
+        self.task_progress.setValue(percent)
+        self.task_progress_note.setText(message)
 
     def _task_completed(self, result):
         callback = self._task_completed_callback
+        self.task_progress.setValue(100)
+        self.task_progress_note.setText("处理完成")
         self._finish_task()
         callback(result)
 
     def _task_failed(self, message):
         self._finish_task()
+        self.task_progress_note.setText(f"处理失败：{message}")
         self.append_log(message, "ERROR")
 
     def _finish_task(self):
@@ -852,7 +905,8 @@ class RobotPositionPage(QWidget):
                        self._baseline_created)
 
     def _baseline_created(self, baseline):
-        self._invalidate_result()
+        self._refresh_settings()
+        self._show_saved_result(self.service.latest_result)
         self.append_log(f"基准已建立：{baseline['id']}。请导入复测观测。")
 
     def _select_baseline(self):
@@ -1015,15 +1069,33 @@ class RobotPositionPage(QWidget):
         )
         history = self.service.list_history()
         parameter_version = self.result.get("parameter_version") if self.result else self.service.parameters.get("version")
-        context = self.result or self.service.current_batch or {}
-        origin = QDateTime.fromString(str(self._baseline_created_at(self.result)), Qt.DateFormat.ISODateWithMs)
+        baseline_batch = (self.service.baseline or {}).get("batch", {})
+        context = self.result or self.service.current_batch or baseline_batch
+        debug = context.get("debug_day_index") is not None
+        self.trend_chart.integer_days = debug
+        baseline_day = context.get("baseline_debug_day_index", baseline_batch.get("debug_day_index"))
+        observed_origin = context.get("baseline_observed_at")
+        if observed_origin is None and (self.service.baseline or {}).get("id") == baseline_id:
+            observed_origin = baseline_batch.get("observed_at")
+        observed_time = context.get("observed_at") is not None and observed_origin is not None
+        origin_value = observed_origin if observed_time else self._baseline_created_at(self.result)
+        origin = QDateTime.fromString(str(origin_value), Qt.DateFormat.ISODateWithMs)
+        if debug:
+            self.trend_time_caption.setText("调试天数")
+            self.trend_time_caption.setToolTip("每个仿真批次为一天；B001 为第 0 天，重复评估同批次不增加天数。")
+        elif not observed_time:
+            self.trend_time_caption.setText("评估时间 / 天")
+            self.trend_time_caption.setToolTip("旧记录缺少采集时间，按评估时间相对基准建立时间绘制，1 天 = 24 小时。")
         self.trend_chart.empty_message = (
-            "暂无历史评估记录" if origin.isValid() else "缺少基准建立时间，无法显示相对时间趋势"
+            "暂无历史评估记录" if (baseline_day is not None if debug else origin.isValid())
+            else "缺少基准时间，无法显示相对时间趋势"
         )
         groups = context.get("groups", context.get("samples", []))
         point_directions = {(entry["point_id"], entry["direction_id"])
                             for group in groups for entry in group.get("directions", [group])}
         records = []
+        debug_records = {}
+        time_sources = set()
         for result in history:
             if result.get("sampling_protocol") != context.get("sampling_protocol"):
                 continue
@@ -1037,12 +1109,44 @@ class RobotPositionPage(QWidget):
                              for group in result["groups"] for entry in group.get("directions", [group])}
             if point_directions and record_points != point_directions:
                 continue
-            timestamp = QDateTime.fromString(str(result.get("created_at")), Qt.DateFormat.ISODateWithMs)
-            if not origin.isValid() or not timestamp.isValid():
-                continue
+            if debug:
+                day = result.get("debug_day_index")
+                if day is None or baseline_day is None:
+                    continue
+                days = day - baseline_day
+            else:
+                if result.get("debug_day_index") is not None:
+                    continue
+                timestamp = QDateTime.fromString(
+                    str(result.get("observed_at") if observed_time else result.get("created_at")),
+                    Qt.DateFormat.ISODateWithMs,
+                )
+                if not origin.isValid() or not timestamp.isValid():
+                    continue
+                days = origin.msecsTo(timestamp) / 86400000
             values = self._metric_values(result)
-            records.append({"days": origin.msecsTo(timestamp) / 86400000,
-                            **dict(zip(("X", "Y", "Z", "distance"), values))})
+            record = {"days": days, **dict(zip(("X", "Y", "Z", "distance"), values))}
+            if debug:
+                previous = debug_records.get(result["batch_id"])
+                if previous is None or result["created_at"] >= previous[0]:
+                    debug_records[result["batch_id"]] = (result["created_at"], record)
+            else:
+                records.append(record)
+                if observed_time:
+                    time_sources.update((result.get("time_source"), result.get("baseline_time_source")))
+        if debug:
+            records = [record for _, record in debug_records.values()]
+        elif observed_time:
+            self.trend_time_caption.setText("采集时间 / 天" if time_sources == {"captured_at"} else "观测时间 / 天")
+            labels = {
+                "captured_at": "采集时间",
+                "imported_at": "导入时间（缺采集时间）",
+                "evaluated_at": "评估时间（旧记录缺采集和导入时间）",
+                "baseline_created_at": "基准建立时间（旧基准缺采集和导入时间）",
+                None: "旧记录未标明时间来源",
+            }
+            sources = "；".join(label for source, label in labels.items() if source in time_sources)
+            self.trend_time_caption.setToolTip(f"当前曲线时间来源：{sources or '尚无可绘制记录'}。1 天 = 24 小时。")
         self.trend_chart.set_history(records)
         axis = "空间" if self.trend_metric.currentData() == "distance" else "基座 XYZ"
         self.trend_axis_title.setText(f"{axis} / mm")
@@ -1364,6 +1468,7 @@ class PositionTrendChart(QWidget):
         self.setMinimumHeight(150)
         self.mode = "xyz"
         self.history = []
+        self.integer_days = False
         self.empty_message = "暂无历史评估记录"
         self.setAccessibleName("多次评估的定位精度趋势图")
 
@@ -1421,9 +1526,13 @@ class PositionTrendChart(QWidget):
         last_day = max(0, self.history[-1]["days"])
         if first_day == last_day:
             last_day = first_day + 1
-        for step in range(5):
-            day = first_day + (last_day - first_day) * step / 4
-            x = plot.left() + plot.width() * step / 4
+        if self.integer_days:
+            interval = max(1, ceil((last_day - first_day) / 4))
+            ticks = list(range(int(first_day), int(last_day) + 1, interval))
+        else:
+            ticks = [first_day + (last_day - first_day) * step / 4 for step in range(5)]
+        for day in ticks:
+            x = plot.left() + plot.width() * (day - first_day) / (last_day - first_day)
             tick_label = f"{day:.3g}"
             tick_width = max(margin, painter.fontMetrics().horizontalAdvance(tick_label) + 6)
             tick_left = max(0, min(x - tick_width / 2, self.width() - tick_width))

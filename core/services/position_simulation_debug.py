@@ -8,7 +8,6 @@ import numpy as np
 from core.algorithms.position_monitoring import evaluate_multidirectional, validate_transform
 from core.services.position_monitoring_service import (
     METRIC_LABELS,
-    MULTIDIRECTIONAL_LABELS,
     PositionMonitoringService,
     metric_values,
     write_document,
@@ -80,7 +79,7 @@ def _metric_comparison(measured, truth, measured_group=None, truth_group=None):
         measured_values = metric_values(measured, mode, measured_group)
         truth_values = metric_values(truth, mode, truth_group)
         rows.append({
-            "metric": mode, "label": MULTIDIRECTIONAL_LABELS[mode],
+            "metric": mode, "label": METRIC_LABELS[mode],
             "axes": ["X", "Y", "Z", "space"], "unit": "mm",
             "measured": measured_values, "truth": truth_values,
             "difference": [

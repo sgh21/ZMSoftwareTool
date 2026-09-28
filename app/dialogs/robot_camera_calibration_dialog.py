@@ -121,11 +121,12 @@ class RobotCameraCalibrationDialog(QDialog):
         try:
             parameters = read_document(dataset / "parameters.json")
             runs = parameters.get("runs", [])
-            if not runs:
-                raise ValueError("parameters.json 缺少 runs 批次信息")
             parsed = {str(run["batch_id"]): dataset / run.get(
                 "record", f"{run['batch_id']}/record.json",
             ) for run in runs}
+            parsed.update({path.parent.name: path for path in sorted(dataset.glob("B[0-9][0-9][0-9]/record.json"))})
+            if not parsed:
+                raise ValueError("目录缺少批次 record.json 或 runs 信息")
         except (OSError, ValueError, KeyError, TypeError) as error:
             self._source_changed()
             self.source_status.setText(f"无法读取标定数据：{error}")
@@ -192,7 +193,7 @@ class RobotCameraCalibrationDialog(QDialog):
 
     def _progress(self, percent, message):
         self.progress.setValue(percent)
-        self.output.appendPlainText(f"{percent}% · {message}")
+        self.summary.setText(f"{percent}% · {message}")
 
     @staticmethod
     def _number(value):

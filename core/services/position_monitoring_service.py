@@ -10,7 +10,7 @@ import numpy as np
 import yaml
 
 from core.algorithms.board_pose import (
-    calibrate_hand_eye, estimate_board_pose, estimate_charuco_pose, make_charuco_board,
+    estimate_board_pose, estimate_charuco_pose, make_charuco_board,
 )
 from core.algorithms.pose_fields import rotation_to_rpy_degrees
 from core.algorithms.position_monitoring import (
@@ -20,6 +20,7 @@ from core.algorithms.position_monitoring import (
     validate_transform,
 )
 from core.services.position_image_input import IMAGE_SUFFIXES, image_batch, simulation_parameters
+from core.services.position_persistence import PositionStore, observation_time, write_document
 
 
 METRIC_LABELS = {
@@ -28,13 +29,6 @@ METRIC_LABELS = {
     "repeatability": "当前重复定位精度",
 }
 METRIC_AXES = ("X", "Y", "Z", "distance")
-MULTIDIRECTIONAL_LABELS = {
-    "absolute_change": "绝对定位精度退化",
-    "repeatability_change": "多方向到位散布退化",
-    "repeatability": "当前多方向到位散布",
-}
-
-
 def metric_values(result, mode, group=None):
     """统一卡片、逐点结果、历史曲线和阈值判定的四列取值。"""
     source = result["summary"] if group is None else group
@@ -103,16 +97,6 @@ def read_document(path):
     return document
 
 
-def write_document(path, document):
-    """仅写本模块的输出；原始图像和输入文件不作任何修改。"""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(serialized + "\n", encoding="utf-8")
-    temporary.replace(path)
-
-
 def _stamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
@@ -130,6 +114,7 @@ class PositionMonitoringService:
     def __init__(self, root=None):
         self.root = Path(root or Path(__file__).resolve().parents[2]).resolve()
         self.storage = self.root / "storage" / "position_monitoring"
+        self._store = PositionStore(self.storage)
         self.parameter_path = self.storage / "parameters" / "current.json"
         self.previous_parameter_path = self.storage / "parameters" / "previous.json"
         state_path = self.storage / "state.json"
@@ -152,18 +137,70 @@ class PositionMonitoringService:
         }
         self.baseline = None
         self.current_batch = None
+        self.latest_result = None
+        self._latest_result_ref = None
         self.settings.update(state.get("settings", {}))
         if state.get("baseline_path"):
-            self.baseline = read_document(state["baseline_path"])
-            self.baseline["path"] = state["baseline_path"]
-        if "parameters" in state or not state_path.exists():
+            self.baseline = self._read_baseline(state["baseline_path"])
+        if state.get("current_batch_path"):
+            self.current_batch = read_document(state["current_batch_path"])
+            self.current_batch["saved_path"] = state["current_batch_path"]
+        if state.get("latest_result"):
+            self._latest_result_ref = state["latest_result"]
+            self.latest_result = self._store.result(self._latest_result_ref)
+        elif "current_batch_path" not in state:
+            # 旧版没有保存最后导入状态，仅能从最后一条兼容评估恢复。
+            records = [item for item in self.list_history()
+                       if item.get("parameter_version") == self.parameters.get("version")
+                       and item.get("baseline_id") == (self.baseline["id"] if self.baseline else None)]
+            if records:
+                self.latest_result = records[-1]
+                self._latest_result_ref = {
+                    "path": str(self.storage / "history" / f"{self.latest_result['id']}.json"),
+                    "id": self.latest_result["id"],
+                }
+                self.current_batch = read_document(self.latest_result["current_batch_path"])
+                self.current_batch["saved_path"] = self.latest_result["current_batch_path"]
+        if self.current_batch and self.current_batch.get("parameter_version") != self.parameters.get("version"):
+            self.current_batch = None
+        if self.current_batch:
+            observation_time(self.current_batch, self.latest_result["created_at"] if self.latest_result else None)
+        if (self.latest_result and (self.current_batch is None
+                or self.latest_result.get("current_batch_path") != self.current_batch.get("saved_path")
+                or self.latest_result.get("parameter_version") != self.parameters.get("version"))):
+            self.latest_result = None
+            self._latest_result_ref = None
+        if "current_batch_path" not in state or "parameters" in state:
             self._save_state()
 
     def _save_state(self):
         write_document(self.storage / "state.json", {
             "settings": self.settings,
             "baseline_path": self.baseline["path"] if self.baseline else None,
+            "current_batch_path": self.current_batch.get("saved_path") if self.current_batch else None,
+            "latest_result": self._latest_result_ref,
         })
+
+    @staticmethod
+    def _read_baseline(path):
+        baseline = read_document(path)
+        if "batch_path" in baseline:
+            baseline["batch"] = read_document(baseline["batch_path"])
+        if "batch" in baseline:
+            observation_time(baseline["batch"], baseline.get("created_at"), "baseline_created_at")
+        baseline["path"] = str(Path(path).resolve())
+        return baseline
+
+    def load_evaluation_samples(self, result):
+        current = read_document(result["current_batch_path"])
+        baseline = self._read_baseline(result["baseline_path"])["batch"] if result.get("baseline_path") else None
+        return {"current": current, "baseline": baseline}
+
+    def append_log(self, message, level="INFO"):
+        return self._store.append_log(message, level)
+
+    def list_logs(self):
+        return self._store.read_logs()
 
     def load_parameters(self, path):
         document = read_document(path)
@@ -246,6 +283,8 @@ class PositionMonitoringService:
         write_document(self.parameter_path, parameters)
         self.parameters = parameters
         self.current_batch = None
+        self.latest_result = None
+        self._latest_result_ref = None
         self._save_state()
         return deepcopy(parameters)
 
@@ -274,6 +313,9 @@ class PositionMonitoringService:
     def load_observations(self, path, progress=None):
         """导入单批图片/目录/观测文件，逐图解算后立即保存可复用的观测结果。"""
         self.current_batch = None
+        self.latest_result = None
+        self._latest_result_ref = None
+        self._save_state()
         if isinstance(path, (list, tuple)) or Path(path).is_dir() or Path(path).suffix.lower() in IMAGE_SUFFIXES:
             batch = image_batch(path, self.parameters)
             source = Path(batch["source_path"])
@@ -410,14 +452,22 @@ class PositionMonitoringService:
         if batch.get("orientation_source") == "controller_approximation":
             batch["warnings"].append("基座方向来自控制器记录，属于近似朝向，非独立实测姿态")
         batch["parameters"] = deepcopy(self.parameters)
-        batch["imported_at"] = datetime.now(timezone.utc).isoformat()
-        saved_path = self.storage / "observations" / f"{_stamp()}.json"
+        batch.setdefault("imported_at", datetime.now(timezone.utc).isoformat())
+        observation_time(batch)
+        identifier = _stamp()
+        self._store.manage_images(batch, identifier)
+        saved_path = self.storage / "observations" / f"{identifier}.json"
         batch["saved_path"] = str(saved_path)
         write_document(saved_path, batch)
         self.current_batch = batch
+        self._store.record("observations", {
+            "id": identifier, "batch_id": batch["batch_id"], "path": str(saved_path),
+            "observed_at": batch["observed_at"], "time_source": batch["time_source"],
+        }, batch, self.parameters)
+        self._save_state()
         return deepcopy(batch)
 
-    def create_baseline(self, name=""):
+    def create_baseline(self, name="", *, evaluate=True):
         if self.current_batch is None:
             raise ValueError("请先导入初始观测")
         if self.parameters.get("hand_eye") is None:
@@ -431,11 +481,21 @@ class PositionMonitoringService:
         baseline = {
             "id": identifier, "label": name or self.current_batch["label"],
             "created_at": datetime.now(timezone.utc).isoformat(), "path": str(path),
-            "parameters": deepcopy(self.parameters), "batch": deepcopy(self.current_batch),
+            "parameters": deepcopy(self.parameters), "batch_path": self.current_batch["saved_path"],
         }
         write_document(path, baseline)
+        baseline["batch"] = deepcopy(self.current_batch)
         self.baseline = baseline
-        self.current_batch = None
+        self._store.record("baselines", {
+            "id": identifier, "label": baseline["label"], "path": str(path),
+            "batch_path": baseline["batch_path"], "created_at": baseline["created_at"],
+        }, self.current_batch, self.parameters)
+        if evaluate:
+            self.evaluate()
+        else:
+            self.current_batch = None
+            self.latest_result = None
+            self._latest_result_ref = None
         self._save_state()
         return deepcopy(baseline)
 
@@ -447,7 +507,7 @@ class PositionMonitoringService:
         ]
 
     def select_baseline(self, path):
-        baseline = read_document(path)
+        baseline = self._read_baseline(path)
         if not all(key in baseline for key in ("id", "batch", "parameters")):
             raise ValueError("所选文件不是定位监控基准")
         baseline["path"] = str(Path(path).resolve())
@@ -457,43 +517,10 @@ class PositionMonitoringService:
         self.baseline = baseline
         self.parameters = deepcopy(baseline["parameters"])
         self.current_batch = None
+        self.latest_result = None
+        self._latest_result_ref = None
         self._save_state()
         return deepcopy(baseline)
-
-    def calibrate_hand_eye(self, method="PARK", progress=None):
-        if self.current_batch is None:
-            raise ValueError("请先导入手眼标定观测")
-        samples = self.current_batch["samples"]
-        if any("robot_pose" not in item for item in samples):
-            raise ValueError("手眼标定的每次观测都需要对应机器人 B_T_E 位姿")
-        result = calibrate_hand_eye(
-            [item["robot_pose"] for item in samples],
-            [item["vision_pose"] for item in samples], method=method,
-        )
-        result = {key: value.tolist() if isinstance(value, np.ndarray) else value
-                  for key, value in result.items()}
-        validate_transform(result["hand_eye"], "标定得到的手眼变换")
-        result["batch_id"] = self.current_batch["batch_id"]
-        result["source_path"] = self.current_batch["source_path"]
-        result["parameters"] = deepcopy(self.parameters)
-        result["rejected_samples"] = deepcopy(self.current_batch.get("rejected_samples", []))
-        result["pnp_summary"] = [{
-            key: sample.get(key) for key in (
-                "point_id", "direction_id", "sample_id", "image_path",
-                "reprojection_error_px", "reprojection_mean_px", "corner_count", "corner_order",
-            )
-        } for sample in samples if sample.get("image_path")] or None
-        identifier = _stamp()
-        path = self.storage / "calibrations" / f"{identifier}.json"
-        snapshot_path = self.storage / "calibrations" / f"{identifier}_observations.json"
-        result["input_batch_path"] = str(snapshot_path)
-        write_document(snapshot_path, self.current_batch)
-        write_document(path, result)
-        result["path"] = str(path)
-        # 返回待审阅结果，不自动替换当前手眼及已建立基准。
-        if progress:
-            progress(100, "手眼标定完成，请查看固定靶标一致性残差后应用参数")
-        return result
 
     def _has_comparable_baseline(self):
         if self.baseline is None or self.current_batch is None:
@@ -598,6 +625,12 @@ class PositionMonitoringService:
             "batch_id": current["batch_id"], "batch_label": current["label"],
             "program_id": current["program_id"], "target_id": current["target_id"],
             "current_source": current["source_path"], "comparison_status": comparison_status,
+            "observed_at": current["observed_at"], "time_source": current["time_source"],
+            "debug_day_index": current.get("debug_day_index"),
+            "baseline_observed_at": baseline_batch.get("observed_at") if baseline_batch else None,
+            "baseline_time_source": baseline_batch.get("time_source") if baseline_batch else None,
+            "baseline_debug_day_index": baseline_batch.get("debug_day_index") if baseline_batch else None,
+            "role": "baseline" if baseline_batch and current.get("saved_path") == baseline_batch.get("saved_path") else "measurement",
             "metric_thresholds": deepcopy(self.settings[
                 "multidirectional_thresholds" if current.get("sampling_protocol") == "multidirectional" else "metric_thresholds"
             ]),
@@ -618,17 +651,18 @@ class PositionMonitoringService:
         else:
             status = "部分指标不可判定"
         result["status"] = status
-        # 保存实际参与计算的观测快照，历史无需重跑图像或依赖被改写的输入清单。
-        snapshot_path = self.storage / "observations" / f"{result['id']}.json"
-        result["current_batch_path"] = str(snapshot_path)
-        write_document(snapshot_path, current)
-        write_document(self.storage / "history" / f"{result['id']}.json", result)
+        # 复用已保存观测；同日的多次评估集中保存，不复制图像与观测大文件。
+        result["current_batch_path"] = current["saved_path"]
+        daily_path = self._store.record("evaluations", result, current, self.parameters)
+        self.latest_result = deepcopy(result)
+        self._latest_result_ref = {"path": str(daily_path), "id": result["id"]}
+        self._save_state()
         if progress:
             progress(100, "评估完成，已保存结果和观测快照")
         return result
 
     def list_history(self, baseline_id=None):
-        records = [read_document(path) for path in sorted((self.storage / "history").glob("*.json"))]
+        records = self._store.history()
         return [record for record in records if baseline_id is None or record["baseline_id"] == baseline_id]
 
     @staticmethod

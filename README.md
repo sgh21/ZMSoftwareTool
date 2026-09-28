@@ -6,7 +6,7 @@
 
 机器人页采用“左侧结果、右侧设置”：左侧展示 XYZ＋距离四列指标、可切换指标的历史趋势和加工点位预测，结果区延伸至页面底部；“历史记录”与“展开明细”在左侧底部并排。右侧为机器人手眼参数、基准、阈值、加工点位设置和运行日志。采集靶标、导入观测、清空日志、评估精度在右侧日志下方同排，不另占整页底栏。主页面业务操作按钮统一蓝底白字，设置类按钮保留白底。指标与曲线使用对应颜色，图例位于下拉框左侧。区域 1—8 仅为沟通约定，不在界面显示编号。
 
-视觉相对监控使用相机到被评估末端（TCP）的手眼参数，不依赖完整机器人运动学模型。基准与复测按相同程序、固定位姿拍摄靶标；XYZ 使用机器人基座系。缺少参考朝向 Q 时基座三轴留空；缺少初始误差向量时绝对 AP 留空；同方向重复到达少于两次时 RP 留空。支持定位漂移、重复性及其变化、绝对误差及其退化五类结果，阈值仅用于逐组定位漂移。输入格式及操作见 [机器人定位监控使用说明](docs/robot_position_monitoring.md)，数学定义见 [AGENTS.md](AGENTS.md)。
+视觉相对监控使用相机到被评估末端（TCP）的手眼参数，不依赖完整机器人运动学模型。基准与复测按相同程序、固定位姿拍摄靶标；XYZ 使用机器人基座系。页面固定提供“绝对定位精度退化”“重复定位精度退化”“当前重复定位精度”三项指标，各指标分别设置阈值。实际统计口径取决于采样协议，说明中区分同方向重复与多方向到位散布。缺少坐标或绝对误差依据、同组样本不足时，相应指标留空。输入格式及操作见 [机器人定位监控使用说明](docs/robot_position_monitoring.md)，数学定义见 [AGENTS.md](AGENTS.md)。
 
 主轴回转页沿用左侧结果、右侧设置布局：左侧先显示解析评价、网络评分、温度、电流及综合结论，下面为采集信号、振动频谱、频带能量和网络分布四幅图；右侧放采集方案、人工确认正常样本、训练入口、阈值和日志。阈值仅有网络评分、综合评价两类，解析评价不设独立阈值。采集、导入、清空日志与评估在右侧底部同排。按用户要求绘制了明确标注的示意曲线，便于审阅排版；真实结果仍为空，不执行采集、FFT、能量计算或网络训练。详见 [主轴回转页设计](docs/spindle_rotation_page.md)。
 
@@ -42,28 +42,24 @@ SoftwareTools_PyQt/
 │   ├── main_window.py       # 主窗口、精度页面和选项卡
 │   ├── resources.py         # 配置、样式和图标读取
 │   ├── pages/               # 机器人定位页、主轴回转页及各自小弹窗
-│   ├── widgets/             # 预留，出现实际复用后再拆分
 │   └── dialogs/             # 参数设置、选择和确认弹窗
 ├── resources/               # 随软件发布的静态资源
-│   ├── ui/                  # 可选的 Qt Designer .ui 文件
 │   ├── icons/               # 按 branding/navigation/precision/window/common/robot 分类
 │   └── styles/              # QSS 样式与主题
 ├── config/                  # display.json：窗口尺寸、标题和状态颜色
 ├── data/                    # 输入数据与计算输出
-│   ├── raw/                 # 原始采集或导入数据
+│   ├── robot_error/         # 用户提供的原始图像与位姿记录
 │   ├── processed/           # 处理后的数据
 │   └── reports/             # 导出的报告和图表
 ├── storage/                 # 本地持久化内容
-│   ├── models/              # 模型、权重和参数版本
-│   └── records/             # 历史记录和数据库
+│   └── position_monitoring/ # 参数、图像、基准、观测、每日评估及日志
+├── diagnostics/             # 独立相机/手眼标定调试
 ├── docs/                    # 需求、页面设计、接口与使用说明
-├── tests/                   # 正式测试
-│   ├── core/                # 算法与服务测试
-│   └── app/                 # 界面与交互测试
+├── tests/                   # 算法、服务和界面正式测试
 └── experiments/             # 算法试验和临时调试
 ```
 
-上面也包含规划目录；空目录不随 Git 保存，后续按实际功能添加文件。
+原始数据、调试场景资产和运行状态留在本地，不随 Git 提交。
 
 ## 开发边界
 
@@ -74,9 +70,11 @@ SoftwareTools_PyQt/
 - **界面层**：负责展示、用户输入和任务状态；耗时计算接入后台任务，避免阻塞界面。
 - **配置与资源**：业务参数和路径放在 `config/`，图标、样式和 Designer 文件放在 `resources/`。
 
-机器人定位的纯算法位于 `core/algorithms/position_monitoring.py` 和 `board_pose.py`；服务入口为 `core/services/position_monitoring_service.py`；页面调用服务，棋盘/ChArUco PnP 与评估在后台执行。仿真核验窗口位于 `app/dialogs/robot_position_simulation_dialog.py`，原手眼调试作为窗口内的次级入口保留，旧数据适配与命令入口放在 `experiments/`。
+机器人定位的纯算法位于 `core/algorithms/position_monitoring.py` 和 `board_pose.py`；服务入口为 `core/services/position_monitoring_service.py`；页面调用服务，棋盘/ChArUco PnP 与评估在后台执行。仿真核验窗口位于 `app/dialogs/robot_position_simulation_dialog.py`，其中“相机与手眼标定”使用 `diagnostics/camera_calibration.py` 处理配对图像和机器人位姿。完整流程的复现与独立核验脚本保存在 `experiments/20260928_position_end_to_end/`。
 
 机器人默认参数、基准、观测、阈值、加工点位配置和评估历史保存在 `storage/position_monitoring/`。参数采用 `parameters/current.json` 和一份 `previous.json` 备份；支持图片、批次目录及已解算观测文件，导入图片后自动保存六维观测结果。每点不同方向各一次采用多方向工程散布，旧同方向重复协议继续兼容，详见 [使用说明](docs/robot_position_monitoring.md)。点位预测、相机在线采集及设备运动接口尚未接入；主轴示意图不参与计算或历史保存，界面不控制机器人运动。
+
+建立基准时保存一次实际评估，复测继续与所选基准比较。重启自动恢复最新观测、结果、趋势、图片和日志。真实观测按采集日期写入 `daily/YYYY-MM-DD.json`，缺少采集时间时明确使用导入时间；同日多次评估追加到该文件。仿真 B001/B002/B003 按第 0/1/2 天写入 `debug/day_0000.json` 等文件，保留真实操作时间。图像托管在 `images/`，观测在 `observations/`，基准引用已保存观测；重复评估不会复制整批图像和观测。
 
 ## 界面与图标
 

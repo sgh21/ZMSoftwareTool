@@ -28,6 +28,16 @@ class MemoryService:
         self.settings = {"metric_thresholds": {}, "processing_points": []}
         self.current_batch = None
         self.history = []
+        self.latest_result = None
+        self.logs = []
+
+    def list_logs(self):
+        return self.logs
+
+    def append_log(self, message, level="INFO"):
+        entry = {"timestamp": BASELINE_TIME, "level": level, "message": message}
+        self.logs.append(entry)
+        return entry
 
     def list_history(self, baseline_id=None):
         return [item for item in self.history
@@ -135,6 +145,50 @@ def test_standalone_result_keeps_values_without_inventing_a_baseline_time(page, 
     assert float(page.axis_values["X"].text()) == pytest.approx(np.sqrt(2), abs=0.0001)
     assert page.trend_chart.history == []
     assert "基准" in page.trend_chart.empty_message
+
+
+def test_debug_trend_uses_batch_days_and_latest_evaluation_per_batch(page, evaluated):
+    records = []
+    for day in range(3):
+        records.append({
+            **deepcopy(evaluated), "id": f"r{day}", "batch_id": f"B{day + 1:03d}",
+            "debug_day_index": day, "baseline_debug_day_index": 0,
+            "created_at": f"2026-09-28T00:00:0{day}+00:00",
+        })
+    repeated = {**deepcopy(records[1]), "id": "repeat-B002", "created_at": "2026-09-29T00:00:00+00:00"}
+    repeated["summary"]["rp_current"] = 0.123
+    page.service.history = [repeated, records[2], records[0], records[1]]
+    page._evaluation_completed(records[2])
+    assert [record["days"] for record in page.trend_chart.history] == [0, 1, 2]
+    assert page.trend_chart.history[1]["distance"] == pytest.approx(0.123)
+    assert page.trend_time_caption.text() == "调试天数"
+    assert "B003" in page.evaluation_time_label.toolTip()
+
+
+def test_observed_time_is_separate_from_evaluation_time_and_explains_fallback(page, evaluated):
+    evaluated.update({
+        "observed_at": "2026-09-21T00:00:00+00:00", "baseline_observed_at": BASELINE_TIME,
+        "time_source": "captured_at", "baseline_time_source": "captured_at",
+    })
+    page.service.history = [evaluated]
+    page._evaluation_completed(evaluated)
+    assert page.trend_chart.history[0]["days"] == 1
+    assert page.trend_time_caption.text() == "采集时间 / 天"
+    assert page.evaluation_time_label.text() == f"评价更新时间：{local_time(evaluated['created_at'])}"
+    evaluated["time_source"] = "imported_at"
+    page._render_result()
+    assert page.trend_time_caption.text() == "观测时间 / 天"
+    assert "导入时间（缺采集时间）" in page.trend_time_caption.toolTip()
+
+
+def test_image_progress_updates_one_line_without_filling_saved_logs(page):
+    before = list(page.service.logs)
+    for image in range(1, 601):
+        page._task_progress(round(image / 6), f"已读取 {image}/600")
+    assert page.task_progress.value() == 100
+    assert page.task_progress_note.text() == "已读取 600/600"
+    assert page.service.logs == before
+    assert "已读取" not in page.process_log.toPlainText()
 
 
 def test_settings_lights_follow_configuration_and_point_editor_save(page):

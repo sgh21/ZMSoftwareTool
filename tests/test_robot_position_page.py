@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
 )
 
 from app.pages.robot_position_page import RobotPositionPage
-from app.dialogs.robot_position_debug_dialog import RobotPositionDebugDialog
 from app.resources import UiScale, load_stylesheet
 from core.algorithms.position_monitoring import evaluate_position_monitoring
 from core.services.position_monitoring_service import PositionMonitoringService
@@ -31,6 +30,25 @@ class MemoryService:
         self.baseline = {"id": "b1", "label": "基准", "created_at": "2026-09-28", "batch": {"samples": []}}
         self.current_batch = None
         self.history = []
+        self.latest_result = None
+        self.logs = []
+
+    def list_logs(self):
+        return self.logs
+
+    def append_log(self, message, level="INFO"):
+        entry = {"timestamp": "2026-09-28T00:00:00+00:00", "level": level, "message": message}
+        self.logs.append(entry)
+        return entry
+
+    def load_evaluation_samples(self, result):
+        batches = {"current": None, "baseline": None}
+        for key, field in (("current", "current_batch_path"), ("baseline", "baseline_path")):
+            if result.get(field):
+                with open(result[field], encoding="utf-8") as source:
+                    document = json.load(source)
+                batches[key] = document["batch"] if key == "baseline" else document
+        return batches
 
     def list_history(self, baseline_id=None):
         return [row for row in self.history if baseline_id is None or row["baseline_id"] == baseline_id]
@@ -276,81 +294,6 @@ def test_background_completion_returns_to_ui_thread(application):
     assert observations == [(True, True)]
     assert page.task is None
     assert all(button.isEnabled() for button in page.mutation_buttons)
-    page.close()
-
-
-def test_debug_baseline_and_retest_use_real_service_and_persist_results(application, tmp_path):
-    service = PositionMonitoringService(root=tmp_path / "project")
-    service.save_parameters({"hand_eye": np.eye(4).tolist()})
-    service.save_settings({"metric_thresholds": {
-        "repeatability": {"X": 0.2, "Y": None, "Z": None, "distance": None},
-    }})
-    sources = []
-    for period in ("baseline", "current"):
-        samples = []
-        for index in range(3):
-            vision = np.eye(4)
-            vision[:3, 3] = [100 + 0.1 * index, 10, 500]
-            if period == "current":
-                vision[:3, 3] += [-0.4, 0.3, 0]
-            samples.append({"point_id": "P1", "direction_id": "D1",
-                            "sample_id": str(index), "vision_pose": vision.tolist()})
-        document = {
-            "batch_id": period, "label": period, "length_unit": "mm",
-            "program_id": "same-program", "target_id": "same-fixed-board",
-            "comparison_status": "debug_unverified", "samples": samples,
-            "base_rotations": {"P1": np.eye(3).tolist()},
-        }
-        path = tmp_path / f"{period}.json"
-        path.write_text(json.dumps(document), encoding="utf-8")
-        sources.append(path)
-    original_bytes = [path.read_bytes() for path in sources]
-    page = RobotPositionPage(service)
-    dialog = RobotPositionDebugDialog(page)
-    assert [dialog.method.itemText(index) for index in range(dialog.method.count())] == ["PARK", "TSAI"]
-
-    def finish_background_task():
-        event_loop = QEventLoop()
-        poll = QTimer()
-        poll.setInterval(10)
-        poll.timeout.connect(lambda: event_loop.quit() if dialog.task is None else None)
-        timeout = QTimer()
-        timeout.setSingleShot(True)
-        timeout.timeout.connect(event_loop.quit)
-        poll.start()
-        timeout.start(3000)
-        event_loop.exec()
-        poll.stop()
-        timeout.stop()
-        assert dialog.task is None, dialog.output.toPlainText()
-
-    dialog.baseline_path.setText(str(sources[0]))
-    dialog._build_baseline()
-    finish_background_task()
-    assert service.baseline is not None, dialog.output.toPlainText()
-    assert service.current_batch is None
-    assert page.result is None
-    assert "旧数据调试基准" in page.status_lights["baseline"].toolTip()
-
-    dialog.current_path.setText(str(sources[1]))
-    dialog._evaluate()
-    finish_background_task()
-    assert page.result is not None, dialog.output.toPlainText()
-    assert page.result["groups"][0]["drift_base"] == pytest.approx([0.4, -0.3, 0], abs=1e-10)
-    assert page.measured_table.item(0, 1).text() == "0.3000"
-    assert page.axis_values["Y"].text() == "0.0000"
-    assert "调试比较" in page.alarm_status.text()
-    assert len(page.result["alarms"]) == 1
-    assert len(page.trend_chart.history) == 1
-    assert page._metric_mode() == "repeatability"
-    assert page.axis_values["distance"].text() != "—"
-    page.result_metric.setCurrentIndex(0)
-    assert page.axis_values["distance"].text() == "—"
-    reopened = PositionMonitoringService(root=service.root)
-    assert reopened.baseline["id"] == service.baseline["id"]
-    assert reopened.list_history() == [page.result]
-    assert [path.read_bytes() for path in sources] == original_bytes
-    dialog.close()
     page.close()
 
 

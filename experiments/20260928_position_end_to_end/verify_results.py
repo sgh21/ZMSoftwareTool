@@ -43,6 +43,7 @@ def metrics(initial, current, targets):
             "absolute_change": ap_change.tolist(),
             "baseline_ap": float(np.linalg.norm(first_error, axis=1).mean()),
             "current_ap": float(np.linalg.norm(last_error, axis=1).mean()),
+            "centroid_change_xyz_mm": (last.mean(axis=0) - first.mean(axis=0)).tolist(),
         }
     names = ("baseline_scatter", "repeatability", "repeatability_change", "absolute_change")
     summary = {name: np.mean([group[name] for group in groups.values()], axis=0).tolist()
@@ -72,7 +73,7 @@ def error_statistics(vectors):
     }
 
 
-def verify_dataset(dataset, baseline_observations, current_observations, evaluation):
+def verify_dataset(dataset, baseline_observations, current_observations, evaluation=None, *, bias_reference=None):
     """只核验已完成的测量，不解算图片，不将仿真真值传给生产服务。"""
     dataset = Path(dataset)
     truth, measured, targets, models, pose_errors = {}, {}, None, {}, {}
@@ -100,11 +101,30 @@ def verify_dataset(dataset, baseline_observations, current_observations, evaluat
             raise ValueError(f"{batch} 图像测量与真值的 P/D 不一致")
         errors = [measured[period][key] - truth[period][key] for key in sorted(frame_map)]
         offsets = [truth[period][key] - targets[key] for key in sorted(frame_map)]
-        expected = [2 * record["inertia"] * directions[key] for key in sorted(frame_map)]
+        offsets_by_point = {}
+        bias_source = "none"
+        if record.get("target_bias", 0):
+            if bias_reference is not None:
+                offsets_by_point = bias_reference["offsets_B_mm"]
+                bias_source = "saved generation target_bias.json (verification only)"
+            else:
+                # 精简交付未包含固定偏置表时，明确标记为从 actual 反推。
+                offsets_by_point = {
+                    point: np.mean([
+                        truth[period][key] - targets[key] - 2 * record["inertia"] * directions[key]
+                        for key in frame_map if key[0] == point
+                    ], axis=0).tolist()
+                    for point in sorted({point for point, _ in frame_map})
+                }
+                bias_source = "estimated per-point mean residual from actual"
+        expected = [np.asarray(offsets_by_point.get(key[0], [0, 0, 0]))
+                    + 2 * record["inertia"] * directions[key] for key in sorted(frame_map)]
         difference = np.asarray(offsets) - expected
         models[period] = {
             "batch": batch, "inertia": record["inertia"], "count": len(frame_map),
-            "expected_offset_mm": 2 * record["inertia"],
+            "inertia_offset_mm": 2 * record["inertia"],
+            "target_bias_coefficient": record.get("target_bias", 0),
+            "bias_source": bias_source, "bias_offsets_B_mm": offsets_by_point,
             "offset_min_mm": float(np.linalg.norm(offsets, axis=1).min()),
             "offset_max_mm": float(np.linalg.norm(offsets, axis=1).max()),
             "maximum_model_difference_mm": float(np.linalg.norm(difference, axis=1).max()),
@@ -117,13 +137,15 @@ def verify_dataset(dataset, baseline_observations, current_observations, evaluat
         }
     exact = metrics(truth["baseline"], truth["current"], targets)
     observed = metrics(measured["baseline"], measured["current"], targets)
-    actual_values = production_values(evaluation)
+    actual_values = (production_values(evaluation) if evaluation else
+                     {name: observed["summary"][name] for name in
+                      ("repeatability", "repeatability_change", "absolute_change")})
     differences = {
         name: (np.asarray(actual_values[name]) - observed["summary"][name]).tolist()
         for name in actual_values
     }
     group_differences = {}
-    for group in evaluation["groups"]:
+    for group in evaluation["groups"] if evaluation else []:
         point = group["point_id"]
         values = production_values(evaluation, group)
         group_differences[point] = {
@@ -145,8 +167,19 @@ def verify_dataset(dataset, baseline_observations, current_observations, evaluat
         "axes": ["X", "Y", "Z", "space"], "length_unit": "mm",
         "simulation_model": models, "truth_metrics": exact,
         "measured_independent_metrics": observed,
-        "statistics_check": {"maximum_difference_mm": maximum, "passed": maximum < 1e-8,
-                             "summary_difference_mm": differences, "group_difference_mm": group_differences},
+        "statistics_check": {"maximum_difference_mm": maximum if evaluation else None,
+                             "passed": maximum < 1e-8 if evaluation else None,
+                             "production_result_compared": evaluation is not None,
+                             "summary_difference_mm": differences if evaluation else {},
+                             "group_difference_mm": group_differences},
         "metric_comparison": comparison, "position_measurement_errors": pose_errors,
         "inertia_scaling": {"expected_ratio": ratio, "truth_scatter_ratio": ratios.tolist()},
+        "centroid_change": {
+            point: {"truth_xyz_mm": exact["groups"][point]["centroid_change_xyz_mm"],
+                    "measured_xyz_mm": observed["groups"][point]["centroid_change_xyz_mm"],
+                    "error_mm": float(np.linalg.norm(
+                        np.asarray(observed["groups"][point]["centroid_change_xyz_mm"])
+                        - exact["groups"][point]["centroid_change_xyz_mm"]))}
+            for point in exact["groups"]
+        },
     }

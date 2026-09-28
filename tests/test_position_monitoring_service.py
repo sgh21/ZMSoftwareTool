@@ -82,7 +82,7 @@ def service(tmp_path):
 def establish_baseline(service, path, positions=None, **metadata):
     source = batch_file(path, repeated() if positions is None else positions, **metadata)
     service.load_observations(source)
-    return service.create_baseline("initial reference")
+    return service.create_baseline("initial reference", evaluate=False)
 
 
 def test_baseline_parameters_and_settings_survive_reopen_without_changing_source(service, tmp_path):
@@ -93,7 +93,7 @@ def test_baseline_parameters_and_settings_survive_reopen_without_changing_source
         "processing_points": [{"id": "work-point", "x": 1, "y": 2, "z": 3}],
     })
     imported = service.load_observations(source)
-    baseline = service.create_baseline("initial reference")
+    baseline = service.create_baseline("initial reference", evaluate=False)
     reopened = PositionMonitoringService(root=service.root)
     assert source.read_bytes() == original_bytes
     assert reopened.baseline["id"] == baseline["id"]
@@ -119,13 +119,13 @@ def test_evaluation_saves_history_and_actual_observation_snapshot(service, tmp_p
     assert result["baseline_id"] == baseline["id"]
     assert result["baseline_created_at"] == baseline["created_at"]
     assert source.read_bytes() == original_bytes
-    snapshot = read_document(service.storage / "observations" / f"{result['id']}.json")
+    snapshot = read_document(result["current_batch_path"])
     assert snapshot["samples"] == imported["samples"]
     source.write_text("source changed after evaluation", encoding="utf-8")
     reopened = PositionMonitoringService(root=service.root)
     assert reopened.list_history(baseline_id=baseline["id"])[0] == result
     assert reopened.list_history(baseline_id="other-baseline") == []
-    assert read_document(service.storage / "observations" / f"{result['id']}.json") == snapshot
+    assert read_document(result["current_batch_path"]) == snapshot
 
 
 def test_alarm_checks_each_group_even_when_overall_average_is_below_limit(service, tmp_path):
@@ -249,71 +249,6 @@ def test_duplicate_arrival_id_is_rejected(service, tmp_path):
         service.load_observations(path)
 
 
-@pytest.mark.parametrize("with_pnp_metadata", [False, True])
-def test_hand_eye_calibration_is_serializable_and_does_not_replace_active_parameters(
-    service, tmp_path, monkeypatch, with_pnp_metadata,
-):
-    rotvecs = [
-        (0, 0, 0), (0.3, 0, 0), (0, -0.4, 0), (0, 0, 0.5),
-        (0.2, -0.3, 0.1), (-0.25, 0.1, -0.4),
-    ]
-    samples = []
-    for index, rotvec in enumerate(rotvecs):
-        robot = transform((80 + index * 25, 200 - index * 10, 300 + index * 8), rotvec)
-        vision = np.linalg.inv(HAND_EYE) @ np.linalg.inv(robot) @ TARGET
-        samples.append({
-            "point_id": str(index), "direction_id": "calibration", "sample_id": "1",
-            "robot_pose": robot.tolist(), "vision_pose": vision.tolist(),
-        })
-        if with_pnp_metadata:
-            samples[-1].update({
-                "image_path": f"capture_{index}.png", "reprojection_error_px": 0.1 + index * 0.01,
-                "corner_count": 100, "corner_order": "reference_rotation_original",
-            })
-    accepted_count = len(samples)
-    if with_pnp_metadata:
-        image = tmp_path / "rejected.bin"
-        image.write_bytes(b"unclear board")
-        samples.append({
-            "point_id": "rejected", "direction_id": "calibration", "sample_id": "1",
-            "robot_pose": transform().tolist(), "image_path": image.name,
-        })
-        service.save_parameters({"camera_matrix": [[1000, 0, 320], [0, 1000, 240], [0, 0, 1]]})
-        monkeypatch.setattr(service_module.cv2, "imdecode", lambda *_: np.zeros((20, 20), dtype=np.uint8))
-
-        def reject_board(*args, **kwargs):
-            raise ValueError("board not detected")
-
-        monkeypatch.setattr(service_module, "estimate_board_pose", reject_board)
-    path = write_json(tmp_path / "calibration.json", {
-        "length_unit": "mm", "program_id": "calibration", "target_id": "fixed-target",
-        "comparison_status": "calibration_only", "samples": samples,
-    })
-    parameters_before = deepcopy(service.parameters)
-    source_before = path.read_bytes()
-    imported = service.load_observations(path)
-    result = service.calibrate_hand_eye()
-    saved = read_document(result["path"])
-    assert np.asarray(saved["hand_eye"]) == pytest.approx(HAND_EYE, abs=1e-7)
-    assert saved["translation_rms_mm"] < 1e-7
-    assert saved["sample_count"] == accepted_count
-    snapshot = read_document(saved["input_batch_path"])
-    assert snapshot == imported
-    assert saved["parameters"] == parameters_before
-    assert saved["rejected_samples"] == imported["rejected_samples"]
-    if with_pnp_metadata:
-        assert len(saved["pnp_summary"]) == accepted_count
-        assert saved["pnp_summary"][0]["reprojection_error_px"] == pytest.approx(0.1)
-        assert saved["rejected_samples"][0]["point_id"] == "rejected"
-        assert saved["rejected_samples"][0]["reason"] == "board not detected"
-    else:
-        assert saved["pnp_summary"] is None
-    assert service.parameters == parameters_before
-    assert path.read_bytes() == source_before
-    with pytest.raises(ValueError, match="手眼标定数据"):
-        service.create_baseline()
-
-
 def test_image_observation_arrays_are_serializable_at_service_boundary(service, tmp_path, monkeypatch):
     image = tmp_path / "sources" / "raw.bin"
     image.parent.mkdir(parents=True, exist_ok=True)
@@ -334,8 +269,9 @@ def test_image_observation_arrays_are_serializable_at_service_boundary(service, 
     service.load_observations(source)
     baseline = service.create_baseline()
     saved = read_document(baseline["path"])
-    assert isinstance(saved["batch"]["samples"][0]["vision_pose"], list)
-    assert "image_points" not in saved["batch"]["samples"][0]
+    saved_batch = read_document(saved["batch_path"])
+    assert isinstance(saved_batch["samples"][0]["vision_pose"], list)
+    assert "image_points" not in saved_batch["samples"][0]
     assert image.read_bytes() == raw_before
 
 

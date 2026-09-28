@@ -34,3 +34,20 @@ def test_spatial_scatter_is_translation_and_rotation_invariant():
     after = verification.scatter(points @ rotation.T + [100, 200, -500])
     np.testing.assert_allclose(before[3], after[3])
     np.testing.assert_allclose(after[:3], before[[1, 2, 0]])
+
+
+def test_fixed_point_bias_changes_absolute_error_but_not_repeatability():
+    directions = np.vstack([np.eye(3), -np.eye(3)])
+    initial, current, targets = {}, {}, {}
+    biases = {"P001": np.array([0.3, 0, 0]), "P002": np.array([0, -0.2, 0.1])}
+    for point, bias in biases.items():
+        for index, direction in enumerate(directions, 1):
+            key = (point, f"D{index:03d}")
+            targets[key] = np.array([10, 20, 30])
+            initial[key] = targets[key] + 0.4 * direction
+            current[key] = initial[key] + bias
+    report = verification.metrics(initial, current, targets)
+    np.testing.assert_allclose(report["summary"]["repeatability_change"], 0, atol=1e-13)
+    assert report["summary"]["absolute_change"][3] > 0
+    for point, bias in biases.items():
+        np.testing.assert_allclose(report["groups"][point]["centroid_change_xyz_mm"], bias, atol=1e-13)

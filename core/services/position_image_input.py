@@ -96,8 +96,8 @@ def image_batch(source, parameters):
             sample["ideal_pose"] = frame["ideal"]
             if "actual" in frame:
                 sample["simulation_truth"] = {"end_pose": frame["actual"]}
-            if frame.get("captured_at_utc"):
-                sample["captured_at"] = frame["captured_at_utc"]
+            if frame.get("captured_at_utc") or frame.get("captured_at"):
+                sample["captured_at"] = frame.get("captured_at_utc") or frame["captured_at"]
         samples.append(sample)
     return {
         "schema_version": 2, "batch_id": batch_id, "label": batch_id,
@@ -107,4 +107,6 @@ def image_batch(source, parameters):
         "comparison_status": "simulation" if record and any("simulation_truth" in item for item in samples) else "observed",
         "samples": samples, "base_rotations": {}, "initial_errors": {},
         "warnings": [], "source_path": str(folder / "record.json" if record else folder),
+        **({"captured_at": record.get("captured_at_utc") or record["captured_at"]}
+           if record and (record.get("captured_at_utc") or record.get("captured_at")) else {}),
     }

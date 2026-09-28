@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 
 from app.pages.robot_position_page import ServiceTask
 from app.resources import fit_dialog
-from core.services.position_monitoring_service import read_document
+from core.services.position_monitoring_service import METRIC_LABELS, read_document
 from core.services.position_simulation_debug import run_simulation_check
 
 
@@ -82,12 +82,10 @@ class RobotPositionSimulationDialog(QDialog):
         layout.addWidget(self.report_path)
         actions = QHBoxLayout()
         self.calibration_button = page._button("相机与手眼标定", self._open_calibration)
-        self.legacy_button = page._button("旧数据手眼标定", self._open_legacy)
         self.run_button = page._button("开始仿真核验", self._run, True)
         self.run_button.setEnabled(False)
         self.close_button = page._button("关闭", self.reject)
         actions.addWidget(self.calibration_button)
-        actions.addWidget(self.legacy_button)
         actions.addStretch()
         actions.addWidget(self.run_button)
         actions.addWidget(self.close_button)
@@ -126,12 +124,13 @@ class RobotPositionSimulationDialog(QDialog):
         try:
             parameters = read_document(dataset / "parameters.json")
             runs = parameters.get("runs", [])
-            if not runs:
-                raise ValueError("parameters.json 缺少 runs 批次信息")
             parsed = {}
             for run in runs:
                 batch_id = str(run["batch_id"])
                 parsed[batch_id] = dataset / run.get("record", f"{batch_id}/record.json")
+            parsed.update({path.parent.name: path for path in sorted(dataset.glob("B[0-9][0-9][0-9]/record.json"))})
+            if not parsed:
+                raise ValueError("目录缺少批次 record.json 或 runs 信息")
         except (OSError, ValueError, KeyError, TypeError) as error:
             self._source_changed()
             self.source_status.setText(f"无法读取仿真数据：{error}")
@@ -173,7 +172,7 @@ class RobotPositionSimulationDialog(QDialog):
 
     def _set_running(self, running):
         for widget in (self.data_root, self.browse_button, self.baseline_batch,
-                       self.current_batch, self.calibration_button, self.legacy_button, self.close_button):
+                       self.current_batch, self.calibration_button, self.close_button):
             widget.setEnabled(not running)
         self.run_button.setEnabled(False)
         if not running:
@@ -220,7 +219,7 @@ class RobotPositionSimulationDialog(QDialog):
         for metric in self.report["metric_comparison"]:
             for key, label in (("measured", "图像测量"), ("truth", "仿真真值"),
                                ("difference", "测量 − 真值")):
-                metric_rows.append([metric["label"], label, *[self._number(value) for value in metric[key]]])
+                metric_rows.append([METRIC_LABELS[metric["metric"]], label, *[self._number(value) for value in metric[key]]])
         self.page._fill_table(self.metric_table, metric_rows)
         summary = self.report["measurement_summary"]
         error_rows = []
@@ -253,13 +252,6 @@ class RobotPositionSimulationDialog(QDialog):
             dialog.data_root.setText(str(self.dataset))
             dialog._load_dataset()
         fit_dialog(dialog, 920, 720)
-        dialog.exec()
-
-    def _open_legacy(self):
-        from app.dialogs.robot_position_debug_dialog import RobotPositionDebugDialog
-
-        dialog = RobotPositionDebugDialog(self.page)
-        fit_dialog(dialog, 920, 620)
         dialog.exec()
 
     def reject(self):

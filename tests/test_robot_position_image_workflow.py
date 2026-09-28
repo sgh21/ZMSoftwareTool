@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import QApplication, QFileDialog
 
 from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog
 from app.pages.robot_position_page import RobotPositionPage
-from core.services.position_monitoring_service import PositionMonitoringService, assess_metric
+from core.services.position_monitoring_service import PositionMonitoringService, assess_metric, write_document
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +43,7 @@ def batch(service, positions, *, baseline=False, multidirectional=True):
     identifier = "B000" if baseline else "B001"
     result = {
         "batch_id": identifier, "label": identifier,
+        "length_unit": "mm",
         "program_id": "fixed-points", "target_id": "board-1",
         "parameter_version": service.parameters["version"],
         "source_path": str(service.root / f"{identifier}.json"),
@@ -51,7 +52,9 @@ def batch(service, positions, *, baseline=False, multidirectional=True):
     }
     if multidirectional:
         result["sampling_protocol"] = "multidirectional"
-    return result
+    path = service.root / f"{identifier}.json"
+    write_document(path, result)
+    return service.load_observations(path)
 
 
 def compare(service, positions=(-0.2, 0.2)):
@@ -110,9 +113,12 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
     result.update({
         "baseline_created_at": "2026-09-27T00:00:00+00:00",
         "created_at": "2026-09-28T00:00:00+00:00",
+        "baseline_observed_at": "2026-09-27T00:00:00+00:00",
+        "observed_at": "2026-09-28T00:00:00+00:00",
     })
     reordered = deepcopy(result)
     reordered["created_at"] = "2026-09-29T00:00:00+00:00"
+    reordered["observed_at"] = "2026-09-29T00:00:00+00:00"
     reordered["groups"][0]["directions"].reverse()
     wrong_direction = deepcopy(result)
     wrong_direction["groups"][0]["directions"][1]["direction_id"] = "D003"
@@ -128,7 +134,7 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
     page = RobotPositionPage(service)
     try:
         page._evaluation_completed(result)
-        assert page.result_metric.currentText() == "当前多方向到位散布"
+        assert page.result_metric.currentText() == "当前重复定位精度"
         assert "非国标同方向RP" in page.result_hint.toolTip()
         assert page.measured_table.horizontalHeaderItem(5).text() == "接近方向数"
         assert page.measured_table.item(0, 0).text() == "P001 / 多方向"
@@ -136,7 +142,7 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
         assert [record["days"] for record in page.trend_chart.history] == [1, 2]
         assert [record["distance"] for record in page.trend_chart.history] == pytest.approx([0.2, 0.2])
         page.result_metric.setCurrentIndex(1)
-        assert page.result_metric.currentText() == "多方向到位散布退化"
+        assert page.result_metric.currentText() == "重复定位精度退化"
         assert page.measured_table.item(0, 5).text() == "2 → 2"
         assert [record["days"] for record in page.trend_chart.history] == [1, 2]
         assert page.trend_title.text() == "定位精度趋势"

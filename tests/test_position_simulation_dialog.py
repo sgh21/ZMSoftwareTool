@@ -113,7 +113,7 @@ def test_background_task_uses_isolated_output_and_renders_tables(dialog, tmp_pat
     assert len(queued) == 1
     assert dialog.task is queued[0]
     assert not dialog.run_button.isEnabled()
-    assert not dialog.legacy_button.isEnabled()
+    assert not dialog.calibration_button.isEnabled()
     assert not dialog.close_button.isEnabled()
     assert not dialog.data_root.isEnabled()
     event = QCloseEvent()
@@ -164,11 +164,11 @@ def test_failure_restores_controls_without_touching_main_result(dialog, tmp_path
     assert dialog.page.result == {"id": "keep-main-result"}
 
 
-def test_legacy_hand_eye_entry_opens_existing_dialog(dialog, monkeypatch):
-    from app.dialogs import robot_position_debug_dialog
-
-    called = []
-    monkeypatch.setattr(robot_position_debug_dialog.RobotPositionDebugDialog, "exec", lambda window: called.append(window.page))
-    monkeypatch.setattr(dialog_module, "fit_dialog", lambda *args: None)
-    dialog._open_legacy()
-    assert called == [dialog.page]
+def test_new_batch_is_discovered_from_record_without_parameters_runs_entry(dialog, tmp_path):
+    path = dataset(tmp_path / "data")
+    write_document(path / "B003" / "record.json", {"batch": "B003", "frames": []})
+    load_dataset(dialog, path)
+    assert dialog.current_batch.findData("B003") >= 0
+    dialog.current_batch.setCurrentIndex(dialog.current_batch.findData("B003"))
+    assert dialog.run_button.isEnabled()
+    assert "B001 → B003" in dialog.source_status.text()
