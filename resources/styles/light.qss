@@ -230,6 +230,10 @@ QComboBox[robotInput="true"] {
     padding-right: 24px;
 }
 
+QComboBox#RobotMetricSelect {
+    combobox-popup: 0;
+}
+
 QComboBox[robotInput="true"]::drop-down {
     border: none;
     width: 22px;

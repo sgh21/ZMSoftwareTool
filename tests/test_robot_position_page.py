@@ -5,9 +5,10 @@ from copy import deepcopy
 
 import numpy as np
 import pytest
-from PyQt6.QtCore import QEventLoop, QPoint, QRect, QThread, QTimer
+from PyQt6.QtCore import QEventLoop, QPoint, QRect, QThread, QTimer, Qt
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QApplication, QBoxLayout, QLineEdit, QPushButton, QStyle, QStyleOptionComboBox,
+    QApplication, QBoxLayout, QLabel, QLineEdit, QPushButton, QStyle, QStyleOptionComboBox,
     QTableWidget, QTabWidget,
 )
 
@@ -398,5 +399,50 @@ def test_narrow_page_stacks_panels_without_horizontal_clipping(application):
         assert page.columns.direction() == QBoxLayout.Direction.LeftToRight
         assert page.scroll_area.horizontalScrollBar().maximum() == 0
     finally:
+        page.close()
+        application.setStyleSheet(previous_style)
+
+
+def test_metric_dropdown_stays_below_centered_heading_for_every_selection(application):
+    previous_style = application.styleSheet()
+    application.setStyleSheet(load_stylesheet())
+    page = RobotPositionPage(MemoryService())
+    combo = page.result_metric
+    try:
+        page.resize(1250, 700)
+        page.move(application.primaryScreen().availableGeometry().topLeft() + QPoint(20, 20))
+        page.show()
+        page.activateWindow()
+        assert QTest.qWaitForWindowActive(page)
+        application.processEvents()
+        application.processEvents()
+        title = page.findChild(QLabel, "RobotPageTitle")
+        popup_positions = []
+        for index in range(combo.count()):
+            combo.setCurrentIndex(index)
+            application.processEvents()
+            title_center = title.mapToGlobal(title.rect().center())
+            combo_center = combo.mapToGlobal(combo.rect().center())
+            assert abs(title_center.y() - combo_center.y()) <= 1
+
+            combo.showPopup()
+            QTest.qWait(250)
+            popup = combo.view().window()
+            assert popup.isVisible()
+            for row in range(combo.count()):
+                item_rect = combo.view().visualRect(combo.model().index(row, 0))
+                assert combo.view().viewport().rect().contains(item_rect)
+            below = combo.mapToGlobal(QPoint(0, combo.height()))
+            assert abs(popup.pos().y() - below.y()) <= 1
+            assert abs(popup.pos().x() - below.x()) <= 1
+            popup_positions.append((popup.pos().x(), popup.pos().y()))
+
+            QTest.keyClick(combo.view(), Qt.Key.Key_Escape)
+            application.processEvents()
+            assert not popup.isVisible()
+            assert combo.currentIndex() == index
+        assert len(set(popup_positions)) == 1
+    finally:
+        combo.hidePopup()
         page.close()
         application.setStyleSheet(previous_style)
