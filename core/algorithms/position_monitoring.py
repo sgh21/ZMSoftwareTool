@@ -50,7 +50,6 @@ def _group_samples(samples, period: str):
 def _statistics(positions: np.ndarray, rotation: np.ndarray | None) -> dict:
     mean = positions.mean(axis=0)
     count = len(positions)
-    base_positions = positions @ rotation.T if rotation is not None else None
     result = {
         "count": count,
         "mean_local": mean.tolist(),
@@ -64,7 +63,8 @@ def _statistics(positions: np.ndarray, rotation: np.ndarray | None) -> dict:
     radii = np.linalg.norm(positions - mean, axis=1)
     result["rp"] = float(radii.mean() + 3 * radii.std(ddof=1))
     result["axis_3sigma_local"] = (3 * positions.std(axis=0, ddof=1)).tolist()
-    if base_positions is not None:
+    if rotation is not None:
+        base_positions = positions @ rotation.T
         result["axis_3sigma_base"] = (3 * base_positions.std(axis=0, ddof=1)).tolist()
     return result
 

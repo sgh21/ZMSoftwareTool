@@ -135,18 +135,6 @@ class RobotPositionPage(QWidget):
         button.clicked.connect(callback)
         return button
 
-    def _planned_button(
-        self, text: str, description: str, primary=False
-    ) -> QPushButton:
-        message = f"{text}：{description}".replace("\n", " ")
-        button = self._button(
-            text,
-            lambda: self.append_log(message, "WARN"),
-            primary,
-        )
-        button.setToolTip(description)
-        return button
-
     def _results_view(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("RobotResults")
@@ -444,14 +432,12 @@ class RobotPositionPage(QWidget):
         actions = QHBoxLayout(bar)
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(4)
-        actions.addWidget(
-            self._planned_button(
-                "采集靶标",
-                "相机接口尚未接入，未开始采集。后续按与基准相同的程序、固定位姿拍摄靶标。",
-                True,
-            ),
-            1,
+        acquisition_hint = "相机接口尚未接入，未开始采集。后续按与基准相同的程序、固定位姿拍摄靶标。"
+        acquisition = self._button(
+            "采集靶标", lambda: self.append_log(f"采集靶标：{acquisition_hint}", "WARN"), True,
         )
+        acquisition.setToolTip(acquisition_hint)
+        actions.addWidget(acquisition, 1)
         actions.addWidget(
             self._mutation_button("导入观测", self._import_observations, True),
             1,
@@ -758,13 +744,14 @@ class RobotPositionPage(QWidget):
 
     def _set_status_light(self, key, state, details):
         light = self.status_lights[key]
-        light.setProperty("state", state)
+        if light.property("state") != state:
+            light.setProperty("state", state)
+            light.style().unpolish(light)
+            light.style().polish(light)
+            light.update()
         status = {"missing": "未配置", "partial": "配置不全或不匹配", "ready": "已就绪"}[state]
         light.setToolTip(f"{status}\n{details}")
         light.setAccessibleDescription(f"{status}；{details}")
-        light.style().unpolish(light)
-        light.style().polish(light)
-        light.update()
 
     def _invalidate_result(self):
         self.result = None
@@ -910,16 +897,18 @@ class RobotPositionPage(QWidget):
                       self.service.settings.get("metric_thresholds", {}).get(mode, {}))
         alarm_axes = {alarm["axis"] for alarm in assessment["alarms"]} if assessment else set()
         for key, card in self.axis_cards.items():
-            card.setProperty("overLimit", key in alarm_axes)
+            over_limit = key in alarm_axes
+            if card.property("overLimit") != over_limit:
+                card.setProperty("overLimit", over_limit)
+                for label in card.findChildren(QLabel):
+                    label.style().unpolish(label)
+                    label.style().polish(label)
+                    label.update()
             threshold = thresholds.get(key)
             threshold_hint = "阈值未设置" if threshold is None else f"阈值：{self._number(threshold)} mm"
             source = "本次评估保存的阈值" if assessment else "下一次评估使用的阈值"
             card.setToolTip(f"{source} · {threshold_hint}" + ("\n存在逐点超限，请查看报警与维护" if key in alarm_axes else ""))
             self.axis_titles[key].setToolTip(hint)
-            for label in card.findChildren(QLabel):
-                label.style().unpolish(label)
-                label.style().polish(label)
-                label.update()
         self.measured_table.horizontalHeaderItem(4).setToolTip(hint)
         context = self.result or self.service.current_batch or {}
         baseline = self.service.baseline or {}

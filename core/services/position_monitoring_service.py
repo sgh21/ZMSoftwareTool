@@ -155,8 +155,7 @@ class PositionMonitoringService:
         return self.save_parameters(document)
 
     def save_parameters(self, document):
-        parameters = deepcopy(self.parameters)
-        parameters.update(deepcopy(document))
+        parameters = deepcopy({**self.parameters, **document})
         if parameters.get("length_unit", "mm") not in ("mm", "m"):
             raise ValueError("参数长度单位只支持 mm 或 m")
         if parameters.get("transform_convention", "E_T_C") != "E_T_C":
@@ -199,8 +198,7 @@ class PositionMonitoringService:
         return deepcopy(parameters)
 
     def save_settings(self, settings):
-        updated = deepcopy(self.settings)
-        updated.update(deepcopy(settings))
+        updated = deepcopy({**self.settings, **settings})
         if "metric_thresholds" in settings:
             updated["metric_thresholds"] = deepcopy(self.settings["metric_thresholds"])
             for mode, thresholds in settings["metric_thresholds"].items():

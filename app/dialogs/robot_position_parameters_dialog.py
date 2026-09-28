@@ -201,22 +201,22 @@ class RobotPositionParametersDialog(QDialog):
         if intrinsics is not None:
             camera = np.array(self.original["camera_matrix"], dtype=float) if self.original.get("camera_matrix") is not None else np.eye(3)
             camera[0, 0], camera[1, 1], camera[0, 2], camera[1, 2] = intrinsics
-            camera = self.original["camera_matrix"] if self._unchanged(camera_fields) else camera.tolist()
+            camera = camera.tolist()
         pose = self._optional_group(HAND_EYE_FIELDS)
         hand_eye = None
         if pose is not None:
-            hand_eye = np.eye(4)
-            hand_eye[:3, :3] = rotation_from_rpy_degrees(pose[3:])
-            hand_eye[:3, 3] = pose[:3]
-            hand_eye = self.original["hand_eye"] if self._unchanged(HAND_EYE_FIELDS) else hand_eye.tolist()
+            if self._unchanged(HAND_EYE_FIELDS):
+                hand_eye = self.original["hand_eye"]
+            else:
+                hand_eye = np.eye(4)
+                hand_eye[:3, :3] = rotation_from_rpy_degrees(pose[3:])
+                hand_eye[:3, 3] = pose[:3]
+                hand_eye = hand_eye.tolist()
         reference = self._optional_group(REFERENCE_FIELDS)
         if reference is not None:
             reference = (self.original["reference_rotation"] if self._unchanged(REFERENCE_FIELDS)
                          else rotation_from_rpy_degrees(reference).tolist())
         distortion = [self._number(name) for name, _ in DISTORTION_NAMES[:self.distortion_count.currentData()]]
-        original_distortion = self.original.get("dist_coeffs", [])
-        if len(distortion) == len(original_distortion) and self._unchanged([name for name, _ in DISTORTION_NAMES[:len(distortion)]]):
-            distortion = original_distortion
         limit = self._number("reprojection_limit") if self.fields["reprojection_limit"].text().strip() else None
         return {
             "camera_matrix": camera, "dist_coeffs": distortion, "hand_eye": hand_eye,
