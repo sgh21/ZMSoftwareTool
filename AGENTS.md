@@ -156,6 +156,9 @@ $$
 - 经用户确认记录后续居中与弹出位置修正：标题和选择框的布局项显式 `AlignVCenter`，仅对 `RobotMetricSelect` 设置 `combobox-popup: 0`，不再让菜单随当前选中项上下移动。页面正式测试 10 项、Ruff、`git diff --check` 通过；1920×1030、1280×800 原生窗口下，两控件中心 Y 差不超过 1 像素，三个选中项的菜单左上角保持一致并贴选择框下边缘。等待展开动画结束后核对三项全部可见，Escape 关闭后选择保持。预览为 `data/reports/robot_position_dropdown_alignment/desktop_open.png` 和 `compact_open.png`，同时保留关闭状态截图；无新增临时脚本，未改算法或观测数据。
 - 经用户确认记录全部下拉框的补充修正：上一轮只覆盖顶部指标框，遗漏趋势等控件。本轮将 `combobox-popup: 0` 移至公共 `QComboBox[robotInput="true"]` 样式，覆盖指标、趋势、观测来源、观测样本、基准选择及调试标定方法共 6 个下拉框；趋势轴说明、图例及选择框显式垂直居中。`python -m pytest -q tests/test_robot_position_page.py` 11 项通过，修改文件 Ruff 与 `git diff --check` 通过。1920×1030、1280×800 原生窗口下，顶部和趋势各选项弹出位置固定、中心 Y 差不超过 1 像素，无横向溢出；其余四个下拉框逐项检查展开位置、文字可见及 Escape 保持选择通过。正式回归还确认趋势切换不改变全局指标和逐点表。预览为 `data/reports/robot_position_all_dropdowns/desktop_trend_0.png`、`compact_trend_1.png`，另有其余选项及关闭状态截图；检查通过标准输入执行，无新增临时脚本，弹窗与观测选择使用内存测试标签，未修改实际参数、基准、观测或历史。
 
+- 2026-09-28，经用户确认记录时间、超差标红和状态灯验证：`ZMSoftware` 环境执行 `python -m pytest -q tests/test_robot_position_page.py tests/test_robot_position_status.py tests/test_position_monitoring_service.py`，49 项通过；涉及文件的 Ruff 与 `git diff --check` 通过。覆盖完整本地时间显示、基准建立时间快照、旧历史基准隔离、跨时区及不等间隔天数、缺基准时不虚构时间轴、三组设置状态灯、点位保存刷新，以及逐点超限时对应轴卡片变红和切换后恢复原色。
+- Windows 原生 Qt 下检查 1920×1030、1280×800：两个完整时间均可显示，三组状态灯与标题垂直居中，无横向溢出；卡片阈值文字已移除。使用内存测试数据核对第 1、2、20、27.1667 天的曲线点按真实时间间隔排列，测试截图明确标注“界面测试数据”。截图位于 `data/reports/robot_position_status_ui/`，`desktop.png`、`compact.png` 为实际空结果界面，`desktop_test_data.png`、`compact_test_data.png` 为内存测试状态；未写入实际参数、基准、观测或历史。新增正式回归文件为 `tests/test_robot_position_status.py`，窗口检查经标准输入执行，没有新增临时测试脚本。本次记录对应实现提交 `8910676`。
+
 ## 主轴回转监控约定（2026-09-24 用户要求）
 
 1. 每次使用前，按指定转速采集振动、温度和电流。主轴运动由原设备软件控制，本模块负责采集入口、分析、评价和预警。
