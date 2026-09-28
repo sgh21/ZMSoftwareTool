@@ -280,7 +280,7 @@ class RobotPositionPage(QWidget):
         legend = QHBoxLayout()
         self.trend_axis_title = self._note("基座 XYZ / mm")
         self.trend_axis_title.setWordWrap(False)
-        legend.addWidget(self.trend_axis_title)
+        legend.addWidget(self.trend_axis_title, 0, Qt.AlignmentFlag.AlignVCenter)
         legend.addStretch()
         self.trend_legend = {}
         for axis, name in (("X", "X"), ("Y", "Y"), ("Z", "Z"), ("distance", "空间")):
@@ -288,8 +288,8 @@ class RobotPositionPage(QWidget):
             label.setProperty("axis", axis)
             label.setVisible(axis != "distance")
             self.trend_legend[axis] = label
-            legend.addWidget(label)
-        legend.addWidget(self.trend_metric)
+            legend.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
+        legend.addWidget(self.trend_metric, 0, Qt.AlignmentFlag.AlignVCenter)
         body.addLayout(legend)
         self.trend_chart = PositionTrendChart()
         body.addWidget(self.trend_chart, 1)

@@ -228,9 +228,6 @@ QComboBox[robotInput="true"], QLineEdit[robotInput="true"] {
 QComboBox[robotInput="true"] {
     min-width: 108px;
     padding-right: 24px;
-}
-
-QComboBox#RobotMetricSelect {
     combobox-popup: 0;
 }
 

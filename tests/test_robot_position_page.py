@@ -403,11 +403,13 @@ def test_narrow_page_stacks_panels_without_horizontal_clipping(application):
         application.setStyleSheet(previous_style)
 
 
-def test_metric_dropdown_stays_below_centered_heading_for_every_selection(application):
+@pytest.mark.parametrize("combo_name", ["result_metric", "trend_metric"])
+def test_dropdown_stays_below_centered_row_for_every_selection(application, combo_name):
     previous_style = application.styleSheet()
     application.setStyleSheet(load_stylesheet())
     page = RobotPositionPage(MemoryService())
-    combo = page.result_metric
+    page._evaluation_completed(result(with_reference=True, repeats=3))
+    combo = getattr(page, combo_name)
     try:
         page.resize(1250, 700)
         page.move(application.primaryScreen().availableGeometry().topLeft() + QPoint(20, 20))
@@ -417,13 +419,37 @@ def test_metric_dropdown_stays_below_centered_heading_for_every_selection(applic
         application.processEvents()
         application.processEvents()
         title = page.findChild(QLabel, "RobotPageTitle")
+        metric_index = page.result_metric.currentIndex()
+        point_values = [
+            [page.measured_table.item(row, column).text()
+             for column in range(page.measured_table.columnCount())]
+            for row in range(page.measured_table.rowCount())
+        ]
         popup_positions = []
         for index in range(combo.count()):
             combo.setCurrentIndex(index)
             application.processEvents()
-            title_center = title.mapToGlobal(title.rect().center())
+            if combo_name == "trend_metric":
+                assert page.result_metric.currentIndex() == metric_index
+                assert [
+                    [page.measured_table.item(row, column).text()
+                     for column in range(page.measured_table.columnCount())]
+                    for row in range(page.measured_table.rowCount())
+                ] == point_values
+                assert page.trend_chart.mode == combo.currentData()
+                labels = [page.trend_axis_title] + [
+                    label for label in page.trend_legend.values() if label.isVisible()
+                ]
+                expected_axes = {"X", "Y", "Z"} if index == 0 else {"distance"}
+                assert {
+                    axis for axis, label in page.trend_legend.items() if label.isVisible()
+                } == expected_axes
+            else:
+                labels = [title]
             combo_center = combo.mapToGlobal(combo.rect().center())
-            assert abs(title_center.y() - combo_center.y()) <= 1
+            for label in labels:
+                label_center = label.mapToGlobal(label.rect().center())
+                assert abs(label_center.y() - combo_center.y()) <= 1
 
             combo.showPopup()
             QTest.qWait(250)
