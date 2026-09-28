@@ -1,6 +1,5 @@
 """机器人定位监控：按用户约定的区域 1—8 组织结果、设置和日志。"""
 
-import json
 from math import isfinite
 from pathlib import Path
 
@@ -787,37 +786,13 @@ class RobotPositionPage(QWidget):
         self.append_log(f"参数已加载：{Path(path).name}；请重新导入观测并建立或选择匹配基准。")
 
     def _show_parameters(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("视觉与手眼参数")
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note(
-            "平移和棋盘格尺寸单位为 mm；hand_eye 为相机到被评估 TCP 的 4×4 变换。\n"
-            "camera_matrix 为 3×3 内参，dist_coeffs 为畸变，board_grid 为内角点列数、行数。"
-        ))
-        editor = QPlainTextEdit()
-        editor.setAccessibleName("视觉与手眼参数 JSON")
-        editor.setPlainText(json.dumps(self.service.parameters, ensure_ascii=False, indent=2))
-        layout.addWidget(editor, 1)
-        error_label = self._note("")
-        layout.addWidget(error_label)
+        from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog
 
-        def save():
-            try:
-                self.service.save_parameters(json.loads(editor.toPlainText()))
-            except (ValueError, TypeError, OSError, KeyError) as error:
-                error_label.setText(str(error))
-                return
+        dialog = RobotPositionParametersDialog(self.service, self)
+        fit_dialog(dialog, 980, 720)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             self._invalidate_result()
-            self.append_log("参数已保存为新版本；原参数和历史基准仍保留。")
-            dialog.accept()
-
-        actions = QHBoxLayout()
-        actions.addStretch()
-        actions.addWidget(self._button("关闭", dialog.reject))
-        actions.addWidget(self._button("保存新版本", save, True))
-        layout.addLayout(actions)
-        fit_dialog(dialog, 780, 610)
-        dialog.exec()
+            self.append_log("参数已保存；请重新导入观测，原参数和历史基准仍保留。")
 
     def _import_observations(self):
         path, _ = QFileDialog.getOpenFileName(self, "导入观测清单", "", "观测清单 (*.json *.yaml *.yml)")
