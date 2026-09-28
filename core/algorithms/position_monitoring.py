@@ -96,6 +96,58 @@ def _vap(means: list) -> float | None:
     ))
 
 
+def evaluate_current_repeatability(current_samples, hand_eye, *, base_rotations=None) -> dict:
+    """计算单期重复定位结果；Q 对应该期每个测点的第一条参考观测。"""
+    hand_eye = validate_transform(hand_eye, "手眼变换")
+    inverse_hand_eye = np.linalg.inv(hand_eye)
+    current, references = _group_samples(current_samples, "当前时期")
+    rotations = {
+        str(point): _rotation(value, f"测点 {point} 的 Q")
+        for point, value in (base_rotations or {}).items()
+    }
+    groups = []
+    warnings = []
+    for point in references:
+        if point not in rotations:
+            warnings.append(f"测点 {point} 缺少当前参考末端朝向 Q；基座 XYZ 结果不可用")
+    for point, direction in sorted(current):
+        reference_chain = hand_eye @ references[point]
+        positions = np.asarray([
+            (reference_chain @ np.linalg.inv(pose) @ inverse_hand_eye)[:3, 3]
+            for pose in current[point, direction]
+        ])
+        stats = _statistics(positions, rotations.get(point))
+        if stats["count"] < 30:
+            warnings.append(f"{point}/{direction} 当前仅 {stats['count']} 次到达，少于 30 次；非完整国标样本")
+        if stats["count"] < 2:
+            warnings.append(f"{point}/{direction} 当前少于 2 次到达，不能计算重复性")
+        groups.append({
+            "point_id": point, "direction_id": direction, "baseline": None, "current": stats,
+            **dict.fromkeys((
+                "drift_local", "drift_base", "drift_distance", "rp_change",
+                "axis_3sigma_change_local", "axis_3sigma_change_base", "initial_error_base",
+                "current_error_base", "initial_absolute_ap", "absolute_ap",
+                "absolute_ap_change", "absolute_axis_change",
+            )),
+        })
+    points = [{
+        "point_id": point, "baseline_vap": None, "vap_change": None,
+        "current_vap": _vap([
+            group["current"]["mean_local"] for group in groups if group["point_id"] == point
+        ]),
+    } for point in sorted(references)]
+    summary = dict.fromkeys((
+        "drift_base", "drift_distance", "mean_abs_drift_base", "rp_baseline", "rp_change",
+        "axis_3sigma_change_base", "absolute_ap", "absolute_ap_change",
+        "absolute_axis", "absolute_axis_change",
+    ))
+    summary["rp_current"] = _mean_by_point(groups, [group["current"]["rp"] for group in groups])
+    summary["axis_3sigma_base"] = _mean_by_point(groups, [
+        group["current"]["axis_3sigma_base"] for group in groups
+    ])
+    return {"groups": groups, "points": points, "summary": summary, "warnings": warnings}
+
+
 def evaluate_position_monitoring(
     baseline_samples,
     current_samples,

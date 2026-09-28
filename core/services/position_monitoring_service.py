@@ -11,9 +11,74 @@ import yaml
 
 from core.algorithms.board_pose import calibrate_hand_eye, estimate_board_pose
 from core.algorithms.position_monitoring import (
+    evaluate_current_repeatability,
     evaluate_position_monitoring,
     validate_transform,
 )
+
+
+METRIC_LABELS = {
+    "absolute_change": "绝对定位精度退化",
+    "repeatability_change": "重复定位精度退化",
+    "repeatability": "当前重复定位精度",
+}
+METRIC_AXES = ("X", "Y", "Z", "distance")
+
+
+def metric_values(result, mode, group=None):
+    """统一卡片、逐点结果、历史曲线和阈值判定的四列取值。"""
+    source = result["summary"] if group is None else group
+    if mode == "repeatability":
+        source = source if group is None else group["current"]
+        axes = source.get("axis_3sigma_base")
+        scalar = source.get("rp_current" if group is None else "rp")
+    elif mode == "repeatability_change":
+        axes, scalar = source.get("axis_3sigma_change_base"), source.get("rp_change")
+    elif mode == "absolute_change":
+        axes, scalar = source.get("absolute_axis_change"), source.get("absolute_ap_change")
+    else:
+        raise ValueError(f"未知评价指标：{mode}")
+    return [*(axes if axes is not None else [None, None, None]), scalar]
+
+
+def assess_metric(result, mode):
+    """按保存时的独立阈值逐组判定；退化负值表示改善，不取绝对值。"""
+    if mode not in METRIC_LABELS:
+        raise ValueError(f"未知评价指标：{mode}")
+    stored = result.get("metric_thresholds", {}).get(mode, {})
+    thresholds = {axis: stored.get(axis) for axis in METRIC_AXES}
+    alarms = []
+    values = []
+    for group in result.get("groups", []):
+        group_values = metric_values(result, mode, group)
+        values.extend(group_values)
+        for axis, value in zip(METRIC_AXES, group_values):
+            threshold = thresholds[axis]
+            if value is not None and threshold is not None and value > threshold:
+                alarms.append({
+                    "metric": mode, "point_id": group["point_id"],
+                    "direction_id": group["direction_id"], "axis": axis,
+                    "value": value, "threshold": threshold,
+                })
+    if alarms:
+        status = "超限"
+    elif not any(value is not None for value in values):
+        status = "指标不可计算"
+    elif all(value is None for value in thresholds.values()):
+        status = "未设置阈值"
+    elif any(value is None for value in values):
+        status = "部分指标不可判定"
+    elif any(value is None for value in thresholds.values()):
+        status = "已设阈值项内"
+    else:
+        status = "阈值内"
+    assessment_status = status
+    # 旧历史只有状态文字，仍需保留其调试限制。
+    if (result.get("comparison_status") == "debug_unverified"
+            or str(result.get("status", "")).startswith("调试比较")):
+        status = "调试比较 · 采样对应待确认"
+    return {"status": status, "assessment_status": assessment_status,
+            "alarms": alarms, "thresholds": thresholds}
 
 
 def read_document(path):
@@ -57,6 +122,7 @@ class PositionMonitoringService:
         self.parameters = read_document(configured if configured.exists() else defaults)
         self.settings = {
             "thresholds": dict.fromkeys(("X", "Y", "Z", "distance")),
+            "metric_thresholds": {mode: dict.fromkeys(METRIC_AXES) for mode in METRIC_LABELS},
             "processing_points": [],
         }
         self.baseline = None
@@ -65,7 +131,7 @@ class PositionMonitoringService:
         if state_path.exists():
             state = read_document(state_path)
             self.parameters = state["parameters"]
-            self.settings = state["settings"]
+            self.settings.update(state["settings"])
             if state.get("baseline_path"):
                 self.baseline = read_document(state["baseline_path"])
                 self.baseline["path"] = state["baseline_path"]
@@ -135,14 +201,21 @@ class PositionMonitoringService:
     def save_settings(self, settings):
         updated = deepcopy(self.settings)
         updated.update(deepcopy(settings))
-        thresholds = updated["thresholds"]
-        for axis in ("X", "Y", "Z", "distance"):
-            value = thresholds.get(axis)
-            if value is not None:
-                value = float(value)
-                if not np.isfinite(value) or value < 0:
-                    raise ValueError(f"{axis} 阈值必须为非负数或留空")
-            thresholds[axis] = value
+        if "metric_thresholds" in settings:
+            updated["metric_thresholds"] = deepcopy(self.settings["metric_thresholds"])
+            for mode, thresholds in settings["metric_thresholds"].items():
+                if mode not in METRIC_LABELS:
+                    raise ValueError(f"未知评价指标：{mode}")
+                updated["metric_thresholds"][mode].update(thresholds)
+        threshold_groups = [updated["thresholds"], *updated["metric_thresholds"].values()]
+        for thresholds in threshold_groups:
+            for axis in METRIC_AXES:
+                value = thresholds.get(axis)
+                if value is not None:
+                    value = float(value)
+                    if not np.isfinite(value) or value < 0:
+                        raise ValueError(f"{axis} 阈值必须为非负数或留空")
+                thresholds[axis] = value
         self.settings = updated
         self._save_state()
 
@@ -331,7 +404,22 @@ class PositionMonitoringService:
             progress(100, "手眼标定完成，请查看固定靶标一致性残差后应用参数")
         return result
 
-    def evaluate(self, progress=None):
+    def _has_comparable_baseline(self):
+        if self.baseline is None or self.current_batch is None:
+            return False
+        if self.baseline["parameters"]["version"] != self.parameters["version"]:
+            return False
+        initial = self.baseline["batch"]
+        current = self.current_batch
+        if any(initial[field] != current[field] for field in ("program_id", "target_id")):
+            return False
+        initial_groups = {(item["point_id"], item["direction_id"]) for item in initial["samples"]}
+        current_groups = {(item["point_id"], item["direction_id"]) for item in current["samples"]}
+        return initial_groups == current_groups
+
+    def evaluate(self, progress=None, *, allow_current_only=False):
+        if allow_current_only and not self._has_comparable_baseline():
+            return self.evaluate_current(progress)
         if self.baseline is None or self.current_batch is None:
             raise ValueError("评估需要已保存的基准和本次复测观测")
         baseline_batch = self.baseline["batch"]
@@ -352,43 +440,70 @@ class PositionMonitoringService:
         result["warnings"] = list(dict.fromkeys(
             baseline_batch.get("warnings", []) + current.get("warnings", []) + result["warnings"]
         ))
-        alarms = []
-        missing_axes = False
-        thresholds = self.settings["thresholds"]
-        for group in result["groups"]:
-            axes = dict(zip(("X", "Y", "Z"), group["drift_base"] or [None] * 3))
-            axes["distance"] = group["drift_distance"]
-            for axis, value in axes.items():
-                threshold = thresholds[axis]
-                if threshold is None:
-                    continue
-                if value is None:
-                    missing_axes = True
-                elif abs(value) > threshold:
-                    alarms.append({
-                        "point_id": group["point_id"], "direction_id": group["direction_id"],
-                        "axis": axis, "value": value, "threshold": threshold,
-                    })
-        status = "超限" if alarms else "阈值内"
-        if all(value is None for value in thresholds.values()):
-            status = "未设置阈值"
-        elif missing_axes and not alarms:
-            status = "部分指标不可判定"
-        if any(batch.get("comparison_status") == "debug_unverified"
-               for batch in (baseline_batch, current)):
-            status = "调试比较 · 采样对应待确认"
-            result["warnings"].append("此数据仅供调试，不能将比较结果认定为真实精度退化")
         result.update({
-            "id": _stamp(), "created_at": datetime.now(timezone.utc).isoformat(),
             "baseline_id": self.baseline["id"], "parameter_version": version,
             "baseline_label": self.baseline["label"],
-            "batch_id": current["batch_id"], "batch_label": current["label"],
-            "status": status, "alarms": alarms, "thresholds": deepcopy(thresholds),
             "orientation_source": baseline_batch.get("orientation_source", "unspecified"),
-            "current_source": current["source_path"],
             "baseline_source": baseline_batch["source_path"],
             "baseline_path": self.baseline["path"],
         })
+        return self._save_evaluation(result, current, baseline_batch, progress)
+
+    def evaluate_current(self, progress=None):
+        """无需基准计算当前重复定位；不生成虚假的零退化量。"""
+        current = self.current_batch
+        if current is None:
+            raise ValueError("请先导入本次观测")
+        if self.parameters.get("hand_eye") is None:
+            raise ValueError("评估前请加载相机到末端的手眼参数")
+        if current["parameter_version"] != self.parameters["version"]:
+            raise ValueError("参数版本已变化，请重新导入本次观测")
+        if current.get("comparison_status") == "calibration_only":
+            raise ValueError("手眼标定数据不能直接作为重复定位观测")
+        result = evaluate_current_repeatability(
+            current["samples"], self.parameters["hand_eye"],
+            base_rotations=current.get("base_rotations"),
+        )
+        result["warnings"] = list(dict.fromkeys(current.get("warnings", []) + result["warnings"]))
+        result.update({
+            "baseline_id": None, "baseline_label": None, "baseline_path": None,
+            "baseline_source": None, "parameter_version": self.parameters["version"],
+            "orientation_source": current.get("orientation_source", "unspecified"),
+        })
+        return self._save_evaluation(result, current, None, progress)
+
+    def _save_evaluation(self, result, current, baseline_batch, progress):
+        batches = [current] + ([baseline_batch] if baseline_batch is not None else [])
+        comparison_status = (
+            "debug_unverified" if any(batch.get("comparison_status") == "debug_unverified"
+                                      for batch in batches)
+            else current.get("comparison_status", "unspecified")
+        )
+        if comparison_status == "debug_unverified":
+            result["warnings"].append("此数据仅供调试，不能将比较结果认定为真实精度退化")
+        result.update({
+            "id": _stamp(), "created_at": datetime.now(timezone.utc).isoformat(),
+            "batch_id": current["batch_id"], "batch_label": current["label"],
+            "program_id": current["program_id"], "target_id": current["target_id"],
+            "current_source": current["source_path"], "comparison_status": comparison_status,
+            "metric_thresholds": deepcopy(self.settings["metric_thresholds"]),
+        })
+        assessments = {mode: assess_metric(result, mode) for mode in METRIC_LABELS}
+        result["metric_assessments"] = assessments
+        result["alarms"] = [alarm for item in assessments.values() for alarm in item["alarms"]]
+        considered = list(assessments.values()) if baseline_batch else [assessments["repeatability"]]
+        statuses = {item["status"] for item in considered}
+        if comparison_status == "debug_unverified":
+            status = "调试比较 · 采样对应待确认"
+        elif result["alarms"]:
+            status = "超限"
+        elif len(statuses) == 1:
+            status = next(iter(statuses))
+        elif all(all(value is None for value in item["thresholds"].values()) for item in considered):
+            status = "未设置阈值"
+        else:
+            status = "部分指标不可判定"
+        result["status"] = status
         # 保存实际参与计算的观测快照，历史无需重跑图像或依赖被改写的输入清单。
         snapshot_path = self.storage / "observations" / f"{result['id']}.json"
         result["current_batch_path"] = str(snapshot_path)

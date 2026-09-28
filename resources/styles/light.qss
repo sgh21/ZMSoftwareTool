@@ -308,6 +308,29 @@ QTabWidget#RobotDetailTabs QTabBar::tab:selected {
     font-weight: 600;
 }
 
+QTabBar#RobotMetricTabs {
+    background: #f3f7fb;
+    border-bottom: 1px solid @border@;
+}
+
+QTabBar#RobotMetricTabs::tab {
+    color: @text@;
+    padding: 9px 10px;
+    border-bottom: 2px solid transparent;
+    font-size: 15px;
+}
+
+QTabBar#RobotMetricTabs::tab:selected {
+    color: @action@;
+    background: #edf3f8;
+    border-bottom: 2px solid @action@;
+    font-weight: 700;
+}
+
+QTabBar#RobotMetricTabs::tab:hover {
+    background: #edf3f8;
+}
+
 QTabWidget#RobotDetailTabs QTabBar::tab:hover {
     background: #f5f8fb;
 }

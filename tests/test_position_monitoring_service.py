@@ -10,7 +10,13 @@ import numpy as np
 import pytest
 
 import core.services.position_monitoring_service as service_module
-from core.services.position_monitoring_service import PositionMonitoringService, read_document
+from core.services.position_monitoring_service import (
+    METRIC_LABELS,
+    PositionMonitoringService,
+    assess_metric,
+    metric_values,
+    read_document,
+)
 
 
 def transform(position=(0, 0, 0), rotvec=(0, 0, 0)):
@@ -123,13 +129,15 @@ def test_evaluation_saves_history_and_actual_observation_snapshot(service, tmp_p
 
 def test_alarm_checks_each_group_even_when_overall_average_is_below_limit(service, tmp_path):
     positions = sum((repeated(point=point) for point in ("P1", "P2", "P3")), [])
-    establish_baseline(service, tmp_path / "initial.json", positions)
+    establish_baseline(service, tmp_path / "initial.json", positions, initial_errors={
+        "P1": {"D1": [1, 0, 0]}, "P2": {"D1": [-1, 0, 0]}, "P3": {"D1": [1, 0, 0]},
+    })
     current = (
         repeated((103, 200, 300), point="P1")
         + repeated((97, 200, 300), point="P2")
         + repeated((100, 200, 300), point="P3")
     )
-    service.save_settings({"thresholds": {"X": 2.5, "Y": None, "Z": None, "distance": None}})
+    service.save_settings({"metric_thresholds": {"absolute_change": {"X": 2.5}}})
     service.load_observations(batch_file(tmp_path / "current.json", current))
     result = service.evaluate()
     assert result["summary"]["mean_abs_drift_base"][0] == pytest.approx(2)
@@ -137,7 +145,8 @@ def test_alarm_checks_each_group_even_when_overall_average_is_below_limit(servic
     assert {(alarm["point_id"], alarm["axis"]) for alarm in result["alarms"]} == {
         ("P1", "X"), ("P2", "X"),
     }
-    assert sorted(alarm["value"] for alarm in result["alarms"]) == pytest.approx([-3, 3])
+    assert sorted(alarm["value"] for alarm in result["alarms"]) == pytest.approx([3, 3])
+    assert {alarm["metric"] for alarm in result["alarms"]} == {"absolute_change"}
 
 
 def test_parameter_update_preserves_previous_version_and_requires_matching_baseline(service, tmp_path):
@@ -175,7 +184,7 @@ def test_different_program_or_target_is_not_comparable(service, tmp_path, field)
 
 def test_missing_q_does_not_substitute_controller_rotation_or_claim_absolute_ap(service, tmp_path):
     establish_baseline(service, tmp_path / "initial.json", include_q=False)
-    service.save_settings({"thresholds": {"X": 1, "Y": None, "Z": None, "distance": None}})
+    service.save_settings({"metric_thresholds": {"repeatability": {"X": 1}}})
     # robot_pose 在样本中存在，但没有明确 Q 时不能拿它自动充当实测基座朝向。
     service.load_observations(batch_file(tmp_path / "current.json", repeated((100, 202, 300))))
     result = service.evaluate()
@@ -183,6 +192,7 @@ def test_missing_q_does_not_substitute_controller_rotation_or_claim_absolute_ap(
     assert result["groups"][0]["drift_distance"] == pytest.approx(2)
     assert result["summary"]["absolute_ap"] is None
     assert result["status"] == "部分指标不可判定"
+    assert assess_metric(result, "repeatability")["status"] == "部分指标不可判定"
     assert result["alarms"] == []
 
 
@@ -372,3 +382,149 @@ def test_debug_batches_remain_explicitly_unverified(service, tmp_path):
     result = service.evaluate()
     assert result["status"] == "调试比较 · 采样对应待确认"
     assert any("不能将比较结果认定为真实精度退化" in warning for warning in result["warnings"])
+    assert result["comparison_status"] == "debug_unverified"
+    assert all(assess_metric(result, mode)["status"].startswith("调试比较") for mode in METRIC_LABELS)
+
+
+def test_metric_thresholds_are_independent_and_old_drift_limits_are_not_migrated(service):
+    service.save_settings({"thresholds": {"X": 99}})
+    assert all(value is None for thresholds in service.settings["metric_thresholds"].values()
+               for value in thresholds.values())
+    service.save_settings({"metric_thresholds": {"repeatability": {"X": 0.5, "distance": 0.7}}})
+    service.save_settings({"metric_thresholds": {"absolute_change": {"X": 0.2}}})
+    reopened = PositionMonitoringService(root=service.root)
+    assert reopened.settings["metric_thresholds"]["repeatability"]["X"] == 0.5
+    assert reopened.settings["metric_thresholds"]["absolute_change"]["X"] == 0.2
+    assert reopened.settings["metric_thresholds"]["repeatability_change"]["X"] is None
+    before = deepcopy(service.settings)
+    with pytest.raises(ValueError, match="非负数"):
+        service.save_settings({"metric_thresholds": {"repeatability": {"X": -1}}})
+    assert service.settings == before
+    state_path = service.storage / "state.json"
+    state = read_document(state_path)
+    del state["settings"]["metric_thresholds"]
+    write_json(state_path, state)
+    old_state = PositionMonitoringService(root=service.root)
+    assert old_state.settings["thresholds"]["X"] == 99
+    assert all(value is None for thresholds in old_state.settings["metric_thresholds"].values()
+               for value in thresholds.values())
+
+
+def test_current_repeatability_without_baseline_saves_real_statistics_and_snapshot(service, tmp_path):
+    positions = [("P1", "D1", (99, 200, 300)), ("P1", "D1", (101, 200, 300))]
+    imported = service.load_observations(batch_file(tmp_path / "current.json", positions))
+    result = service.evaluate_current()
+    assert result["baseline_id"] is None
+    assert result["baseline_path"] is None
+    assert result["program_id"] == imported["program_id"]
+    assert result["target_id"] == imported["target_id"]
+    assert result["groups"][0]["baseline"] is None
+    assert metric_values(result, "repeatability") == pytest.approx([3 * np.sqrt(2), 0, 0, 1], abs=1e-9)
+    assert metric_values(result, "repeatability_change") == [None] * 4
+    assert metric_values(result, "absolute_change") == [None] * 4
+    assert result["summary"]["drift_distance"] is None
+    assert result["status"] == "未设置阈值"
+    assert assess_metric(result, "absolute_change")["status"] == "指标不可计算"
+    assert read_document(result["current_batch_path"])["samples"] == imported["samples"]
+    assert service.list_history() == [result]
+
+
+def test_one_arrival_per_direction_does_not_create_repeatability_samples(service, tmp_path):
+    positions = [("P1", "D1", (99, 200, 300)), ("P1", "D2", (101, 200, 300))]
+    service.load_observations(batch_file(tmp_path / "current.json", positions))
+    service.save_settings({"metric_thresholds": {"repeatability": {"distance": 1}}})
+    result = service.evaluate_current()
+    assert len(result["groups"]) == 2
+    assert metric_values(result, "repeatability") == [None] * 4
+    assert result["status"] == "指标不可计算"
+    assert assess_metric(result, "repeatability")["alarms"] == []
+
+
+def test_current_repeatability_does_not_borrow_selected_baseline_rotation(service, tmp_path):
+    establish_baseline(service, tmp_path / "baseline.json")
+    positions = [("P1", "D1", (99, 200, 300)), ("P1", "D1", (101, 200, 300))]
+    service.load_observations(batch_file(tmp_path / "current.json", positions, include_q=False))
+    result = service.evaluate_current()
+    assert result["summary"]["axis_3sigma_base"] is None
+    assert result["summary"]["rp_current"] == pytest.approx(1)
+    assert result["baseline_id"] is None
+
+
+def test_negative_degradation_is_improvement_and_threshold_snapshots_stay_independent(service, tmp_path):
+    initial = [("P1", "D1", (98, 200, 300)), ("P1", "D1", (102, 200, 300))]
+    establish_baseline(service, tmp_path / "initial.json", initial,
+                       initial_errors={"P1": {"D1": [2, 0, 0]}})
+    current = [("P1", "D1", (98, 200, 300)), ("P1", "D1", (100, 200, 300))]
+    service.load_observations(batch_file(tmp_path / "current.json", current))
+    service.save_settings({"metric_thresholds": {
+        "absolute_change": dict.fromkeys(("X", "Y", "Z", "distance"), 0.5),
+        "repeatability_change": dict.fromkeys(("X", "Y", "Z", "distance"), 0.5),
+        "repeatability": {"distance": 0.5},
+    }})
+    result = service.evaluate()
+    assert result["summary"]["absolute_ap_change"] == pytest.approx(-1)
+    assert result["summary"]["rp_change"] == pytest.approx(-1)
+    assert assess_metric(result, "absolute_change")["status"] == "阈值内"
+    assert assess_metric(result, "repeatability_change")["status"] == "阈值内"
+    assert {alarm["metric"] for alarm in result["alarms"]} == {"repeatability"}
+    assert assess_metric(result, "repeatability")["status"] == "超限"
+    service.save_settings({"metric_thresholds": {"repeatability": {"distance": 9}}})
+    assert assess_metric(result, "repeatability")["thresholds"]["distance"] == 0.5
+    assert service.list_history()[0]["metric_thresholds"] == result["metric_thresholds"]
+
+
+def test_old_history_never_borrows_drift_threshold_or_alarm_for_new_metric(service, tmp_path):
+    service.load_observations(batch_file(tmp_path / "current.json", repeated()))
+    result = service.evaluate_current()
+    del result["metric_thresholds"]
+    result.update({"thresholds": dict.fromkeys(("X", "Y", "Z", "distance"), 0.01),
+                   "status": "超限", "alarms": [{"axis": "X", "value": 3}]})
+    assessment = assess_metric(result, "repeatability")
+    assert assessment["status"] == "未设置阈值"
+    assert assessment["alarms"] == []
+    assert set(assessment["thresholds"].values()) == {None}
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"parameter_version": "old-version"}, "参数版本已变化"),
+    ({"comparison_status": "calibration_only"}, "手眼标定数据"),
+])
+def test_current_repeatability_rejects_changed_parameters_and_calibration_data(service, tmp_path, change, message):
+    service.load_observations(batch_file(tmp_path / "current.json", repeated()))
+    service.current_batch.update(change)
+    with pytest.raises(ValueError, match=message):
+        service.evaluate_current()
+    assert service.list_history() == []
+
+
+@pytest.mark.parametrize("incompatibility", ["parameters", "program", "target", "groups"])
+def test_current_repeatability_can_bypass_an_incompatible_baseline(service, tmp_path, incompatibility):
+    baseline = establish_baseline(service, tmp_path / "initial.json")
+    metadata = {}
+    if incompatibility == "parameters":
+        service.save_parameters({"hand_eye": HAND_EYE.tolist()})
+    elif incompatibility == "program":
+        metadata["program_id"] = "another-program"
+    elif incompatibility == "target":
+        metadata["target_id"] = "another-target"
+    point = "P2" if incompatibility == "groups" else "P1"
+    positions = [(point, "D1", (99, 200, 300)), (point, "D1", (101, 200, 300))]
+    service.load_observations(batch_file(tmp_path / "current.json", positions, **metadata))
+    with pytest.raises(ValueError):
+        service.evaluate()
+    result = service.evaluate(allow_current_only=True)
+    assert result["baseline_id"] is None
+    assert result["summary"]["rp_current"] == pytest.approx(1)
+    assert result["summary"]["rp_change"] is None
+    assert service.baseline["id"] == baseline["id"]
+    service.current_batch["parameter_version"] = "expired-current-parameters"
+    with pytest.raises(ValueError, match="参数版本已变化"):
+        service.evaluate(allow_current_only=True)
+
+
+def test_current_mode_still_compares_when_the_baseline_is_compatible(service, tmp_path):
+    baseline = establish_baseline(service, tmp_path / "initial.json")
+    service.load_observations(batch_file(tmp_path / "current.json", repeated()))
+    result = service.evaluate(allow_current_only=True)
+    assert result["baseline_id"] == baseline["id"]
+    assert result["summary"]["rp_change"] == pytest.approx(0)
