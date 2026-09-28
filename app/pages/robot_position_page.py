@@ -180,14 +180,18 @@ class RobotPositionPage(QWidget):
         body = QVBoxLayout(summary)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(12)
-        self.batch_label = self._note("本次评估：—    基准批次：—")
-        body.addWidget(self.batch_label)
+        timestamps = QHBoxLayout()
+        self.evaluation_time_label = self._note("评价更新时间：—")
+        self.baseline_time_label = self._note("基准建立时间：—")
+        timestamps.addWidget(self.evaluation_time_label, 1)
+        timestamps.addWidget(self.baseline_time_label, 1)
+        body.addLayout(timestamps)
 
         metrics = QHBoxLayout()
         metrics.setSpacing(12)
         self.axis_values = {}
         self.axis_titles = {}
-        self.axis_thresholds = {}
+        self.axis_cards = {}
         for axis, title in (
             ("X", "X 方向"),
             ("Y", "Y 方向"),
@@ -197,6 +201,8 @@ class RobotPositionPage(QWidget):
             metric = QFrame()
             metric.setProperty("axisMetric", True)
             metric.setProperty("axis", axis)
+            metric.setProperty("overLimit", False)
+            self.axis_cards[axis] = metric
             content = QVBoxLayout(metric)
             content.setContentsMargins(10, 12, 10, 12)
             content.setSpacing(4)
@@ -213,10 +219,6 @@ class RobotPositionPage(QWidget):
             value_row.addWidget(value, 1)
             value_row.addWidget(QLabel("mm"), 0, Qt.AlignmentFlag.AlignBottom)
             content.addLayout(value_row)
-            threshold = self._note("阈值：未设置")
-            self.axis_thresholds[axis] = threshold
-            threshold.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            content.addWidget(threshold)
             metrics.addWidget(metric, 1)
         body.addLayout(metrics)
         layout.addWidget(summary)
@@ -287,7 +289,8 @@ class RobotPositionPage(QWidget):
         self.trend_chart = PositionTrendChart()
         body.addWidget(self.trend_chart, 1)
         self.trend_metric.currentIndexChanged.connect(self._change_trend_metric)
-        caption = self._note("评估时间 / 批次")
+        caption = self._note("评估时间 / 天")
+        caption.setToolTip("相对于基准建立时间的经过天数，1 天 = 24 小时")
         caption.setAlignment(Qt.AlignmentFlag.AlignRight)
         body.addWidget(caption)
         return area
@@ -385,9 +388,8 @@ class RobotPositionPage(QWidget):
         heading.addWidget(self._mutation_button("调试", self._show_debug))
         body.addLayout(heading)
 
-        hand_eye = self._settings_section(body, 4, "机器人手眼参数")
-        self.parameter_label = self._note("参数状态：未加载")
-        hand_eye.addWidget(self.parameter_label)
+        self.status_lights = {}
+        hand_eye = self._settings_section(body, 4, "机器人手眼参数", "parameter")
         actions = QHBoxLayout()
         actions.addWidget(
             self._mutation_button("加载参数", self._load_parameters)
@@ -397,9 +399,7 @@ class RobotPositionPage(QWidget):
         )
         hand_eye.addLayout(actions)
 
-        baseline = self._settings_section(body, 5, "测量基准")
-        self.baseline_label = self._note("基准批次：未建立")
-        baseline.addWidget(self.baseline_label)
+        baseline = self._settings_section(body, 5, "测量基准", "baseline")
         actions = QHBoxLayout()
         actions.addWidget(
             self._mutation_button("建立基准", self._create_baseline)
@@ -409,11 +409,7 @@ class RobotPositionPage(QWidget):
         )
         baseline.addLayout(actions)
 
-        conditions = self._settings_section(body, 7, "判定与点位设置")
-        self.threshold_label = self._note("各指标阈值：未设置")
-        conditions.addWidget(self.threshold_label)
-        self.point_count_label = self._note("加工点位：0 个")
-        conditions.addWidget(self.point_count_label)
+        conditions = self._settings_section(body, 7, "判定与点位设置", "conditions")
         actions = QHBoxLayout()
         actions.addWidget(self._mutation_button("阈值设置", self._show_settings))
         actions.addWidget(self._mutation_button("点位管理", self._show_point_editor))
@@ -469,7 +465,7 @@ class RobotPositionPage(QWidget):
         return bar
 
     def _settings_section(
-        self, parent: QVBoxLayout, number: int, title: str
+        self, parent: QVBoxLayout, number: int, title: str, status_key: str
     ) -> QVBoxLayout:
         group = QFrame()
         group.setObjectName(f"Region{number}")
@@ -479,7 +475,16 @@ class RobotPositionPage(QWidget):
         layout.setSpacing(8)
         label = QLabel(title)
         label.setProperty("robotSectionTitle", True)
-        layout.addWidget(label)
+        heading = QHBoxLayout()
+        heading.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
+        heading.addStretch()
+        light = QLabel()
+        light.setProperty("statusLight", True)
+        light.setFixedSize(12, 12)
+        light.setAccessibleName(f"{title}状态")
+        self.status_lights[status_key] = light
+        heading.addWidget(light, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(heading)
         parent.addWidget(group)
         return layout
 
@@ -661,14 +666,29 @@ class RobotPositionPage(QWidget):
         return "—" if value is None else f"{value:.4f}"
 
     @staticmethod
-    def _short_text(value, limit=24):
-        text = str(value)
-        return text if len(text) <= limit else f"{text[:limit - 8]}…{text[-7:]}"
-
-    @staticmethod
-    def _short_time(value):
+    def _display_time(value):
         parsed = QDateTime.fromString(str(value), Qt.DateFormat.ISODateWithMs)
-        return parsed.toLocalTime().toString("MM-dd HH:mm") if parsed.isValid() else str(value)[:16]
+        return parsed.toLocalTime().toString("yyyy-MM-dd HH:mm:ss") if parsed.isValid() else "—"
+
+    def _baseline_created_at(self, result=None):
+        baseline = self.service.baseline
+        if result is None:
+            return baseline.get("created_at") if baseline else None
+        if not result.get("baseline_id"):
+            return None
+        if result.get("baseline_created_at"):
+            return result["baseline_created_at"]
+        if baseline and baseline["id"] == result["baseline_id"]:
+            return baseline.get("created_at")
+        # 旧历史没有时间快照，只读取该历史自己的基准，不借用其他基准。
+        if result.get("baseline_path"):
+            try:
+                baseline = read_document(result["baseline_path"])
+            except (OSError, ValueError):
+                return None
+            if baseline.get("id") == result["baseline_id"]:
+                return baseline.get("created_at")
+        return None
 
     def _run_task(self, title, operation, completed):
         if self.task is not None:
@@ -705,27 +725,47 @@ class RobotPositionPage(QWidget):
     def _refresh_settings(self):
         parameters = self.service.parameters
         loaded = parameters.get("hand_eye") is not None
-        self.parameter_label.setText(
+        parameter_state = "ready" if loaded else (
+            "partial" if parameters.get("camera_matrix") is not None else "missing"
+        )
+        self._set_status_light("parameter", parameter_state,
             f"参数状态：{'已加载' if loaded else '未加载'} · 相机 → TCP\n"
-            f"参数版本：{self._short_text(parameters.get('version', '—'))}"
+            f"参数版本：{parameters.get('version') or '—'}"
         )
-        self.parameter_label.setToolTip(f"参数版本：{parameters.get('version', '—')}")
         baseline = self.service.baseline
-        self.baseline_label.setText(
-            f"基准：{self._short_text(baseline.get('label') or baseline['id'])}\n"
-            f"建立时间：{self._short_time(baseline['created_at'])}" if baseline else "基准批次：未建立"
-        )
-        self.baseline_label.setToolTip(
-            f"基准：{baseline.get('label', '')}\n编号：{baseline['id']}\n时间：{baseline['created_at']}"
-            if baseline else ""
-        )
+        if baseline:
+            matching = loaded and baseline.get("parameters", {}).get("version") == parameters.get("version")
+            self._set_status_light("baseline", "ready" if matching else "partial",
+                f"基准：{baseline.get('label') or baseline['id']}\n"
+                f"编号：{baseline['id']}\n建立时间：{self._display_time(baseline.get('created_at'))}\n"
+                + ("与当前参数匹配" if matching else "与当前参数不匹配，请重新建立或选择基准")
+            )
+        else:
+            self._set_status_light("baseline", "missing", "尚未建立测量基准")
         metric_thresholds = self.service.settings.get("metric_thresholds", {})
-        self.threshold_label.setText("\n".join(
-            f"{label}：" + ("已设置" if any(value is not None for value in
-                              metric_thresholds.get(mode, {}).values()) else "未设置")
-            for mode, label in METRIC_LABELS.items()
-        ))
-        self.point_count_label.setText(f"加工点位：{len(self.processing_points)} 个")
+        counts = {mode: sum(metric_thresholds.get(mode, {}).get(axis) is not None
+                            for axis in self.axis_cards) for mode in METRIC_LABELS}
+        point_count = len(self.processing_points)
+        state = "missing"
+        if all(count == 4 for count in counts.values()) and point_count:
+            state = "ready"
+        elif any(counts.values()) or point_count:
+            state = "partial"
+        self._set_status_light("conditions", state,
+            "\n".join(f"{label}：已设置 {counts[mode]}/4 项阈值"
+                      for mode, label in METRIC_LABELS.items())
+            + f"\n加工点位：{point_count} 个"
+        )
+
+    def _set_status_light(self, key, state, details):
+        light = self.status_lights[key]
+        light.setProperty("state", state)
+        status = {"missing": "未配置", "partial": "配置不全或不匹配", "ready": "已就绪"}[state]
+        light.setToolTip(f"{status}\n{details}")
+        light.setAccessibleDescription(f"{status}；{details}")
+        light.style().unpolish(light)
+        light.style().polish(light)
+        light.update()
 
     def _invalidate_result(self):
         self.result = None
@@ -789,9 +829,7 @@ class RobotPositionPage(QWidget):
 
     def _observations_loaded(self, batch):
         self._refresh_observations()
-        identifier = batch.get('batch_id', batch.get('id', '—'))
-        self.batch_label.setText(f"已导入：{self._short_text(identifier)} · 待评估")
-        self.batch_label.setToolTip(f"批次：{identifier}")
+        self._render_result()
         self.append_log(f"已导入 {len(batch['samples'])} 个观测样本。")
         for warning in batch.get("warnings", []):
             self.append_log(warning, "WARN")
@@ -895,22 +933,35 @@ class RobotPositionPage(QWidget):
         assessment = assess_metric(self.result, mode) if self.result is not None else None
         thresholds = (assessment["thresholds"] if assessment else
                       self.service.settings.get("metric_thresholds", {}).get(mode, {}))
-        for key, label in self.axis_thresholds.items():
-            value = thresholds.get(key)
-            label.setText("阈值：未设置" if value is None else f"阈值：{self._number(value)}")
-            label.setToolTip("本次评估保存的阈值" if self.result else "下一次评估使用的阈值")
+        alarm_axes = {alarm["axis"] for alarm in assessment["alarms"]} if assessment else set()
+        for key, card in self.axis_cards.items():
+            card.setProperty("overLimit", key in alarm_axes)
+            threshold = thresholds.get(key)
+            threshold_hint = "阈值未设置" if threshold is None else f"阈值：{self._number(threshold)} mm"
+            source = "本次评估保存的阈值" if assessment else "下一次评估使用的阈值"
+            card.setToolTip(f"{source} · {threshold_hint}" + ("\n存在逐点超限，请查看报警与维护" if key in alarm_axes else ""))
             self.axis_titles[key].setToolTip(hint)
+            for label in card.findChildren(QLabel):
+                label.style().unpolish(label)
+                label.style().polish(label)
+                label.update()
         self.measured_table.horizontalHeaderItem(4).setToolTip(hint)
+        context = self.result or self.service.current_batch or {}
+        baseline = self.service.baseline or {}
+        baseline_time = self._baseline_created_at(self.result)
+        self.evaluation_time_label.setText(
+            f"评价更新时间：{self._display_time(self.result.get('created_at') if self.result else None)}"
+        )
+        self.baseline_time_label.setText(f"基准建立时间：{self._display_time(baseline_time)}")
+        self.evaluation_time_label.setToolTip(
+            f"观测批次：{context.get('batch_label') or context.get('label') or context.get('batch_id') or '—'}\n"
+            f"参数版本：{context.get('parameter_version') or '—'}"
+        )
+        baseline_id = self.result.get("baseline_id") if self.result is not None else baseline.get("id")
+        self.baseline_time_label.setToolTip(f"基准编号：{baseline_id or '—'}")
         if self.result is None:
             for label in self.axis_values.values():
                 label.setText("—")
-            batch = self.service.current_batch or {}
-            baseline = self.service.baseline or {}
-            self.batch_label.setText(
-                f"本次：{self._short_text(batch.get('label') or batch.get('batch_id') or '—')}    "
-                f"基准：{self._short_text(baseline.get('label') or baseline.get('id') or '—')}"
-            )
-            self.batch_label.setToolTip("")
             pending = "等待本次观测并评估" if mode == "repeatability" else "需要基准与本次观测并评估"
             self.result_hint.setText(pending)
             self.result_hint.setToolTip(hint)
@@ -921,14 +972,6 @@ class RobotPositionPage(QWidget):
             result = self.result
             for key, value in zip(("X", "Y", "Z", "distance"), self._metric_values(result)):
                 self.axis_values[key].setText(self._number(value))
-            self.batch_label.setText(
-                f"本次：{self._short_text(result.get('batch_label') or result['batch_id'])}    "
-                f"基准：{self._short_text(result.get('baseline_label') or result.get('baseline_id') or '—')}"
-            )
-            self.batch_label.setToolTip(
-                f"本次：{result['batch_id']}\n基准：{result.get('baseline_id') or '—'}\n"
-                f"评估时间：{result['created_at']}\n参数版本：{result['parameter_version']}"
-            )
             self._fill_table(self.measured_table, self._metric_rows())
             unavailable = self._unavailable_reasons()
             self.result_hint.setText("；".join(unavailable) if unavailable else "逐点等权汇总 · 单位 mm")
@@ -952,6 +995,10 @@ class RobotPositionPage(QWidget):
         history = self.service.list_history()
         parameter_version = self.result.get("parameter_version") if self.result else self.service.parameters.get("version")
         context = self.result or self.service.current_batch or {}
+        origin = QDateTime.fromString(str(self._baseline_created_at(self.result)), Qt.DateFormat.ISODateWithMs)
+        self.trend_chart.empty_message = (
+            "暂无历史评估记录" if origin.isValid() else "缺少基准建立时间，无法显示相对时间趋势"
+        )
         groups = context.get("groups", context.get("samples", []))
         point_directions = {(group["point_id"], group["direction_id"]) for group in groups}
         records = []
@@ -965,8 +1012,11 @@ class RobotPositionPage(QWidget):
             record_points = {(group["point_id"], group["direction_id"]) for group in result["groups"]}
             if point_directions and record_points != point_directions:
                 continue
+            timestamp = QDateTime.fromString(str(result.get("created_at")), Qt.DateFormat.ISODateWithMs)
+            if not origin.isValid() or not timestamp.isValid():
+                continue
             values = self._metric_values(result)
-            records.append({"label": self._short_time(result["created_at"]),
+            records.append({"days": origin.msecsTo(timestamp) / 86400000,
                             **dict(zip(("X", "Y", "Z", "distance"), values))})
         self.trend_chart.set_history(records)
         axis = "空间" if self.trend_metric.currentData() == "distance" else "基座 XYZ"
@@ -1233,7 +1283,7 @@ class PointEditor(QDialog):
             self._report_error(str(error))
             return
         self.page.processing_points = points
-        self.page.point_count_label.setText(f"加工点位：{len(points)} 个")
+        self.page._refresh_settings()
         self.page._fill_table(self.page.point_table, self.page._prediction_rows())
         self.page.append_log(
             f"加工点位已保存：{len(points)} 个；预测模型尚未启用。"
@@ -1253,11 +1303,12 @@ class PositionTrendChart(QWidget):
         self.setMinimumHeight(150)
         self.mode = "xyz"
         self.history = []
+        self.empty_message = "暂无历史评估记录"
         self.setAccessibleName("多次评估的定位精度趋势图")
 
     def set_history(self, records: list[dict]) -> None:
-        """每条记录含 label、X、Y、Z、distance；未计算的指标为 None。"""
-        self.history = records
+        """days 为相对基准的天数；X、Y、Z、distance 未计算时为 None。"""
+        self.history = sorted(records, key=lambda record: record["days"])
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -1291,7 +1342,7 @@ class PositionTrendChart(QWidget):
         ]
         if not values:
             painter.setPen(QColor(colors["inactive"]))
-            painter.drawText(plot, Qt.AlignmentFlag.AlignCenter, "暂无历史评估记录")
+            painter.drawText(plot, Qt.AlignmentFlag.AlignCenter, self.empty_message)
             return
         low, high = min(0, min(values)), max(0, max(values))
         if low == high:
@@ -1305,13 +1356,19 @@ class PositionTrendChart(QWidget):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                 f"{value:.3f}",
             )
-        endpoints = ([(0, Qt.AlignmentFlag.AlignCenter)] if len(self.history) == 1 else
-                     [(0, Qt.AlignmentFlag.AlignLeft), (-1, Qt.AlignmentFlag.AlignRight)])
-        for index, alignment in endpoints:
+        first_day = min(0, self.history[0]["days"])
+        last_day = max(0, self.history[-1]["days"])
+        if first_day == last_day:
+            last_day = first_day + 1
+        for step in range(5):
+            day = first_day + (last_day - first_day) * step / 4
+            x = plot.left() + plot.width() * step / 4
+            tick_width = margin
+            painter.drawLine(QPointF(x, plot.bottom()), QPointF(x, plot.bottom() + 3))
             painter.drawText(
-                QRectF(plot.left(), plot.bottom() + 2, plot.width(), line_height),
-                alignment | Qt.AlignmentFlag.AlignVCenter,
-                str(self.history[index]["label"]),
+                QRectF(x - tick_width / 2, plot.bottom() + 3, tick_width, line_height),
+                Qt.AlignmentFlag.AlignCenter,
+                f"{day:.3g}",
             )
         color_keys = {
             "X": "action",
@@ -1325,16 +1382,12 @@ class PositionTrendChart(QWidget):
             )
             path = QPainterPath()
             connected = False
-            for index, record in enumerate(self.history):
+            for record in self.history:
                 value = record.get(axis)
                 if value is None:
                     connected = False
                     continue
-                x = (
-                    plot.center().x()
-                    if len(self.history) == 1
-                    else plot.left() + plot.width() * index / (len(self.history) - 1)
-                )
+                x = plot.left() + plot.width() * (record["days"] - first_day) / (last_day - first_day)
                 point = QPointF(
                     x, plot.bottom() - plot.height() * (value - low) / (high - low)
                 )

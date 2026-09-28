@@ -34,6 +34,7 @@
     "axis_y": "#247c83",
     "axis_z": "#a56928",
     "distance": "#755ca4",
-    "error": "#ad3434"
+    "error": "#ad3434",
+    "warning": "#d59c25"
   }
 }

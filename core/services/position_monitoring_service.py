@@ -443,6 +443,7 @@ class PositionMonitoringService:
         result.update({
             "baseline_id": self.baseline["id"], "parameter_version": version,
             "baseline_label": self.baseline["label"],
+            "baseline_created_at": self.baseline.get("created_at"),
             "orientation_source": baseline_batch.get("orientation_source", "unspecified"),
             "baseline_source": baseline_batch["source_path"],
             "baseline_path": self.baseline["path"],
@@ -467,6 +468,7 @@ class PositionMonitoringService:
         result["warnings"] = list(dict.fromkeys(current.get("warnings", []) + result["warnings"]))
         result.update({
             "baseline_id": None, "baseline_label": None, "baseline_path": None,
+            "baseline_created_at": None,
             "baseline_source": None, "parameter_version": self.parameters["version"],
             "orientation_source": current.get("orientation_source", "unspecified"),
         })

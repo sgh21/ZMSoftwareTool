@@ -276,6 +276,15 @@ QFrame[axisMetric="true"][axis="X"] QLabel { color: @action@; }
 QFrame[axisMetric="true"][axis="Y"] QLabel { color: @axis_y@; }
 QFrame[axisMetric="true"][axis="Z"] QLabel { color: @axis_z@; }
 QFrame[axisMetric="true"][axis="distance"] QLabel { color: @distance@; }
+QFrame[axisMetric="true"][overLimit="true"] QLabel { color: @error@; }
+
+QLabel[statusLight="true"] {
+    border: none;
+    border-radius: 6px;
+    background: @placeholder@;
+}
+QLabel[statusLight="true"][state="ready"] { background: @accent@; }
+QLabel[statusLight="true"][state="partial"] { background: @warning@; }
 
 QPlainTextEdit#RobotProcessLog, QPlainTextEdit#SpindleProcessLog {
     background: #f8fafc;

@@ -131,20 +131,20 @@ def test_historical_metrics_use_saved_thresholds_and_ignore_drift_alarms(applica
     })
     page = RobotPositionPage(service)
     page._evaluation_completed(data)
-    assert page.axis_thresholds["X"].text() == "阈值：0.7000"
+    assert page.axis_cards["X"].property("overLimit") is False
     assert "1 项超限" not in page.alarm_status.text()
     assert "定位漂移" not in page.alarm_status.text()
     page.result_metric.setCurrentIndex(1)
-    assert page.axis_thresholds["X"].text() == "阈值：0.1000"
+    assert page.axis_cards["X"].property("overLimit") is True
     assert "1 项超限" in page.alarm_status.text()
     page.result_metric.setCurrentIndex(0)
-    assert page.axis_thresholds["X"].text() == "阈值：3.0000"
+    assert page.axis_cards["X"].property("overLimit") is False
     assert "1 项超限" not in page.alarm_status.text()
     page.result_metric.setCurrentIndex(2)
     # 旧记录只有漂移阈值时，不能借用当前配置补判历史 RP。
     data.pop("metric_thresholds")
     page._evaluation_completed(data)
-    assert "未设置" in page.axis_thresholds["X"].text()
+    assert page.axis_cards["X"].property("overLimit") is False
     assert "未设" in page.alarm_status.text()
     assert "1 项超限" not in page.alarm_status.text()
     page.close()
@@ -177,9 +177,9 @@ def test_threshold_dialog_saves_three_independent_sets_and_blank_fields(applicat
         "repeatability_change": {"X": 0.2, "Y": None, "Z": None, "distance": None},
         "repeatability": {"X": 0.7, "Y": None, "Z": None, "distance": None},
     }
-    assert page.axis_thresholds["X"].text() == "阈值：0.7000"
+    assert "0.7000" in page.axis_cards["X"].toolTip()
     page.result_metric.setCurrentIndex(0)
-    assert page.axis_thresholds["X"].text() == "阈值：1.2000"
+    assert "1.2000" in page.axis_cards["X"].toolTip()
     page.close()
 
 
@@ -330,7 +330,7 @@ def test_debug_baseline_and_retest_use_real_service_and_persist_results(applicat
     assert service.baseline is not None, dialog.output.toPlainText()
     assert service.current_batch is None
     assert page.result is None
-    assert "旧数据调试基准" in page.baseline_label.text()
+    assert "旧数据调试基准" in page.status_lights["baseline"].toolTip()
 
     dialog.current_path.setText(str(sources[1]))
     dialog._evaluate()

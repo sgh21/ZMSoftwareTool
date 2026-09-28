@@ -117,6 +117,7 @@ def test_evaluation_saves_history_and_actual_observation_snapshot(service, tmp_p
     assert result["summary"]["absolute_ap"] is None
     assert result["status"] == "未设置阈值"
     assert result["baseline_id"] == baseline["id"]
+    assert result["baseline_created_at"] == baseline["created_at"]
     assert source.read_bytes() == original_bytes
     snapshot = read_document(service.storage / "observations" / f"{result['id']}.json")
     assert snapshot["samples"] == imported["samples"]
@@ -416,6 +417,7 @@ def test_current_repeatability_without_baseline_saves_real_statistics_and_snapsh
     result = service.evaluate_current()
     assert result["baseline_id"] is None
     assert result["baseline_path"] is None
+    assert result["baseline_created_at"] is None
     assert result["program_id"] == imported["program_id"]
     assert result["target_id"] == imported["target_id"]
     assert result["groups"][0]["baseline"] is None
@@ -514,6 +516,7 @@ def test_current_repeatability_can_bypass_an_incompatible_baseline(service, tmp_
         service.evaluate()
     result = service.evaluate(allow_current_only=True)
     assert result["baseline_id"] is None
+    assert result["baseline_created_at"] is None
     assert result["summary"]["rp_current"] == pytest.approx(1)
     assert result["summary"]["rp_change"] is None
     assert service.baseline["id"] == baseline["id"]
@@ -527,4 +530,5 @@ def test_current_mode_still_compares_when_the_baseline_is_compatible(service, tm
     service.load_observations(batch_file(tmp_path / "current.json", repeated()))
     result = service.evaluate(allow_current_only=True)
     assert result["baseline_id"] == baseline["id"]
+    assert result["baseline_created_at"] == baseline["created_at"]
     assert result["summary"]["rp_change"] == pytest.approx(0)
