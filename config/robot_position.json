@@ -1,0 +1,12 @@
+{
+  "camera_matrix": null,
+  "dist_coeffs": [0, 0, 0, 0, 0],
+  "board_grid": [39, 34],
+  "square_size_mm": 0.5,
+  "hand_eye": null,
+  "reference_rotation": null,
+  "max_reprojection_error_px": null,
+  "length_unit": "mm",
+  "transform_convention": "E_T_C",
+  "version": "unconfigured"
+}

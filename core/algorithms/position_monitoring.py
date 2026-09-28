@@ -221,6 +221,11 @@ def evaluate_position_monitoring(
         np.abs(group["drift_base"]).tolist() if group["drift_base"] is not None else None
         for group in groups
     ])
+    summary["absolute_axis"] = _mean_by_point(groups, [
+        np.abs(group["current_error_base"]).tolist()
+        if group["current_error_base"] is not None else None
+        for group in groups
+    ])
     summary["rp_baseline"] = _mean_by_point(groups, [group["baseline"]["rp"] for group in groups])
     summary["rp_current"] = _mean_by_point(groups, [group["current"]["rp"] for group in groups])
     summary["axis_3sigma_base"] = _mean_by_point(groups, [

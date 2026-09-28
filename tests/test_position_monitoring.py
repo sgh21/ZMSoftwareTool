@@ -105,6 +105,7 @@ def test_absolute_error_change_requires_initial_vector(shift, expected_ap, expec
     assert group["absolute_axis_change"] == pytest.approx([expected_change, 0, 0])
     assert group["current_error_base"] == pytest.approx([2 + shift, 0, 0])
     assert group["drift_distance"] == pytest.approx(abs(shift))
+    assert result["summary"]["absolute_axis"] == pytest.approx([expected_ap, 0, 0])
 
 
 def test_q_alone_does_not_establish_absolute_accuracy():
@@ -118,6 +119,7 @@ def test_q_alone_does_not_establish_absolute_accuracy():
     assert group["absolute_ap"] is None
     assert group["absolute_ap_change"] is None
     assert result["summary"]["absolute_ap"] is None
+    assert result["summary"]["absolute_axis"] is None
 
 
 def test_one_arrival_supports_drift_but_not_repeatability_and_json_has_no_nan():
