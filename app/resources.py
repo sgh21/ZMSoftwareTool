@@ -1,11 +1,13 @@
 """集中读取配置、样式和图标，资源路径不依赖启动目录。"""
 
 import json
+import re
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtWidgets import QAbstractButton, QLabel, QLayout, QTabBar, QWidget
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -13,12 +15,99 @@ RESOURCE_ROOT = PROJECT_ROOT / "resources"
 DISPLAY = json.loads((PROJECT_ROOT / "config/display.json").read_text(encoding="utf-8"))
 
 
-def load_stylesheet() -> str:
+def load_stylesheet(scale: float = 1.0) -> str:
     stylesheet = (RESOURCE_ROOT / "styles/light.qss").read_text(encoding="utf-8")
     stylesheet = stylesheet.replace("@font_family@", DISPLAY["font_family"])
+    stylesheet = stylesheet.replace("@resource_root@", RESOURCE_ROOT.as_posix())
     for name, color in DISPLAY["colors"].items():
         stylesheet = stylesheet.replace(f"@{name}@", color)
-    return stylesheet
+    return re.sub(
+        r"(\d+)px", lambda match: f"{round(int(match[1]) * scale)}px", stylesheet
+    )
+
+
+class UiScale:
+    """记录设计尺寸，每次从原值缩放；保留原生控件与当前页面状态。"""
+
+    def __init__(self, root: QWidget, include_widget_sizes: bool = True) -> None:
+        self.layouts = []
+        self.spacers = []
+        self.bounds = []
+        self.icons = []
+        self.pictures = []
+        for layout in root.findChildren(QLayout):
+            margins = layout.contentsMargins()
+            self.layouts.append(
+                (
+                    layout,
+                    (margins.left(), margins.top(), margins.right(), margins.bottom()),
+                    layout.spacing(),
+                )
+            )
+            for index in range(layout.count()):
+                spacer = layout.itemAt(index).spacerItem()
+                if spacer is not None:
+                    self.spacers.append(
+                        (spacer, spacer.sizeHint(), spacer.sizePolicy())
+                    )
+        if not include_widget_sizes:
+            return
+        for widget in root.findChildren(QWidget):
+            minimum, maximum = widget.minimumSize(), widget.maximumSize()
+            if minimum != QSize(0, 0) or maximum != QSize(16777215, 16777215):
+                self.bounds.append((widget, minimum, maximum))
+            if isinstance(widget, (QAbstractButton, QTabBar)):
+                self.icons.append((widget, widget.iconSize()))
+            if isinstance(widget, QLabel):
+                pixmap = widget.pixmap()
+                if pixmap is not None and not pixmap.isNull():
+                    self.pictures.append((widget, pixmap))
+
+    def apply(self, scale: float) -> None:
+        for layout, margins, spacing in self.layouts:
+            layout.setContentsMargins(*(round(value * scale) for value in margins))
+            if spacing >= 0:
+                layout.setSpacing(round(spacing * scale))
+        for spacer, size, policy in self.spacers:
+            spacer.changeSize(
+                round(size.width() * scale),
+                round(size.height() * scale),
+                policy.horizontalPolicy(),
+                policy.verticalPolicy(),
+            )
+        for widget, minimum, maximum in self.bounds:
+            widget.setMinimumSize(
+                round(minimum.width() * scale), round(minimum.height() * scale)
+            )
+            widget.setMaximumSize(
+                *(
+                    16777215 if value == 16777215 else round(value * scale)
+                    for value in (maximum.width(), maximum.height())
+                )
+            )
+        for widget, size in self.icons:
+            widget.setIconSize(
+                QSize(round(size.width() * scale), round(size.height() * scale))
+            )
+        for widget, pixmap in self.pictures:
+            widget.setPixmap(
+                pixmap.scaled(
+                    round(pixmap.width() * scale),
+                    round(pixmap.height() * scale),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        for layout, _, _ in self.layouts:
+            layout.invalidate()
+
+
+def fit_dialog(dialog: QWidget, width: int, height: int) -> None:
+    """弹窗沿用主窗口比例；字体由已缩放的应用样式提供。"""
+    scale = dialog.parentWidget().window().ui_scale
+    UiScale(dialog, include_widget_sizes=False).apply(scale)
+    size = QSize(round(width * scale), round(height * scale))
+    dialog.resize(size.boundedTo(dialog.screen().availableGeometry().size()))
 
 
 def load_icon(name: str, color: str, size: int = 24) -> QIcon:
@@ -26,15 +115,19 @@ def load_icon(name: str, color: str, size: int = 24) -> QIcon:
     # 从同一个 SVG 生成不同状态的颜色，替换资源时不必维护多份图标。
     renderer = QSvgRenderer(str(path))
     icon = QIcon()
-    for scale in (1, 2, 3):
-        pixmap = QPixmap(size * scale, size * scale)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        renderer.render(painter)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), QColor(color))
-        painter.end()
-        pixmap.setDevicePixelRatio(scale)
-        for mode in (QIcon.Mode.Normal, QIcon.Mode.Active, QIcon.Mode.Selected):
-            icon.addPixmap(pixmap, mode)
+    # 同时提供放大后的逻辑尺寸，避免大窗口中只有图标仍停留在原始大小。
+    for extent in (size, round(size * DISPLAY["scaling"]["maximum"])):
+        for ratio in (1, 2, 3):
+            pixmap = QPixmap(extent * ratio, extent * ratio)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceIn
+            )
+            painter.fillRect(pixmap.rect(), QColor(color))
+            painter.end()
+            pixmap.setDevicePixelRatio(ratio)
+            for mode in (QIcon.Mode.Normal, QIcon.Mode.Active, QIcon.Mode.Selected):
+                icon.addPixmap(pixmap, mode)
     return icon

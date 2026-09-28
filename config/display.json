@@ -1,9 +1,19 @@
 {
   "title": "精度监控系统",
   "window_size": [1280, 800],
-  "minimum_size": [1040, 640],
+  "minimum_size": [800, 500],
+  "scaling": {
+    "reference_size": [1600, 1000],
+    "minimum": 0.75,
+    "maximum": 2.0
+  },
   "sidebar_width": 168,
   "font_family": "Microsoft YaHei",
+  "spindle_preview_channels": {
+    "vibration": ["X", "Y", "Z"],
+    "temperature": ["T1", "T2", "T3"],
+    "current": ["I1"]
+  },
   "branding": {
     "image": "icons/branding/reference-interface.png",
     "source_rect": [108, 3, 270, 54],
@@ -18,6 +28,12 @@
     "inactive": "#4a5868",
     "placeholder": "#718092",
     "border": "#dbe3eb",
-    "background": "#f4f6f8"
+    "background": "#f4f6f8",
+    "action": "#3978ad",
+    "action_hover": "#2d6595",
+    "axis_y": "#247c83",
+    "axis_z": "#a56928",
+    "distance": "#755ca4",
+    "error": "#ad3434"
   }
 }

@@ -13,6 +13,8 @@
 | `precision/` | `axial-feed.svg` | 主轴、工件和轴向进给箭头 |
 | `window/` | `minimize.svg`、`maximize.svg`、`restore.svg`、`close.svg` | 标题栏窗口控制 |
 | `common/` | `pending.svg`（panel-top） | 待开发提示 |
+| `common/` | `chevron-down.svg` | 下拉选择箭头，本工程绘制 |
+| `robot/` | `camera.svg` | 机器人页标志点观测图像占位，相机与靶心线条图标，本工程绘制 |
 
 替换时保持文件名即可，无需修改页面代码。新增按钮图标按业务用途放进相应目录，跨页面通用操作放在 `common/`。
 

@@ -1,9 +1,10 @@
-"""精度监控界面：主窗口、三类精度选项卡和待开发占位。"""
+"""精度监控主窗口、三类精度选项卡和导航。"""
 
 from PyQt6.QtCore import QDateTime, QEvent, QRect, QSize, Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QPaintEvent, QPainter, QPixmap, QResizeEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -19,7 +20,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.resources import DISPLAY, RESOURCE_ROOT, load_icon
+from app.pages.robot_position_page import RobotPositionPage
+from app.pages.spindle_rotation_page import SpindleRotationPage
+from app.resources import DISPLAY, RESOURCE_ROOT, UiScale, load_icon, load_stylesheet
 
 
 PRECISION_TABS = (
@@ -34,8 +37,15 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle(DISPLAY["title"])
-        self.resize(*DISPLAY["window_size"])
-        self.setMinimumSize(*DISPLAY["minimum_size"])
+        self.ui_scale = 1.0
+        self.scale_timer = QTimer(self)
+        self.scale_timer.setSingleShot(True)
+        self.scale_timer.setInterval(80)
+        self.scale_timer.timeout.connect(self._update_scale)
+        available = self.screen().availableGeometry()
+        self.resize(QSize(*DISPLAY["window_size"]).boundedTo(available.size()))
+        self.setMinimumSize(QSize(*DISPLAY["minimum_size"]).boundedTo(available.size()))
+        self.move(available.center() - self.rect().center())
 
         root = QWidget()
         root.setObjectName("ApplicationRoot")
@@ -89,6 +99,51 @@ class MainWindow(QMainWindow):
         self.precision_page.tab_bar.currentChanged.connect(self._remember_tab)
         self.size_grip = QSizeGrip(self)
         self.size_grip.setFixedSize(16, 16)
+        self.ui_metrics = UiScale(self)
+        self._update_scale()
+        # 建立原生窗口后监听换屏；系统 DPI 仍交给 Qt 自动处理。
+        self.winId()
+        self.windowHandle().screenChanged.connect(self._fit_screen)
+
+    def _fit_screen(self) -> None:
+        available = self.screen().availableGeometry()
+        self.setMinimumSize(QSize(*DISPLAY["minimum_size"]).boundedTo(available.size()))
+        if not self.isMaximized():
+            self.resize(self.size().boundedTo(available.size()))
+            self.move(
+                max(
+                    available.left(),
+                    min(self.x(), available.right() - self.width() + 1),
+                ),
+                max(
+                    available.top(),
+                    min(self.y(), available.bottom() - self.height() + 1),
+                ),
+            )
+        self.scale_timer.start()
+
+    def _update_scale(self) -> None:
+        settings = DISPLAY["scaling"]
+        width, height = settings["reference_size"]
+        scale = round(
+            max(
+                settings["minimum"],
+                min(settings["maximum"], self.width() / width, self.height() / height),
+            ),
+            2,
+        )
+        if scale == self.ui_scale:
+            return
+        self.ui_scale = scale
+        self.setUpdatesEnabled(False)
+        QApplication.instance().setStyleSheet(load_stylesheet(scale))
+        self.ui_metrics.apply(scale)
+        self.navigation_marker.move(0, round(12 * scale))
+        self.size_grip.move(
+            self.width() - self.size_grip.width(),
+            self.height() - self.size_grip.height(),
+        )
+        self.setUpdatesEnabled(True)
 
     def _create_header(self) -> QFrame:
         header = TitleBar(self)
@@ -167,7 +222,11 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        self.size_grip.move(self.width() - 16, self.height() - 16)
+        self.size_grip.move(
+            self.width() - self.size_grip.width(),
+            self.height() - self.size_grip.height(),
+        )
+        self.scale_timer.start()
 
     def _update_clock(self) -> None:
         self.clock_label.setText(
@@ -225,12 +284,18 @@ class PrecisionMonitorPage(QWidget):
         self.content_stack = QStackedWidget()
         self.content_stack.setObjectName("PrecisionContent")
 
-        for title, icon_path in PRECISION_TABS:
+        for index, (title, icon_path) in enumerate(PRECISION_TABS):
             inactive = load_icon(icon_path, DISPLAY["colors"]["inactive"], 28)
             active = load_icon(icon_path, DISPLAY["colors"]["accent"], 28)
             self.tab_icons.append((inactive, active))
             self.tab_bar.addTab(inactive, title)
-            self.content_stack.addWidget(self._create_placeholder(title))
+            if index == 0:
+                page = RobotPositionPage()
+            elif index == 1:
+                page = SpindleRotationPage()
+            else:
+                page = self._create_placeholder(title)
+            self.content_stack.addWidget(page)
 
         layout.addWidget(self.tab_bar)
         content = QVBoxLayout()
@@ -279,7 +344,7 @@ class PrecisionMonitorPage(QWidget):
         placeholder_icon.setPixmap(
             load_icon(
                 "common/pending.svg", DISPLAY["colors"]["placeholder"], 32
-            ).pixmap(32, 32)
+            ).pixmap(QSize(32, 32), 3.0)
         )
         placeholder_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         center_layout.addWidget(placeholder_icon, 0, Qt.AlignmentFlag.AlignHCenter)

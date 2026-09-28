@@ -127,3 +127,254 @@ QLabel#PlaceholderMessage {
     font-size: 22px;
     font-weight: 600;
 }
+
+/* 机器人定位页：面板与操作共用样式，保留深色大字。 */
+QWidget#RobotPositionPage, QScrollArea#RobotPageScroll, QWidget#RobotPageCanvas {
+    background: @background@;
+    border: none;
+}
+
+QLabel#RobotPageTitle, QLabel[monitorTitle="true"] {
+    font-size: 22px;
+    font-weight: 700;
+}
+
+QLabel#PositionConclusion, QLabel#SpindleConclusion {
+    background: #e8edf2;
+    color: @inactive@;
+    border-radius: 4px;
+    padding: 9px 12px;
+}
+
+QFrame#RobotResults, QFrame#RobotSettings, QFrame#SpindleResults, QFrame#SpindleSettings {
+    background: #ffffff;
+    border: 1px solid @border@;
+    border-radius: 6px;
+}
+
+QFrame#Region6 QPushButton, QFrame#SpindleActions QPushButton {
+    padding: 6px 3px;
+}
+
+QFrame[settingsGroup="true"] {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid @border@;
+}
+
+QLabel#RobotSettingsTitle, QLabel[monitorSettingsTitle="true"] {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+QLabel[robotSectionTitle="true"], QLabel[axisTitle="true"] {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+QFrame[axisMetric="true"] {
+    background: #f5f8fb;
+    border: none;
+    border-radius: 4px;
+}
+
+QLabel[axisValue="true"] {
+    font-size: 44px;
+    font-weight: 700;
+}
+
+QLabel[robotNote="true"] {
+    color: @inactive@;
+    font-size: 15px;
+}
+
+QPushButton[robotAction="true"] {
+    background: #ffffff;
+    border: 1px solid #b9c9d8;
+    border-radius: 4px;
+    padding: 6px 12px;
+    min-height: 22px;
+    color: @text@;
+    font-size: 16px;
+}
+
+QPushButton[robotAction="true"]:hover {
+    background: #edf3f8;
+    border-color: @action@;
+}
+
+QPushButton[robotAction="true"]:focus {
+    border-color: @action@;
+}
+
+QPushButton[robotAction="true"][primary="true"] {
+    background: @action@;
+    border-color: @action@;
+    color: #ffffff;
+}
+
+QPushButton[robotAction="true"][primary="true"]:hover {
+    background: @action_hover@;
+}
+
+QComboBox[robotInput="true"], QLineEdit[robotInput="true"] {
+    background: #ffffff;
+    border: 1px solid #b9c9d8;
+    border-radius: 4px;
+    padding: 5px 8px;
+    min-height: 22px;
+}
+
+QComboBox[robotInput="true"] {
+    min-width: 108px;
+    padding-right: 24px;
+}
+
+QComboBox[robotInput="true"]::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QComboBox[robotInput="true"]::down-arrow {
+    image: url("@resource_root@/icons/common/chevron-down.svg");
+    width: 12px;
+    height: 12px;
+}
+
+QFrame#ObservationImage {
+    background: #f2f5f8;
+    border: 1px solid @border@;
+    border-radius: 4px;
+}
+
+QTableWidget[robotTable="true"] {
+    background: #ffffff;
+    alternate-background-color: #f6f9fc;
+    border: 1px solid @border@;
+    gridline-color: @border@;
+    selection-background-color: #e8f0f8;
+    selection-color: @text@;
+}
+
+QTableWidget[robotTable="true"] QHeaderView::section {
+    background: #edf2f7;
+    color: @text@;
+    border: none;
+    border-bottom: 1px solid @border@;
+    padding: 7px 2px;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+QLabel[axis="X"] { color: @action@; font-weight: 600; }
+QLabel[axis="Y"] { color: @axis_y@; font-weight: 600; }
+QLabel[axis="Z"] { color: @axis_z@; font-weight: 600; }
+QLabel[axis="distance"] { color: @distance@; font-weight: 600; }
+
+QFrame[axisMetric="true"][axis="X"] QLabel { color: @action@; }
+QFrame[axisMetric="true"][axis="Y"] QLabel { color: @axis_y@; }
+QFrame[axisMetric="true"][axis="Z"] QLabel { color: @axis_z@; }
+QFrame[axisMetric="true"][axis="distance"] QLabel { color: @distance@; }
+
+QPlainTextEdit#RobotProcessLog, QPlainTextEdit#SpindleProcessLog {
+    background: #f8fafc;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 4px;
+    padding: 6px;
+    font-size: 14px;
+}
+
+QLabel[validationError="true"] { color: @error@; }
+
+QTabWidget#RobotDetailTabs::pane {
+    border: none;
+    border-top: 1px solid @border@;
+    background: #ffffff;
+}
+
+QTabWidget#RobotDetailTabs QTabBar::tab {
+    background: #ffffff;
+    color: @inactive@;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 7px 12px;
+    font-size: 16px;
+}
+
+QTabWidget#RobotDetailTabs QTabBar::tab:selected {
+    color: @action@;
+    border-bottom-color: @action@;
+    font-weight: 600;
+}
+
+QTabWidget#RobotDetailTabs QTabBar::tab:hover {
+    background: #f5f8fb;
+}
+
+/* 主轴页复用面板、文字与按钮样式；以下仅为该页补充。 */
+QScrollArea#SpindleRotationPage, QWidget#SpindleCanvas {
+    background: @background@;
+    border: none;
+}
+
+QLabel#SpindleDemoBadge {
+    color: @axis_z@;
+    background: #fff4e5;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+QLabel[spindleValue="true"] {
+    font-size: 34px;
+    font-weight: 700;
+}
+
+QLabel[spindleSeries="normal"] { color: @axis_y@; font-size: 14px; }
+QLabel[spindleSeries="current"] { color: @action@; font-size: 14px; }
+
+QToolButton#SpindleSignalSelect {
+    background: #ffffff;
+    border: 1px solid #b9c9d8;
+    border-radius: 4px;
+    padding: 5px 22px 5px 8px;
+    min-height: 22px;
+    color: @text@;
+}
+
+QToolButton#SpindleSignalSelect:hover {
+    border-color: @action@;
+}
+
+QToolButton#SpindleSignalSelect::menu-indicator {
+    image: url("@resource_root@/icons/common/chevron-down.svg");
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    width: 12px;
+    height: 12px;
+    right: 5px;
+}
+
+QMenu[spindleMenu="true"] {
+    background: #ffffff;
+    border: 1px solid @border@;
+    padding: 4px;
+}
+
+QMenu[spindleMenu="true"]::item {
+    padding: 7px 28px;
+    color: @text@;
+}
+
+QMenu[spindleMenu="true"]::item:selected {
+    background: #edf3f8;
+}
+
+QCheckBox#SpindleNormalReview { font-size: 15px; }
+
+QPushButton[robotAction="true"][primary="true"]:disabled {
+    background: #edf2f7;
+    border-color: @border@;
+    color: @placeholder@;
+}
