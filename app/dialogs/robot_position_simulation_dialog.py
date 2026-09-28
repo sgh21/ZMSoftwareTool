@@ -81,10 +81,12 @@ class RobotPositionSimulationDialog(QDialog):
         self.report_path.setProperty("robotNote", True)
         layout.addWidget(self.report_path)
         actions = QHBoxLayout()
+        self.calibration_button = page._button("相机与手眼标定", self._open_calibration)
         self.legacy_button = page._button("旧数据手眼标定", self._open_legacy)
         self.run_button = page._button("开始仿真核验", self._run, True)
         self.run_button.setEnabled(False)
         self.close_button = page._button("关闭", self.reject)
+        actions.addWidget(self.calibration_button)
         actions.addWidget(self.legacy_button)
         actions.addStretch()
         actions.addWidget(self.run_button)
@@ -171,7 +173,7 @@ class RobotPositionSimulationDialog(QDialog):
 
     def _set_running(self, running):
         for widget in (self.data_root, self.browse_button, self.baseline_batch,
-                       self.current_batch, self.legacy_button, self.close_button):
+                       self.current_batch, self.calibration_button, self.legacy_button, self.close_button):
             widget.setEnabled(not running)
         self.run_button.setEnabled(False)
         if not running:
@@ -242,6 +244,16 @@ class RobotPositionSimulationDialog(QDialog):
         self.progress_note.setText(f"核验失败：{message}")
         self.summary.setText("核验未完成，未生成完整对照结果。")
         self.report_path.setText("报告位置：未生成完整报告")
+
+    def _open_calibration(self):
+        from app.dialogs.robot_camera_calibration_dialog import RobotCameraCalibrationDialog
+
+        dialog = RobotCameraCalibrationDialog(self.page)
+        if self.dataset is not None:
+            dialog.data_root.setText(str(self.dataset))
+            dialog._load_dataset()
+        fit_dialog(dialog, 920, 720)
+        dialog.exec()
 
     def _open_legacy(self):
         from app.dialogs.robot_position_debug_dialog import RobotPositionDebugDialog
