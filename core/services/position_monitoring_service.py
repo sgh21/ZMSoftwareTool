@@ -381,6 +381,7 @@ class PositionMonitoringService:
         result.update({
             "id": _stamp(), "created_at": datetime.now(timezone.utc).isoformat(),
             "baseline_id": self.baseline["id"], "parameter_version": version,
+            "baseline_label": self.baseline["label"],
             "batch_id": current["batch_id"], "batch_label": current["label"],
             "status": status, "alarms": alarms, "thresholds": deepcopy(thresholds),
             "orientation_source": baseline_batch.get("orientation_source", "unspecified"),
