@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
-    QTabBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -157,18 +156,24 @@ class RobotPositionPage(QWidget):
         layout.setSpacing(12)
         title = QLabel("机器人定位精度")
         title.setObjectName("RobotPageTitle")
-        layout.addWidget(title)
-        self.result_metric = QTabBar()
-        self.result_metric.setObjectName("RobotMetricTabs")
+        heading = QHBoxLayout()
+        heading.addWidget(title)
+        heading.addStretch()
+        self.result_metric = QComboBox()
+        self.result_metric.setObjectName("RobotMetricSelect")
+        self.result_metric.setProperty("robotInput", True)
         self.result_metric.setAccessibleName("评价指标")
-        self.result_metric.setExpanding(True)
-        self.result_metric.setElideMode(Qt.TextElideMode.ElideNone)
+        self.result_metric.setToolTip("切换整个结果区的评价指标")
+        self.result_metric.setMinimumWidth(240)
+        self.result_metric.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         for key, label in METRIC_LABELS.items():
-            index = self.result_metric.addTab(label)
-            self.result_metric.setTabData(index, key)
-            self.result_metric.setTabToolTip(index, METRIC_HINTS[key])
+            self.result_metric.addItem(label, key)
+            self.result_metric.setItemData(
+                self.result_metric.count() - 1, METRIC_HINTS[key], Qt.ItemDataRole.ToolTipRole,
+            )
         self.result_metric.setCurrentIndex(2)
-        layout.addWidget(self.result_metric)
+        heading.addWidget(self.result_metric)
+        layout.addLayout(heading)
         summary = QFrame()
         summary.setObjectName("Region1")
         body = QVBoxLayout(summary)
@@ -230,11 +235,11 @@ class RobotPositionPage(QWidget):
         self.detail_tabs.addTab(self._observation_view(), "观测图像")
         self.detail_tabs.addTab(self._alarm_view(), "报警与维护")
         layout.addWidget(self.detail_tabs, 1)
-        self.result_metric.currentChanged.connect(self._render_result)
+        self.result_metric.currentIndexChanged.connect(self._render_result)
         return panel
 
     def _metric_mode(self):
-        return self.result_metric.tabData(self.result_metric.currentIndex())
+        return self.result_metric.currentData()
 
     def _metric_name(self):
         return METRIC_LABELS[self._metric_mode()]

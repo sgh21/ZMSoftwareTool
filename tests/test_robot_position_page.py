@@ -6,7 +6,10 @@ from copy import deepcopy
 import numpy as np
 import pytest
 from PyQt6.QtCore import QEventLoop, QPoint, QRect, QThread, QTimer
-from PyQt6.QtWidgets import QApplication, QBoxLayout, QLineEdit, QPushButton, QTableWidget, QTabWidget
+from PyQt6.QtWidgets import (
+    QApplication, QBoxLayout, QLineEdit, QPushButton, QStyle, QStyleOptionComboBox,
+    QTableWidget, QTabWidget,
+)
 
 from app.pages.robot_position_page import RobotPositionPage
 from app.dialogs.robot_position_debug_dialog import RobotPositionDebugDialog
@@ -79,7 +82,7 @@ def test_metric_switch_and_history_use_matching_reference(application):
     service.history = [data, {**data, "baseline_id": "other"}, {**data, "parameter_version": "other"}]
     page = RobotPositionPage(service)
     page._evaluation_completed(data)
-    assert [page.result_metric.tabData(index) for index in range(page.result_metric.count())] == [
+    assert [page.result_metric.itemData(index) for index in range(page.result_metric.count())] == [
         "absolute_change", "repeatability_change", "repeatability",
     ]
     assert page.result_metric.currentIndex() == 2
@@ -374,9 +377,15 @@ def test_narrow_page_stacks_panels_without_horizontal_clipping(application):
         assert page.axis_values["X"].text() == "1234.5678"
         assert page.scroll_area.horizontalScrollBar().maximum() == 0
         assert page.scroll_area.verticalScrollBar().maximum() > 0
+        combo_option = QStyleOptionComboBox()
+        page.result_metric.initStyleOption(combo_option)
+        text_bounds = page.result_metric.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, combo_option,
+            QStyle.SubControl.SC_ComboBoxEditField, page.result_metric,
+        )
         for index in range(page.result_metric.count()):
-            assert page.result_metric.tabRect(index).width() >= page.result_metric.fontMetrics().horizontalAdvance(
-                page.result_metric.tabText(index)
+            assert text_bounds.width() >= page.result_metric.fontMetrics().horizontalAdvance(
+                page.result_metric.itemText(index)
             )
         evaluate_button = next(button for button in page.mutation_buttons if button.text() == "评估精度")
         page.scroll_area.ensureWidgetVisible(evaluate_button)
