@@ -2,11 +2,11 @@
 
 本地桌面软件的重新设计工程。Python 负责核心算法和业务逻辑，PyQt 负责界面展示与交互。
 
-当前已搭建 PyQt6 桌面框架：左侧仅保留“精度监控”，首页包含“机器人末端定位精度”“主轴回转精度”“主轴轴向进给精度”三个选项卡。选中时图标和底部指示条变为绿色。机器人页和主轴回转页已填充布局预览，轴向进给页仍为“待开发”，底层逻辑尚未接入。
+当前为 PyQt6 桌面软件：左侧仅保留“精度监控”，首页包含“机器人末端定位精度”“主轴回转精度”“主轴轴向进给精度”三个选项卡。机器人页已接入参数设置、观测导入、基准管理、精度计算和历史保存；主轴回转页保留布局预览，轴向进给页仍为“待开发”。
 
 机器人页采用“左侧结果、右侧设置”：左侧展示 XYZ＋距离四列指标、可切换指标的历史趋势和加工点位预测，结果区延伸至页面底部；“历史记录”与“展开明细”在左侧底部并排。右侧为机器人手眼参数、基准、阈值、加工点位设置和运行日志。采集靶标、导入观测、清空日志、评估精度在右侧日志下方同排，不另占整页底栏。主页面业务操作按钮统一蓝底白字，设置类按钮保留白底。指标与曲线使用对应颜色，图例位于下拉框左侧。区域 1—8 仅为沟通约定，不在界面显示编号。
 
-视觉相对监控使用相机到被评估末端（TCP）的手眼参数，不依赖完整机器人运动学模型。基准与复测按相同程序、固定位姿拍摄靶标；页面只显示 XYZ 与距离，不展示姿态指标。XYZ 默认采用机器人基坐标系，阈值弹窗仅有 X、Y、Z 和距离四项，无坐标系选择。转换到基坐标还需每个测量点的初始末端朝向，后续由基准关联数据提供。公式、前提和待确认接口见 [页面设计](docs/robot_position_page.md)。
+视觉相对监控使用相机到被评估末端（TCP）的手眼参数，不依赖完整机器人运动学模型。基准与复测按相同程序、固定位姿拍摄靶标；XYZ 使用机器人基座系。缺少参考朝向 Q 时基座三轴留空；缺少初始误差向量时绝对 AP 留空；同方向重复到达少于两次时 RP 留空。支持定位漂移、重复性及其变化、绝对误差及其退化五类结果，阈值仅用于逐组定位漂移。输入格式及操作见 [机器人定位监控使用说明](docs/robot_position_monitoring.md)，数学定义见 [AGENTS.md](AGENTS.md)。
 
 主轴回转页沿用左侧结果、右侧设置布局：左侧先显示解析评价、网络评分、温度、电流及综合结论，下面为采集信号、振动频谱、频带能量和网络分布四幅图；右侧放采集方案、人工确认正常样本、训练入口、阈值和日志。阈值仅有网络评分、综合评价两类，解析评价不设独立阈值。采集、导入、清空日志与评估在右侧底部同排。按用户要求绘制了明确标注的示意曲线，便于审阅排版；真实结果仍为空，不执行采集、FFT、能量计算或网络训练。详见 [主轴回转页设计](docs/spindle_rotation_page.md)。
 
@@ -33,7 +33,7 @@ SoftwareTools_PyQt/
 ├── AGENTS.md                # 代码代理工作约定
 ├── .gitignore               # 缓存、环境和运行数据忽略规则
 ├── main.py                  # 桌面程序入口
-├── requirements.txt         # PyQt6 界面依赖
+├── requirements.txt         # PyQt6、NumPy、OpenCV、PyYAML
 ├── environment.yml          # Conda 环境定义
 ├── core/                    # Python 核心逻辑，可脱离界面使用
 │   ├── algorithms/          # 算法、计算和数据处理
@@ -74,9 +74,9 @@ SoftwareTools_PyQt/
 - **界面层**：负责展示、用户输入和任务状态；耗时计算接入后台任务，避免阻塞界面。
 - **配置与资源**：业务参数和路径放在 `config/`，图标、样式和 Designer 文件放在 `resources/`。
 
-目前实际代码只有五个实现文件：`main.py`、`app/main_window.py`、`app/resources.py`、`app/pages/robot_position_page.py` 和 `app/pages/spindle_rotation_page.py`。两个业务页各放一个文件，各页的小控件、绘图及弹窗集中在对应文件内，未增加绘图库或其他依赖。
+机器人定位的纯算法位于 `core/algorithms/position_monitoring.py` 和 `board_pose.py`；服务入口为 `core/services/position_monitoring_service.py`；页面调用服务，PnP 与评估在后台执行。独立调试窗口位于 `app/dialogs/robot_position_debug_dialog.py`，旧数据适配与命令入口放在 `experiments/`。
 
-目前界面没有调用核心层或连接设备，主轴示意图不参与评估或保存到历史。机器人区域 7 的“点位管理”支持增删、编辑编号与理论坐标、上下移及顺序编号，点击“应用”更新区域 3，仅保留在当前会话；取消会丢弃本次编辑。预测指标始终留空，阈值设置仍为不保存的预览。区域 8 显示操作与输入错误，采集、导入和评估按钮会说明尚未接入，未执行实际任务。小窗口可纵向滚动。开发以简单直接、便于维护为原则，具体约定见 `AGENTS.md`。
+机器人参数版本、基准、阈值、加工点位配置和评估历史保存在 `storage/position_monitoring/`。点位预测模型、相机在线采集及设备运动接口尚未接入，预测指标保持空白；可以导入包含图像路径或已解算位姿的观测清单。主轴示意图不参与计算或历史保存。界面不控制机器人运动。
 
 ## 界面与图标
 
@@ -108,12 +108,12 @@ Windows 系统 DPI 继续使用 [Qt 6 原生支持](https://doc.qt.io/qt-6/highd
 
 ## 本地目录与分支
 
-本地开发目录为 `D:\WorkSpace\ZMProject\SoftwareTools_PyQt`，对应同一 Git 仓库的独立工作树。开发分支为 `develop`，远程为 `ZMS`，对应 `ZMS/develop`。
+本地开发目录为 `D:\WorkSpace\ZMProject\SoftwareTools_PyQt`，对应同一 Git 仓库的独立工作树。机器人定位功能分支为 `codex/robot-position-monitoring`，远程为 `ZMS`；基础框架保留在 `develop`。
 
 ```powershell
 cd D:\WorkSpace\ZMProject\SoftwareTools_PyQt
 git status
-git push ZMS develop
+git push ZMS codex/robot-position-monitoring
 ```
 
 `develop` 从空白建立，以当前骨架作为新历史的首次提交。原工程继续保存在旁边 `SoftwareTools` 工作树的 `master` 中，后续需要复用的功能再按任务迁入。

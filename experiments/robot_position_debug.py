@@ -150,7 +150,6 @@ def run_debug_pipeline(paths, output_dir, method="PARK"):
     service.save_parameters({
         "hand_eye": calibration["hand_eye"],
         "calibration_source": calibration["path"],
-        "calibration_report": calibration,
     })
     service.load_observations(paths["baseline_manifest"])
     service.create_baseline("旧数据 CLI 调试基准 · 采样关系待确认")

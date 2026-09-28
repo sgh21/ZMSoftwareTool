@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-本目录使用 Python 开发核心算法，使用 PyQt6 实现桌面界面，保持本地单进程应用形态。已完成精度监控界面框架，程序入口为 `main.py`。机器人定位页和主轴回转页正在进行布局预览，尚未接入手眼参数读取、采集、标定、信号处理、网络训练或评估算法。
+本目录使用 Python 开发核心算法，使用 PyQt6 实现桌面界面，保持本地单进程应用形态，程序入口为 `main.py`。机器人定位页已接入参数读取、观测导入、基准管理、PnP、手眼标定调试、指标计算和历史保存；在线采集及未测点预测尚未接入。主轴回转页仍为布局预览，未接入信号处理或网络训练。
 
 使用已有 Conda 环境 `ZMSoftware`（Python 3.12），界面依赖 PyQt6 6.11.0。运行方式：
 
@@ -25,9 +25,9 @@ python main.py
 - `data/`：原始数据、处理结果和报告；`storage/`：模型文件和持久化记录。
 - `docs/`：需求和设计文档；`tests/`：正式测试；`experiments/`：实验与临时调试。
 
-完整目录说明见 `README.md`。左侧仅保留“精度监控”；主页有机器人末端定位精度、主轴回转精度、主轴轴向进给精度三个选项卡。选中时图标与底部指示条变绿。机器人页和主轴回转页展示布局预览，轴向进给页仍显示“待开发”。指标口径和算法接口仍待确认。
+完整目录说明见 `README.md`。左侧仅保留“精度监控”；主页有机器人末端定位精度、主轴回转精度、主轴轴向进给精度三个选项卡。选中时图标与底部指示条变绿。机器人指标与数据接口见下文及 `docs/robot_position_monitoring.md`，轴向进给页仍显示“待开发”。
 
-当前实际实现集中在五个文件：`main.py` 负责启动，`app/main_window.py` 负责主窗口和选项卡，`app/resources.py` 负责配置、样式和图标读取，`app/pages/robot_position_page.py` 和 `app/pages/spindle_rotation_page.py` 各负责一个业务页及其小弹窗。`app/__init__.py` 仅作为包标记。不再为当前页面拆出控件、弹窗、服务等额外文件。
+`main.py` 负责启动，`app/main_window.py` 负责主窗口和选项卡，`app/resources.py` 负责配置、样式和图标读取，两个业务页各保留一个页面文件。机器人定位按用户新任务接入 `core/algorithms/position_monitoring.py`、`board_pose.py` 和 `core/services/position_monitoring_service.py`。独立调试窗口为 `app/dialogs/robot_position_debug_dialog.py`，旧数据适配为 `experiments/robot_position_debug.py`，不在核心算法中写调试数据路径。
 
 字体和配色集中在 `config/display.json`，字号和样式在 `resources/styles/light.qss`。参考用户提供的上位机截图，采用微软雅黑、较大的粗体标题和深色文字，未选中标签也应清晰可读。侧栏使用深色图标和普通字重，无外边框或圆角；仅选中时显示浅灰填充与左侧短竖线。绿色仅用于精度选项卡的选中图标与底部指示条。
 
@@ -124,6 +124,15 @@ $$
 6. 加工点预测仍需单独明确模型并验证；不把未测点预测当实测，不因拥有手眼矩阵就生成虚构预测。
 7. 本任务按界面原貌快照、指标文档、核心算法、服务层、UI与调试分别提交和推送，以便阶段回溯。原始数据、批量结果不提交。试验结果仍按工作约定在用户确认后记录。
 
+### 当前软件入口与保存位置
+
+- 页面通过 `PositionMonitoringService` 导入 JSON/YAML 参数或观测清单；每条观测明确 `point_id/direction_id/sample_id`，提供图像路径或 `vision_pose`。标准输入见 `docs/robot_position_monitoring.md`。
+- 默认参数模板为 `config/robot_position.json`，相机内参和手眼留空。`storage/position_monitoring/` 保存参数版本、基准、设置、标定报告、评估历史及实际计算观测快照。
+- 修改参数后重新导入观测；选择旧基准会恢复其参数。评估要求程序、靶标、测点/方向和参数版本匹配。阈值判定逐组执行，仅针对定位漂移，不使用整体均值掩盖单点超限。
+- 定位页右栏提供独立调试入口；命令行 `python experiments/20260928_robot_position/run_debug.py` 默认只生成旧数据调试清单，加 `--run` 可在输出目录的隔离会话中完成手眼、初始基准和复测。手眼方法支持 PARK/TSAI，报告及输入快照保留，不自动等同为测量能力认证。
+- 常用窗口保留左右 65:35；机器人页可用宽度小于 1000 时上下排列，以纵向滚动访问设置。完整编号放入悬停提示，指标数字保留并适应卡片宽度。
+- 正式测试位于 `tests/test_position_monitoring.py`、`test_board_pose.py`、`test_position_monitoring_service.py`、`test_robot_position_page.py` 和 `test_robot_position_debug.py`。这部分是实现说明，试验结果经用户确认后另行记录。
+
 ## 主轴回转监控约定（2026-09-24 用户要求）
 
 1. 每次使用前，按指定转速采集振动、温度和电流。主轴运动由原设备软件控制，本模块负责采集入口、分析、评价和预警。
@@ -162,7 +171,7 @@ $$
 
 ## Git
 
-本目录是共享仓库的独立工作树，开发分支为 `develop`，远程为 `ZMS`。该分支从空白建立，首次提交是新历史的起点。所有新工程操作在本目录执行，不修改旁边 `SoftwareTools` 工作树的 `master` 或其未提交文件。
+本目录是共享仓库的独立工作树，基础分支为 `develop`，本轮功能分支为 `codex/robot-position-monitoring`，远程为 `ZMS`。基础分支从空白建立，首次提交是新历史的起点。所有新工程操作在本目录执行，不修改旁边 `SoftwareTools` 工作树的 `master` 或其未提交文件。
 
 2026-09-24，按用户要求将业务页填充前的界面框架提交并推送到 `ZMS/develop`，提交为 `3d25535`，标签名称按用户原文为 `础框架`。后续机器人页面不纳入该标签。
 
