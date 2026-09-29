@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -75,13 +76,15 @@ class ServiceTask(QRunnable):
 class RobotPositionPage(QWidget):
     def __init__(self, service=None) -> None:
         super().__init__()
-        self.service = service or PositionMonitoringService()
+        self.service = service or PositionMonitoringService(defer_restore=True)
         self.processing_points = self.service.settings.get("processing_points", [])
         self.result = None
         self.history_batches = None
+        self.history_comparisons = []
+        self.saved_history = []
+        self.baseline_entries = []
         self.task = None
         self._restore_log_scroll_pending = True
-        self.mutation_buttons = []
         self.setObjectName("RobotPositionPage")
         page_layout = QVBoxLayout(self)
         page_layout.setContentsMargins(0, 0, 0, 0)
@@ -107,12 +110,27 @@ class RobotPositionPage(QWidget):
         page_layout.addWidget(self.scroll_area, 1)
         self._refresh_settings()
         self._fill_table(self.point_table, self._prediction_rows())
-        for entry in self.service.list_logs():
+        self._refresh_latest_result()
+
+        def restore(progress):
+            if service is None:
+                self.service.restore(progress)
+            return self.service.list_logs()
+
+        self._run_task("恢复定位记录", restore, self._restored, refresh=True, log=False)
+
+    def _restored(self, logs):
+        for entry in logs:
             self._display_log(entry)
-        if self.service.latest_result is not None:
-            self._refresh_latest_result()
+        self.processing_points = self.service.settings.get("processing_points", [])
+        self._fill_table(self.point_table, self._prediction_rows())
+        self.show_before_baseline.blockSignals(True)
+        self.show_before_baseline.setChecked(self.service.settings.get("show_before_baseline", False))
+        self.show_before_baseline.blockSignals(False)
+        self._refresh_settings()
+        self._refresh_latest_result()
+        if self.result is not None:
             batch = self.service.latest_batch or {}
-            self.task_progress.setValue(100)
             self.task_progress_note.setText(
                 f"已恢复 {self.result['batch_id']} 评估 · {len(batch.get('samples', []))} 个观测"
             )
@@ -122,11 +140,11 @@ class RobotPositionPage(QWidget):
                     f"已恢复 {current['batch_id']} 观测；主卡显示 {self.result['batch_id']} 最新评估"
                 )
         else:
-            self._render_result()
-            self._refresh_observations()
             if self.service.current_batch is not None:
-                self.task_progress.setValue(100)
                 self.task_progress_note.setText(f"已恢复 {self.service.current_batch['batch_id']} 观测，待评估")
+            else:
+                self.task_progress_note.setText("记录已读取，等待导入观测")
+        self._restore_log_position()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -161,11 +179,6 @@ class RobotPositionPage(QWidget):
             self.columns.setDirection(direction)
             self.columns.setStretch(0, 0 if stacked else 13)
             self.columns.setStretch(1, 0 if stacked else 7)
-
-    def _mutation_button(self, text, callback, primary=False):
-        button = self._button(text, callback, primary)
-        self.mutation_buttons.append(button)
-        return button
 
     def append_log(self, message: str, level: str = "INFO") -> None:
         self._display_log(self.service.append_log(message, level))
@@ -368,8 +381,17 @@ class RobotPositionPage(QWidget):
         self.append_log(f"趋势指标已切换为{self.trend_metric.currentText()}。")
 
     def _toggle_baseline_history(self, checked):
-        self.service.save_settings({"show_before_baseline": checked})
-        self._refresh_history()
+        previous = self.service.settings.get("show_before_baseline", False)
+
+        def failed(_message):
+            self.show_before_baseline.blockSignals(True)
+            self.show_before_baseline.setChecked(previous)
+            self.show_before_baseline.blockSignals(False)
+
+        self._run_task(
+            "更新历史显示", lambda progress: self.service.save_settings({"show_before_baseline": checked}, progress),
+            lambda _result: self._refresh_history(), failed=failed, log=False,
+        )
 
     def _point_results(self) -> QWidget:
         page = QWidget()
@@ -453,34 +475,34 @@ class RobotPositionPage(QWidget):
         heading = QHBoxLayout()
         heading.addWidget(title)
         heading.addStretch()
-        heading.addWidget(self._mutation_button("调试", self._show_debug))
+        heading.addWidget(self._button("调试", self._show_debug))
         body.addLayout(heading)
 
         self.status_lights = {}
         hand_eye = self._settings_section(body, 4, "机器人手眼参数", "parameter")
         actions = QHBoxLayout()
         actions.addWidget(
-            self._mutation_button("加载参数", self._load_parameters)
+            self._button("加载参数", self._load_parameters)
         )
         actions.addWidget(
-            self._mutation_button("参数设置", self._show_parameters)
+            self._button("参数设置", self._show_parameters)
         )
         hand_eye.addLayout(actions)
 
         baseline = self._settings_section(body, 5, "测量基准", "baseline")
         actions = QHBoxLayout()
-        create_button = self._mutation_button("建立基准", self._create_baseline)
+        create_button = self._button("建立基准", self._create_baseline)
         create_button.setToolTip("使用当前载入的观测建立基准")
         actions.addWidget(create_button)
         actions.addWidget(
-            self._mutation_button("选择基准", self._select_baseline)
+            self._button("选择基准", self._select_baseline)
         )
         baseline.addLayout(actions)
 
         conditions = self._settings_section(body, 7, "判定与点位设置", "conditions")
         actions = QHBoxLayout()
-        actions.addWidget(self._mutation_button("阈值设置", self._show_settings))
-        actions.addWidget(self._mutation_button("点位管理", self._show_point_editor))
+        actions.addWidget(self._button("阈值设置", self._show_settings))
+        actions.addWidget(self._button("点位管理", self._show_point_editor))
         conditions.addLayout(actions)
 
         log_area = QFrame()
@@ -526,7 +548,7 @@ class RobotPositionPage(QWidget):
         )
         acquisition.setToolTip(acquisition_hint)
         actions.addWidget(acquisition, 1)
-        import_button = self._mutation_button("导入观测", self._import_observations, True)
+        import_button = self._button("导入观测", self._import_observations, True)
         import_button.clicked.disconnect()
         menu = QMenu(import_button)
         menu.addAction("选择采集图片", self._import_observations)
@@ -536,7 +558,7 @@ class RobotPositionPage(QWidget):
         actions.addWidget(import_button, 1)
         actions.addWidget(self._button("清空日志", self.process_log.clear, True), 1)
         actions.addWidget(
-            self._mutation_button("评估精度", self._evaluate, True),
+            self._button("评估精度", self._evaluate, True),
             1,
         )
         return bar
@@ -625,7 +647,9 @@ class RobotPositionPage(QWidget):
         )
 
     def _show_history(self) -> None:
-        records = self.service.list_history()
+        if self.task is not None:
+            return
+        records = self.saved_history
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{self._metric_name()} · 检测历史")
         layout = QVBoxLayout(dialog)
@@ -638,13 +662,15 @@ class RobotPositionPage(QWidget):
         layout.addWidget(table)
 
         def select(row, _column):
-            try:
-                self.history_batches = self.service.load_evaluation_samples(records[row])
-            except (OSError, ValueError, KeyError) as error:
-                self.history_batches = {"current": None, "baseline": None}
-                self.append_log(f"历史图像快照未能载入：{error}", "WARN")
-            self._refresh_observations()
-            self._open_result_details(records[row], historical=True)
+            record = records[row]
+            dialog.accept()
+
+            def loaded(batches):
+                self.history_batches = batches
+                self._refresh_observations()
+                QTimer.singleShot(0, lambda: self._open_result_details(record, historical=True))
+
+            self._run_task("载入历史图片", lambda _progress: self.service.load_evaluation_samples(record), loaded)
 
         table.cellDoubleClicked.connect(select)
         layout.addWidget(self._button("关闭", dialog.reject))
@@ -652,14 +678,14 @@ class RobotPositionPage(QWidget):
         dialog.exec()
 
     def _refresh_latest_result(self):
-        self.result = self.service.compare_latest()
+        self.result = self.service.latest_result
         self.history_batches = None
         self._render_result()
         self._refresh_observations()
 
     def _show_alarms(self) -> None:
         rows = []
-        for result in self.service.list_history():
+        for result in self.saved_history:
             for alarm in assess_metric(result, self._metric_mode())["alarms"]:
                 rows.append([result["created_at"], result["batch_id"],
                              f"{alarm['point_id']} / {alarm['direction_id']} / {alarm['axis']}",
@@ -720,14 +746,13 @@ class RobotPositionPage(QWidget):
                 if any(value is not None and (not isfinite(value) or value < 0)
                        for mode_values in values.values() for value in mode_values.values()):
                     raise ValueError("阈值必须是有限非负数。")
-                self.service.save_settings({self._threshold_key(): values})
             except (ValueError, OSError) as error:
                 error_label.setText(str(error))
                 return
-            self._refresh_settings()
-            self._refresh_latest_result()
-            self.append_log("阈值已保存并应用到当前视图；历史原记录的阈值保持不变。")
+            key = self._threshold_key()
             dialog.accept()
+            self._run_task("更新阈值", lambda progress: self.service.save_settings({key: values}, progress=progress),
+                           self._settings_saved, refresh=True)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -736,6 +761,11 @@ class RobotPositionPage(QWidget):
         layout.addLayout(actions)
         fit_dialog(dialog, 760, 470)
         dialog.exec()
+
+    def _settings_saved(self, _result):
+        self._refresh_settings()
+        self._refresh_latest_result()
+        self.append_log("阈值已保存并应用到当前视图；历史原记录的阈值保持不变。")
 
     @staticmethod
     def _number(value):
@@ -746,43 +776,89 @@ class RobotPositionPage(QWidget):
         parsed = QDateTime.fromString(str(value), Qt.DateFormat.ISODateWithMs)
         return parsed.toLocalTime().toString("yyyy-MM-dd HH:mm:ss") if parsed.isValid() else "—"
 
-    def _run_task(self, title, operation, completed):
+    def _prepare_view(self, progress):
+        history = self.service.history_comparisons(
+            include_before=True,
+            progress=lambda percent, message: progress(-1 if percent < 0 else 65 + round(percent * 0.25), message),
+        )
+        baselines = self.service.list_baselines(
+            progress=lambda percent, message: progress(-1 if percent < 0 else 90 + round(percent * 0.05), message),
+        )
+        progress(-1, "正在读取历史原记录")
+        records = self.service.list_history()
+        return {"history": history, "baselines": baselines, "records": records}
+
+    def _run_task(self, title, operation, completed, *, refresh=False, failed=None, log=True):
         if self.task is not None:
-            self.append_log("当前任务仍在执行，请等待完成。", "WARN")
             return
-        self.append_log(f"{title}开始。")
-        self.task_progress.setValue(0)
+        if log:
+            self.append_log(f"{title}开始。")
+        self.task_progress.setRange(0, 0)
         self.task_progress_note.setText(f"{title}：准备处理")
-        for button in self.mutation_buttons:
-            button.setEnabled(False)
+        controls = self.findChildren(QPushButton) + self.findChildren(QComboBox) + [self.show_before_baseline]
+        self._busy_controls = [(control, control.isEnabled()) for control in controls]
+        for control, _enabled in self._busy_controls:
+            control.setEnabled(False)
         self._task_completed_callback = completed
-        self.task = ServiceTask(operation)
+        self._task_failed_callback = failed
+
+        def work(progress):
+            scale = 0.6 if refresh else 0.99
+            value = operation(lambda percent, message: progress(
+                -1 if percent < 0 else round(percent * scale),
+                "正在准备最新结果与历史曲线" if refresh and percent >= 100 else message,
+            ))
+            view = self._prepare_view(progress) if refresh and not (isinstance(value, dict) and value.get("duplicate")) else None
+            return {"value": value, "view": view}
+
+        self.task = ServiceTask(work)
         self.task.signals.completed.connect(self._task_completed)
         self.task.signals.failed.connect(self._task_failed)
         self.task.signals.progress.connect(self._task_progress)
         QThreadPool.globalInstance().start(self.task)
 
     def _task_progress(self, percent, message):
-        self.task_progress.setValue(percent)
+        if percent < 0:
+            self.task_progress.setRange(0, 0)
+        else:
+            self.task_progress.setRange(0, 100)
+            self.task_progress.setValue(min(percent, 99))
         self.task_progress_note.setText(message)
 
-    def _task_completed(self, result):
+    def _task_completed(self, payload):
         callback = self._task_completed_callback
+        self._task_progress(99, "正在更新界面")
+        if payload["view"] is not None:
+            self.history_comparisons = payload["view"]["history"]
+            self.saved_history = payload["view"]["records"]
+            self.baseline_entries = payload["view"]["baselines"]
+        try:
+            callback(payload["value"])
+        except Exception as error:
+            self._task_failed(str(error))
+            return
+        self.task_progress.setRange(0, 100)
         self.task_progress.setValue(100)
-        self.task_progress_note.setText("处理完成")
+        if self.task_progress_note.text() == "正在更新界面":
+            self.task_progress_note.setText("处理完成")
         self._finish_task()
-        callback(result)
 
     def _task_failed(self, message):
+        failed = self._task_failed_callback
         self._finish_task()
+        self.task_progress.setRange(0, 100)
+        self.task_progress.setValue(0)
         self.task_progress_note.setText(f"处理失败：{message}")
         self.append_log(message, "ERROR")
+        if failed:
+            failed(message)
 
     def _finish_task(self):
         self.task = None
         self._task_completed_callback = None
-        for button in self.mutation_buttons:
-            button.setEnabled(True)
+        self._task_failed_callback = None
+        for control, enabled in self._busy_controls:
+            control.setEnabled(enabled)
 
     def _refresh_settings(self):
         parameters = self.service.parameters
@@ -834,18 +910,17 @@ class RobotPositionPage(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "加载视觉与手眼参数", "", "参数文件 (*.json *.yaml *.yml)")
         if not path:
             return
-        try:
-            previous_version = self.service.parameters["version"]
-            self.service.load_parameters(path)
-        except (ValueError, TypeError, OSError, KeyError) as error:
-            self.append_log(f"参数加载失败：{error}", "ERROR")
-            return
-        if previous_version != self.service.parameters["version"]:
+        previous_version = self.service.parameters["version"]
+
+        def loaded(_result):
             self._refresh_settings()
             self._refresh_latest_result()
-            self.append_log(f"参数已加载：{Path(path).name}；后续图像按新参数处理，最新已评估观测保留其测量参数。")
-        else:
-            self.append_log("参数内容未变化，保留当前观测与基准。")
+            if previous_version != self.service.parameters["version"]:
+                self.append_log(f"参数已加载：{Path(path).name}；后续图像按新参数处理，最新已评估观测保留其测量参数。")
+            else:
+                self.append_log("参数内容未变化，保留当前观测与基准。")
+
+        self._run_task("加载参数", lambda _progress: self.service.load_parameters(path), loaded, refresh=True)
 
     def _show_parameters(self):
         from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog
@@ -855,8 +930,8 @@ class RobotPositionPage(QWidget):
         fit_dialog(dialog, 980, 720)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             if previous_version != self.service.parameters["version"]:
-                self._refresh_settings()
-                self._refresh_latest_result()
+                self._run_task("更新参数视图", lambda _progress: None,
+                               lambda _result: (self._refresh_settings(), self._refresh_latest_result()), refresh=True)
                 self.append_log("默认参数已更新，上一版已备份；最新已评估观测保留其测量参数。")
             else:
                 self.append_log("参数未修改，保留当前观测与基准。")
@@ -896,16 +971,34 @@ class RobotPositionPage(QWidget):
             self.append_log(warning, "WARN")
 
     def _create_baseline(self):
-        self._run_task("建立基准", lambda _progress: self.service.create_baseline(),
-                       self._baseline_created)
+        self._run_task("建立基准", lambda progress: self.service.create_baseline(progress=progress),
+                       self._baseline_created, refresh=True)
 
     def _baseline_created(self, baseline):
+        if baseline.get("duplicate"):
+            existing = baseline["existing_baseline"]
+            self.append_log(f"相同观测已建立基准：{existing.get('label') or existing['id']}（{existing['id']}）；未新建或切换基准。")
+            QTimer.singleShot(0, lambda: self._show_duplicate_baseline(existing))
+            return
         self._refresh_settings()
         self._refresh_latest_result()
         self.append_log(f"基准已建立：{baseline['id']}。请导入复测观测。")
 
-    def _select_baseline(self):
-        entries = self.service.list_baselines()
+    def _show_duplicate_baseline(self, existing):
+        message = QMessageBox(self)
+        message.setWindowTitle("基准已存在")
+        message.setIcon(QMessageBox.Icon.Information)
+        message.setText(f"已有相同观测的基准：{existing.get('label') or existing['id']}\n编号：{existing['id']}\n未创建新基准，当前基准保持不变。")
+        choose = message.addButton("选择已有基准", QMessageBox.ButtonRole.ActionRole)
+        message.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
+        message.exec()
+        if message.clickedButton() == choose:
+            self._select_baseline(existing["path"])
+
+    def _select_baseline(self, preferred_path=None):
+        if self.task is not None:
+            return
+        entries = self.baseline_entries
         if not entries:
             self.append_log("尚无保存的基准，请先导入初始观测并建立基准。", "WARN")
             return
@@ -917,23 +1010,15 @@ class RobotPositionPage(QWidget):
         choice.setProperty("robotInput", True)
         for entry in entries:
             choice.addItem(f"{entry['created_at']} · {entry.get('label') or entry['id']}", entry["path"])
-        current_index = choice.findData((self.service.baseline or {}).get("path"))
+        current_index = choice.findData(preferred_path or (self.service.baseline or {}).get("path"))
         if current_index >= 0:
             choice.setCurrentIndex(current_index)
         layout.addWidget(choice)
-        error_label = self._note("")
-        layout.addWidget(error_label)
-
         def select():
-            try:
-                baseline = self.service.select_baseline(choice.currentData())
-            except (ValueError, OSError, KeyError) as error:
-                error_label.setText(str(error))
-                return
-            self._refresh_settings()
-            self._refresh_latest_result()
-            self.append_log(f"基准已选择：{baseline['id']}，当前比较与趋势已更新。")
+            path = choice.currentData()
             dialog.accept()
+            self._run_task("切换基准", lambda progress: self.service.select_baseline(path, progress=progress),
+                           self._baseline_selected, refresh=True)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -943,12 +1028,18 @@ class RobotPositionPage(QWidget):
         fit_dialog(dialog, 700, 230)
         dialog.exec()
 
+    def _baseline_selected(self, baseline):
+        self._refresh_settings()
+        self._refresh_latest_result()
+        self.append_log(f"基准已选择：{baseline['id']}，当前比较与趋势已更新。")
+
     def _evaluate(self):
         allow_current_only = self._metric_mode() == "repeatability"
         self._run_task(
             "定位评估",
             lambda progress: self.service.evaluate(progress, allow_current_only=allow_current_only),
             self._evaluation_completed,
+            refresh=True,
         )
 
     def _evaluation_completed(self, result):
@@ -1074,7 +1165,7 @@ class RobotPositionPage(QWidget):
         self._refresh_history()
 
     def _refresh_history(self):
-        history = self.service.history_comparisons(include_before=True)
+        history = self.history_comparisons
         baseline_batch = (self.service.baseline or {}).get("batch", {})
         context = self.result or baseline_batch
         debug = context.get("debug_day_index") is not None

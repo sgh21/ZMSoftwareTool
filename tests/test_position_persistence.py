@@ -280,7 +280,8 @@ def test_switch_baseline_recomputes_latest_and_all_observations_without_writing_
 def test_older_baseline_evaluation_and_pending_import_never_replace_latest_observation(service, tmp_path):
     first = three_evaluated_batches(service, tmp_path)
     service.current_batch = deepcopy(first["batch"])
-    service.create_baseline("older observation evaluated last")
+    assert service.create_baseline("older observation")["duplicate"]
+    service.evaluate()  # 已有基准不重复创建，但显式重评旧观测仍可追溯。
     assert service.current_batch["batch_id"] == "B001"
     assert service.latest_batch["batch_id"] == service.latest_result["batch_id"] == "B003"
     assert service.latest_result["summary"]["rp_change"] == pytest.approx(0.4)
@@ -375,3 +376,187 @@ def test_current_only_trend_excludes_changed_points_or_ideal_targets(service, tm
     assert [row["batch_id"] for row in service.history_comparisons()] == ["B002"]
     assert reason in service.history_comparison_warnings[0]
     assert len(service.list_history()) == 2
+
+
+def test_duplicate_baseline_after_reimport_has_no_writes_or_selection_changes(service, tmp_path):
+    first = service.load_observations(observations(tmp_path, "B001"))
+    original = service.create_baseline("original")
+    service.load_observations(observations(tmp_path, "B002", 0.4))
+    selected = service.create_baseline("selected")
+    source = deepcopy(first)
+    source.update({"batch_id": "B009", "label": "new name", "imported_at": "2027-01-01T00:00:00Z"})
+    for index, sample in enumerate(source["samples"]):
+        sample["sample_id"] = f"renamed-{index}"
+    path = tmp_path / "renamed-copy.json"
+    write_document(path, source)
+    current = service.load_observations(path)
+    before = {path: path.read_bytes() for path in service.storage.rglob("*") if path.is_file()}
+    latest = deepcopy(service.latest_result)
+    events = []
+    result = service.create_baseline("do not create", progress=lambda value, message: events.append((value, message)))
+    assert result["duplicate"] is True
+    assert result["existing_baseline"]["id"] == original["id"]
+    assert service.baseline["id"] == selected["id"]
+    assert service.current_batch == current
+    assert service.latest_result == latest
+    assert {path: path.read_bytes() for path in service.storage.rglob("*") if path.is_file()} == before
+    assert events[0][0] == 0 and events[-1][0] == 100
+
+
+@pytest.mark.parametrize("change", ["bias", "rotation", "tiny", "ideal", "q", "initial_error",
+                                        "program", "target", "protocol", "status", "parameters", "count"])
+def test_equal_rounded_metrics_do_not_replace_exact_measurement_and_condition_checks(service, tmp_path, change):
+    first_path = observations(tmp_path, "B001")
+    service.load_observations(first_path)
+    service.create_baseline("original")
+    original_rp = service.latest_result["summary"]["rp_current"]
+    document = read_document(first_path)
+    if change in ("bias", "tiny"):
+        for sample in document["samples"]:
+            sample["vision_pose"][0][3] -= 0.1 if change == "bias" else 1e-8
+    elif change == "rotation":
+        angle = 1e-6
+        document["samples"][0]["vision_pose"][0][:3] = [np.cos(angle), -np.sin(angle), 0]
+        document["samples"][0]["vision_pose"][1][:3] = [np.sin(angle), np.cos(angle), 0]
+    elif change == "ideal":
+        for sample in document["samples"]:
+            sample["ideal_pose"][0][3] += 0.1
+    elif change == "q":
+        document["base_rotations"] = {"P001": np.eye(3).tolist()}
+    elif change == "initial_error":
+        document["initial_errors"] = {"P001": {"D001": [0.1, 0, 0]}}
+    elif change in ("program", "target"):
+        document[f"{change}_id"] = "another"
+    elif change == "protocol":
+        document["sampling_protocol"] = "same_direction"
+    elif change == "status":
+        document["comparison_status"] = "observed"
+    elif change == "parameters":
+        service.save_parameters({"square_size_mm": service.parameters["square_size_mm"] + 0.1})
+    else:
+        document["samples"].pop()
+    write_document(tmp_path / "changed.json", document)
+    service.load_observations(tmp_path / "changed.json")
+    created = service.create_baseline("different")
+    assert not created.get("duplicate")
+    assert len(service.list_baselines()) == 2
+    if change == "bias":
+        assert service.latest_result["summary"]["rp_current"] == pytest.approx(original_rp)
+
+
+def test_existing_duplicate_options_keep_selected_identity_and_all_original_files(service, tmp_path):
+    service.load_observations(observations(tmp_path))
+    original = service.create_baseline("first")
+    old_duplicate = read_document(original["path"])
+    old_duplicate.update({"id": "old-duplicate", "label": "selected old duplicate",
+                          "created_at": "2027-01-01T00:00:00Z",
+                          "path": str(service.storage / "baselines" / "old-duplicate.json")})
+    write_document(old_duplicate["path"], old_duplicate)
+    service.select_baseline(old_duplicate["path"])
+    before = {path: path.read_bytes() for path in service.storage.rglob("*.json")}
+    options = service.list_baselines()
+    assert len(options) == 1
+    assert options[0]["id"] == old_duplicate["id"]
+    assert options[0]["created_at"] == old_duplicate["created_at"]
+    assert service.create_baseline()["existing_baseline"]["id"] == old_duplicate["id"]
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_duplicate_sample_order_is_normalized_but_first_reference_is_preserved(service, tmp_path):
+    path = observations(tmp_path)
+    document = read_document(path)
+    third = deepcopy(document["samples"][1])
+    third.update({"direction_id": "D003", "sample_id": "3"})
+    third["vision_pose"][0][3] -= 0.1
+    document["samples"].append(third)
+    write_document(path, document)
+    service.load_observations(path)
+    service.create_baseline()
+    document["samples"][1:] = reversed(document["samples"][1:])
+    write_document(path, document)
+    service.load_observations(path)
+    assert service.create_baseline()["duplicate"]
+    document["samples"].reverse()
+    write_document(path, document)
+    service.load_observations(path)
+    assert not service.create_baseline().get("duplicate")
+
+
+def test_statistics_cache_reuses_all_periods_and_only_rechecks_current_thresholds(service, tmp_path, monkeypatch):
+    first = three_evaluated_batches(service, tmp_path)
+    third = service.create_baseline("third")
+    calls = []
+    compare = service._compare_batches
+
+    def counted(*args):
+        calls.append(args[0]["batch_id"])
+        return compare(*args)
+
+    monkeypatch.setattr(service, "_compare_batches", counted)
+    events = []
+    assert len(service.history_comparisons(progress=lambda value, message: events.append((value, message)))) == 1
+    assert calls == ["B001", "B002", "B003"]
+    assert all(any(f"{phase}批次 {batch}" in message for _, message in events)
+               for batch in ("B001", "B002", "B003") for phase in ("读取", "比较"))
+    assert [value for value, _ in events] == sorted(value for value, _ in events)
+    assert events[-1][0] == 100
+    service.save_settings({"show_before_baseline": True})
+    service.save_settings({"multidirectional_thresholds": {"repeatability": {"distance": 0.3}}})
+    assert service.compare_latest()["metric_assessments"]["repeatability"]["status"] == "超限"
+    rows = service.history_comparisons(include_before=True)
+    assert len(rows) == 3
+    assert rows[-1]["metric_thresholds"]["repeatability"]["distance"] == 0.3
+    rows[-1]["summary"]["rp_current"] = -100
+    assert service.history_comparisons()[-1]["summary"]["rp_current"] == pytest.approx(0.6)
+    assert calls == ["B001", "B002", "B003"]
+    service.select_baseline(first["path"])
+    assert len(service.history_comparisons()) == 3
+    assert len(calls) == 7  # 重新比较最新观测及3批历史。
+    service.evaluate()
+    service.history_comparisons()
+    assert len(calls) > 7
+    service.select_baseline(third["path"])
+
+
+def test_deferred_restore_and_import_progress_cover_copy_and_save(service, tmp_path):
+    image = tmp_path / "frame.png"
+    image.write_bytes(b"existing pixels with saved pose")
+    events = []
+    saved = service.load_observations(observations(tmp_path, image=image),
+                                      progress=lambda value, message: events.append((value, message)))
+    assert any(value < 100 and "托管" in message for value, message in events)
+    assert any(value < 100 and "保存" in message for value, message in events)
+    assert [value for value, _ in events] == sorted(value for value, _ in events)
+    assert events[-1][0] == 100
+    assert Path(saved["saved_path"]).exists()
+    service.create_baseline()
+    delayed = PositionMonitoringService(root=service.root, defer_restore=True)
+    assert delayed.current_batch is None and delayed.latest_result is None
+    restored_events = []
+    delayed.restore(progress=lambda value, message: restored_events.append((value, message)))
+    assert delayed.latest_result == service.latest_result
+    assert delayed.current_batch["saved_path"] == saved["saved_path"]
+    assert [value for value, _ in restored_events] == sorted(value for value, _ in restored_events)
+    assert restored_events[-1][0] == 100
+
+
+@pytest.mark.parametrize("operation", ["baseline", "settings"])
+def test_failed_selection_or_setting_save_restores_previous_view(service, tmp_path, monkeypatch, operation):
+    first = three_evaluated_batches(service, tmp_path)
+    service.create_baseline("third")
+    before = (deepcopy(service.baseline), deepcopy(service.settings), deepcopy(service.latest_result),
+              service.history_comparisons(include_before=True))
+    state = (service.storage / "state.json").read_bytes()
+
+    def fail_save():
+        raise OSError("write failed")
+
+    monkeypatch.setattr(service, "_save_state", fail_save)
+    with pytest.raises(OSError, match="write failed"):
+        if operation == "baseline":
+            service.select_baseline(first["path"])
+        else:
+            service.save_settings({"multidirectional_thresholds": {"repeatability": {"distance": 0.3}}})
+    assert (service.baseline, service.settings, service.latest_result,
+            service.history_comparisons(include_before=True)) == before
+    assert (service.storage / "state.json").read_bytes() == state

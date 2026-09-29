@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import QApplication
 import app.dialogs.robot_camera_calibration_dialog as dialog_module
 from app.dialogs.robot_camera_calibration_dialog import RobotCameraCalibrationDialog
 from app.dialogs.robot_position_simulation_dialog import RobotPositionSimulationDialog
-from app.pages.robot_position_page import RobotPositionPage
+from ui_helpers import ready_position_page
 from core.services.position_monitoring_service import PositionMonitoringService, write_document
 
 
@@ -21,7 +21,7 @@ def application():
 
 @pytest.fixture
 def dialog(application, tmp_path):
-    page = RobotPositionPage(PositionMonitoringService(root=tmp_path / "application"))
+    page = ready_position_page(PositionMonitoringService(root=tmp_path / "application"))
     page.ui_scale = 1.0
     window = RobotCameraCalibrationDialog(page)
     yield window

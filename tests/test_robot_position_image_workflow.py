@@ -1,4 +1,4 @@
-"""图像观测接入后的页面回归；创建隐藏控件，不启动窗口或后台任务。"""
+"""图像观测接入后的页面回归；使用隐藏控件并等待后台任务完成。"""
 
 from copy import deepcopy
 
@@ -7,7 +7,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication, QFileDialog
 
 from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog
-from app.pages.robot_position_page import RobotPositionPage
+from ui_helpers import ready_position_page, wait_for_page
 from core.services.position_monitoring_service import PositionMonitoringService, assess_metric, write_document
 
 
@@ -69,7 +69,7 @@ def test_saving_unchanged_parameters_preserves_observations_and_display(
     application, service, monkeypatch, entry,
 ):
     result = compare(service)
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page.ui_scale = 1.0
     page._evaluation_completed(result)
     shown_result = page.result
@@ -94,6 +94,7 @@ def test_saving_unchanged_parameters_preserves_observations_and_display(
                 lambda *args: (str(service.parameter_path), ""),
             )
             page._load_parameters()
+            wait_for_page(page)
         assert service.parameters["version"] == version
         assert service.parameter_path.read_bytes() == parameter_bytes
         assert service.previous_parameter_path.read_bytes() == previous_bytes
@@ -124,9 +125,9 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
     reordered["groups"][0]["directions"].reverse()
     monkeypatch.setattr(
         service, "history_comparisons",
-        lambda include_before=False: [result, reordered],
+        lambda include_before=False, progress=None: [result, reordered],
     )
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     try:
         service.latest_result = result
         page._evaluation_completed(result)
@@ -155,7 +156,7 @@ def test_multidirectional_thresholds_are_separate_and_history_keeps_saved_limits
     })
     service.current_batch = batch(service, [-0.2, 0.2])
     multidirectional = service.evaluate_current()
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     try:
         page._evaluation_completed(multidirectional)
         assert multidirectional["metric_thresholds"]["repeatability"]["X"] == 2.0
@@ -195,7 +196,7 @@ def test_one_direction_absolute_degradation_alarm_survives_point_average(applica
             for alarm in assessment["alarms"]] == [
         ("P001", "D001", "X", 2.0), ("P001", "D001", "distance", 2.0),
     ]
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     try:
         page._evaluation_completed(result)
         page.result_metric.setCurrentIndex(0)

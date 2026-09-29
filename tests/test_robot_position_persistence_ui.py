@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QPushButton
 
-from app.pages.robot_position_page import RobotPositionPage
+from ui_helpers import ready_position_page, refresh_page, wait_for_page
 from core.services.position_monitoring_service import PositionMonitoringService, read_document, write_document
 
 
@@ -53,13 +53,13 @@ def test_restart_restores_last_result_images_three_days_and_logs(application, tm
     service.evaluate()
     import_batch(service, tmp_path, "B003", 0.6)
     result = service.evaluate()
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page.append_log("本轮已完成，可重启查看")
     before_logs = deepcopy(service.list_logs())
     page.close()
 
     restored = PositionMonitoringService(service.root)
-    reopened = RobotPositionPage(restored)
+    reopened = ready_position_page(restored)
     try:
         assert reopened.result["id"] == result["id"]
         assert reopened.task_progress.value() == 100
@@ -93,7 +93,7 @@ def test_restart_keeps_unevaluated_import_but_cards_show_latest_evaluated_batch(
     import_batch(service, tmp_path, "B002", 0.4)
     service.evaluate()
     import_batch(service, tmp_path, "B003", 0.6)
-    reopened = RobotPositionPage(PositionMonitoringService(service.root))
+    reopened = ready_position_page(PositionMonitoringService(service.root))
     try:
         assert reopened.result["batch_id"] == "B002"
         assert reopened.task_progress_note.text() == "已恢复 B003 观测；主卡显示 B002 最新评估"
@@ -113,11 +113,12 @@ def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_card
     service.evaluate()
     import_batch(service, tmp_path, "B003", 0.6)
     service.evaluate()
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     try:
         assert not page.show_before_baseline.isChecked()
         page.ui_scale = 1.0
         last = service.create_baseline()
+        refresh_page(page)
         page._baseline_created(last)
         page.result_metric.setCurrentIndex(1)
         assert page.result["batch_id"] == "B003"
@@ -126,6 +127,7 @@ def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_card
         assert page.trend_chart.baseline_day == 2
         saved = deepcopy(service.list_history())
         page.show_before_baseline.setChecked(True)
+        wait_for_page(page)
         assert [row["days"] for row in page.trend_chart.history] == [0, 1, 2]
         assert [row["distance"] for row in page.trend_chart.history] == pytest.approx([-0.4, -0.2, 0])
         assert not page.axis_cards["distance"].property("overLimit")
@@ -140,6 +142,7 @@ def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_card
 
         monkeypatch.setattr(QDialog, "exec", choose_first)
         page._select_baseline()
+        wait_for_page(page)
         assert page.result["batch_id"] == "B003"
         assert page.result["baseline_id"] == first["id"]
         assert page.axis_values["distance"].text() == "0.4000"
@@ -152,7 +155,7 @@ def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_card
         assert page.result["batch_id"] == "B003"
         assert "B001" in page.observation_sample.currentText()
         assert "主卡仍显示最新已评估观测 B003" in page.process_log.toPlainText()
-        reopened = RobotPositionPage(PositionMonitoringService(service.root))
+        reopened = ready_position_page(PositionMonitoringService(service.root))
         try:
             assert reopened.result["batch_id"] == "B003"
             assert reopened.result["baseline_id"] == first["id"]
@@ -172,7 +175,7 @@ def test_current_threshold_settings_update_details_export_and_preserve_history(a
     import_batch(service, tmp_path, "B003", 0.6)
     service.evaluate()
     saved = deepcopy(service.list_history())
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page.ui_scale = 1.0
     try:
         def set_threshold(dialog):
@@ -182,6 +185,7 @@ def test_current_threshold_settings_update_details_export_and_preserve_history(a
 
         monkeypatch.setattr(QDialog, "exec", set_threshold)
         page._show_settings()
+        wait_for_page(page)
         assert page.axis_cards["distance"].property("overLimit")
         assert page.result["metric_thresholds"]["repeatability"]["distance"] == 0.5
         exported = tmp_path / "live_comparison.json"
@@ -209,7 +213,7 @@ def test_parameter_change_keeps_latest_view_and_incompatible_baseline_has_visibl
     service.create_baseline()
     import_batch(service, tmp_path, "B003", 0.6)
     service.evaluate()
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     try:
         parameters = deepcopy(service.parameters)
         parameters["hand_eye"][0][3] = 10
@@ -217,10 +221,12 @@ def test_parameter_change_keeps_latest_view_and_incompatible_baseline_has_visibl
         write_document(parameter_path, parameters)
         monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(parameter_path), ""))
         page._load_parameters()
+        wait_for_page(page)
         assert page.result["batch_id"] == "B003"
         assert page.axis_values["distance"].text() == "0.6000"
         import_batch(service, tmp_path, "B002", 0.4)
         selected = service.create_baseline()
+        refresh_page(page)
         page._baseline_created(selected)
         assert page.result["batch_id"] == "B003"
         assert page.axis_values["distance"].text() == "0.6000"
@@ -242,7 +248,7 @@ def test_restored_logs_scroll_to_latest_after_main_window_layout_and_preserve_us
         service.append_log(f"历史记录 {index} · " + "较长的观测保存路径/" * 12)
     service.append_log("最后一条：评估完成")
     before_logs = deepcopy(service.list_logs())
-    monkeypatch.setattr(window_module, "RobotPositionPage", lambda: RobotPositionPage(service))
+    monkeypatch.setattr(window_module, "RobotPositionPage", lambda: ready_position_page(service))
     previous_style = application.styleSheet()
     window = window_module.MainWindow()
     try:
@@ -295,7 +301,7 @@ def test_legacy_history_and_new_batch_share_complete_trend_without_hiding_fallba
     old_bytes = legacy_path.read_bytes()
     import_batch(service, tmp_path, "B003", 0.6, simulation=simulation, captured_at="2026-09-22T00:00:00+00:00")
     service.evaluate()
-    reopened = RobotPositionPage(PositionMonitoringService(service.root))
+    reopened = ready_position_page(PositionMonitoringService(service.root))
     try:
         assert [row["days"] for row in reopened.trend_chart.history] == [0, 1, 2]
         assert [row["distance"] for row in reopened.trend_chart.history] == pytest.approx([0.2, 0.4, 0.6])

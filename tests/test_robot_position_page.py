@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTabWidget,
 )
 
-from app.pages.robot_position_page import RobotPositionPage
+from ui_helpers import ready_position_page, wait_for_page
 from app.resources import UiScale, load_stylesheet
 from core.algorithms.position_monitoring import evaluate_position_monitoring
 from core.services.position_monitoring_service import PositionMonitoringService
@@ -36,13 +36,16 @@ class MemoryService:
         self.history_comparison_warnings = []
         self.logs = []
 
+    def list_baselines(self, progress=None):
+        return []
+
     def list_logs(self):
         return self.logs
 
     def compare_latest(self):
         return self.latest_result
 
-    def history_comparisons(self, include_before=False):
+    def history_comparisons(self, include_before=False, progress=None):
         return [row for row in self.history if row["parameter_version"] == self.parameters["version"]]
 
     def append_log(self, message, level="INFO"):
@@ -62,7 +65,7 @@ class MemoryService:
     def list_history(self, baseline_id=None):
         return [row for row in self.history if baseline_id is None or row["baseline_id"] == baseline_id]
 
-    def save_settings(self, settings):
+    def save_settings(self, settings, progress=None):
         self.settings.update(deepcopy(settings))
 
 
@@ -87,7 +90,7 @@ def result(with_reference=False, repeats=1, drift=2, scatter_scale=2):
 
 def test_missing_reference_and_single_arrival_do_not_fabricate_metrics(application):
     service = MemoryService()
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page._evaluation_completed(result())
     assert page._metric_mode() == "repeatability"
     assert page.axis_values["X"].text() == "—"
@@ -108,7 +111,7 @@ def test_metric_switch_and_history_use_matching_reference(application):
     service = MemoryService()
     data = result(with_reference=True, repeats=3)
     service.history = [data, {**data, "parameter_version": "other"}]
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page._evaluation_completed(data)
     assert [page.result_metric.itemData(index) for index in range(page.result_metric.count())] == [
         "absolute_change", "repeatability_change", "repeatability",
@@ -157,7 +160,7 @@ def test_live_metrics_use_current_thresholds_without_mutating_saved_result(appli
             "absolute_change": {"X": 3.0},
         },
     })
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page._evaluation_completed(data)
     assert page.axis_cards["X"].property("overLimit") is True
     assert "1 项超限" in page.alarm_status.text()
@@ -180,7 +183,7 @@ def test_live_metrics_use_current_thresholds_without_mutating_saved_result(appli
 
 def test_threshold_dialog_saves_three_independent_sets_and_blank_fields(application):
     service = MemoryService()
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page.ui_scale = 1.0
     observed = {}
 
@@ -199,6 +202,7 @@ def test_threshold_dialog_saves_three_independent_sets_and_blank_fields(applicat
 
     QTimer.singleShot(0, fill_and_save)
     page._show_settings()
+    wait_for_page(page)
     assert observed == {"title": "定位精度阈值", "field_count": 12, "tab_count": 3, "selected": 2}
     assert service.settings["metric_thresholds"] == {
         "absolute_change": {"X": 1.2, "Y": None, "Z": None, "distance": None},
@@ -227,7 +231,7 @@ def test_current_repeatability_can_be_evaluated_without_baseline(application, tm
         "base_rotations": {"P1": np.eye(3).tolist()},
     }), encoding="utf-8")
     service.load_observations(source)
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page._evaluate()
     event_loop = QEventLoop()
     timer = QTimer()
@@ -251,7 +255,7 @@ def test_current_repeatability_can_be_evaluated_without_baseline(application, tm
     page.close()
 
 
-def test_evaluation_restores_current_observations_after_viewing_history(application, tmp_path):
+def test_evaluation_restores_current_observations_after_viewing_history(application, tmp_path, monkeypatch):
     service = MemoryService()
     historical_sample = {"point_id": "P1", "direction_id": "D1", "sample_id": "history-A"}
     current_sample = {"point_id": "P1", "direction_id": "D1", "sample_id": "current-B"}
@@ -261,21 +265,24 @@ def test_evaluation_restores_current_observations_after_viewing_history(applicat
                          "batch_id": "history-A", "current_batch_path": str(snapshot)}
     service.history = [historical_result]
     service.current_batch = {"batch_id": "current-B", "samples": [current_sample]}
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     page.ui_scale = 1.0
     page._observations_loaded(service.current_batch)
     assert page.observation_sample.currentData() == current_sample
     current_result = {**result(with_reference=True, repeats=3), "id": "current-B", "batch_id": "current-B"}
     page._evaluation_completed(current_result)
+    opened = []
+    monkeypatch.setattr(page, "_open_result_details", lambda record, historical=False: opened.append((record, historical)))
 
     def select_history():
         dialog = application.activeModalWidget()
-        QTimer.singleShot(0, lambda: application.activeModalWidget().accept())
         dialog.findChild(QTableWidget).cellDoubleClicked.emit(0, 0)
-        dialog.accept()
 
     QTimer.singleShot(0, select_history)
     page._show_history()
+    wait_for_page(page)
+    application.processEvents()
+    assert opened == [(historical_result, True)]
     assert page.observation_sample.currentData() == historical_sample
     assert page.result["batch_id"] == "current-B"
 
@@ -289,7 +296,7 @@ def test_evaluation_restores_current_observations_after_viewing_history(applicat
 
 
 def test_background_completion_returns_to_ui_thread(application):
-    page = RobotPositionPage(MemoryService())
+    page = ready_position_page(MemoryService())
     event_loop = QEventLoop()
     observations = []
 
@@ -306,7 +313,7 @@ def test_background_completion_returns_to_ui_thread(application):
     event_loop.exec()
     assert observations == [(True, True)]
     assert page.task is None
-    assert all(button.isEnabled() for button in page.mutation_buttons)
+    assert all(button.isEnabled() for button in page.findChildren(QPushButton))
     page.close()
 
 
@@ -318,7 +325,7 @@ def test_narrow_page_stacks_panels_without_horizontal_clipping(application):
     data.update({"batch_id": "c7364c180a1d43f3aca8d861f21590b2",
                  "created_at": "2026-09-28T09:21:40.123456+00:00"})
     service.history = [data]
-    page = RobotPositionPage(service)
+    page = ready_position_page(service)
     try:
         UiScale(page).apply(0.75)
         page._evaluation_completed(data)
@@ -342,7 +349,7 @@ def test_narrow_page_stacks_panels_without_horizontal_clipping(application):
             assert text_bounds.width() >= page.result_metric.fontMetrics().horizontalAdvance(
                 page.result_metric.itemText(index)
             )
-        evaluate_button = next(button for button in page.mutation_buttons if button.text() == "评估精度")
+        evaluate_button = next(button for button in page.findChildren(QPushButton) if button.text() == "评估精度")
         page.scroll_area.ensureWidgetVisible(evaluate_button)
         application.processEvents()
         viewport = page.scroll_area.viewport()
@@ -361,7 +368,7 @@ def test_narrow_page_stacks_panels_without_horizontal_clipping(application):
 def test_dropdown_stays_below_centered_row_for_every_selection(application, combo_name):
     previous_style = application.styleSheet()
     application.setStyleSheet(load_stylesheet())
-    page = RobotPositionPage(MemoryService())
+    page = ready_position_page(MemoryService())
     page._evaluation_completed(result(with_reference=True, repeats=3))
     combo = getattr(page, combo_name)
     try:

@@ -8,7 +8,8 @@ import pytest
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 
-from app.pages.robot_position_page import PointEditor, RobotPositionPage
+from app.pages.robot_position_page import PointEditor
+from ui_helpers import ready_position_page, refresh_page
 from app.resources import DISPLAY, load_stylesheet
 from core.algorithms.position_monitoring import evaluate_position_monitoring
 from core.services.position_monitoring_service import METRIC_AXES, METRIC_LABELS
@@ -33,13 +34,16 @@ class MemoryService:
         self.history_comparison_warnings = []
         self.logs = []
 
+    def list_baselines(self, progress=None):
+        return []
+
     def list_logs(self):
         return self.logs
 
     def compare_latest(self):
         return self.latest_result
 
-    def history_comparisons(self, include_before=False):
+    def history_comparisons(self, include_before=False, progress=None):
         return self.history
 
     def append_log(self, message, level="INFO"):
@@ -51,7 +55,7 @@ class MemoryService:
         return [item for item in self.history
                 if baseline_id is None or item["baseline_id"] == baseline_id]
 
-    def save_settings(self, settings):
+    def save_settings(self, settings, progress=None):
         self.settings.update(deepcopy(settings))
 
 
@@ -66,7 +70,7 @@ def application():
 
 @pytest.fixture
 def page(application):
-    widget = RobotPositionPage(MemoryService())
+    widget = ready_position_page(MemoryService())
     widget.ensurePolished()
     yield widget
     widget.close()
@@ -117,6 +121,7 @@ def test_trend_uses_elapsed_days_and_sorts_irregular_intervals_across_timezones(
         {**evaluated, "id": "early", "created_at": "2026-09-20T12:00:00+00:00"},
         evaluated,
     ]
+    refresh_page(page)
     page._evaluation_completed(evaluated)
     assert [record["days"] for record in page.trend_chart.history] == pytest.approx([0.5, 2, 5])
     assert all(record["X"] == pytest.approx(np.sqrt(2)) for record in page.trend_chart.history)
@@ -126,6 +131,7 @@ def test_standalone_result_keeps_values_without_inventing_a_baseline_time(page, 
     evaluated.update({"baseline_id": None, "baseline_created_at": None})
     page.service.baseline = None
     page.service.history = [evaluated]
+    refresh_page(page)
     page._evaluation_completed(evaluated)
     assert page.baseline_time_label.text() == "基准建立时间：—"
     assert float(page.axis_values["X"].text()) == pytest.approx(np.sqrt(2), abs=0.0001)
@@ -145,6 +151,7 @@ def test_debug_trend_uses_batch_days_and_latest_evaluation_per_batch(page, evalu
     repeated = {**deepcopy(records[1]), "id": "repeat-B002", "created_at": "2026-09-29T00:00:00+00:00"}
     repeated["summary"]["rp_current"] = 0.123
     page.service.history = [repeated, records[2], records[0], records[1]]
+    refresh_page(page)
     page._evaluation_completed(records[2])
     assert [record["days"] for record in page.trend_chart.history] == [0, 1, 2]
     assert page.trend_chart.history[1]["distance"] == pytest.approx(0.123)
@@ -159,6 +166,7 @@ def test_observed_time_is_separate_from_evaluation_time_and_explains_fallback(pa
         "time_source": "captured_at", "baseline_time_source": "captured_at",
     })
     page.service.history = [evaluated]
+    refresh_page(page)
     page._evaluation_completed(evaluated)
     assert page.trend_chart.history[0]["days"] == 1
     assert page.trend_time_caption.text() == "采集时间 / 天"
@@ -173,7 +181,7 @@ def test_image_progress_updates_one_line_without_filling_saved_logs(page):
     before = list(page.service.logs)
     for image in range(1, 601):
         page._task_progress(round(image / 6), f"已读取 {image}/600")
-    assert page.task_progress.value() == 100
+    assert page.task_progress.value() == 99
     assert page.task_progress_note.text() == "已读取 600/600"
     assert page.service.logs == before
     assert "已读取" not in page.process_log.toPlainText()

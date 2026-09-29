@@ -102,12 +102,14 @@ class PositionStore:
                 result.setdefault(f"baseline_{key}", None)
         return result
 
-    def manage_images(self, batch, identifier):
+    def manage_images(self, batch, identifier, progress=None):
         folder = self.root / "images"
         index_path = folder / "index.json"
         index = read_json(index_path) if index_path.exists() else {}
         changed = False
-        for sample in batch["samples"]:
+        for position, sample in enumerate(batch["samples"]):
+            if progress:
+                progress(round(100 * position / len(batch["samples"])), f"托管图片 {position + 1}/{len(batch['samples'])}")
             if not sample.get("image_path"):
                 continue
             source = Path(sample["image_path"]).resolve()
@@ -131,6 +133,8 @@ class PositionStore:
             sample["image_path"] = str(destination)
         if changed:
             write_document(index_path, index)
+        if progress:
+            progress(100, "图片托管完成")
 
     def append_log(self, message, level="INFO"):
         now = datetime.now(timezone.utc)
