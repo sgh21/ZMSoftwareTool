@@ -70,13 +70,13 @@ def test_baseline_and_two_measurements_form_three_debug_days_and_restore(service
     assert len(list((service.storage / "observations").glob("*.json"))) == 3
 
 
-def test_unassessed_import_survives_restart_without_previous_result(service, tmp_path):
+def test_unassessed_import_survives_restart_separate_from_latest_evaluated_result(service, tmp_path):
     service.load_observations(observations(tmp_path))
     service.create_baseline()
     service.load_observations(observations(tmp_path, "B002", 0.4))
     restored = PositionMonitoringService(root=service.root)
     assert restored.current_batch["batch_id"] == "B002"
-    assert restored.latest_result is None
+    assert restored.latest_batch["batch_id"] == restored.latest_result["batch_id"] == "B001"
     assert restored.baseline["batch"]["batch_id"] == "B001"
     assert len(restored.list_history()) == 1
 
@@ -141,7 +141,7 @@ def test_images_are_copied_once_remain_available_without_source_and_reused_on_re
 def test_old_history_and_embedded_baseline_migrate_without_recomputing(service, tmp_path):
     service.load_observations(observations(tmp_path))
     service.create_baseline()
-    result = deepcopy(service.latest_result)
+    result = deepcopy(service.list_history()[0])
     old_root = tmp_path / "legacy"
     storage = old_root / "storage" / "position_monitoring"
     old_baseline = deepcopy(service.baseline)
@@ -172,7 +172,8 @@ def test_old_history_and_embedded_baseline_migrate_without_recomputing(service, 
     assert completed["debug_day_index"] == completed["baseline_debug_day_index"] == 0
     assert completed["time_source"] == completed["baseline_time_source"] == "imported_at"
     assert restored.current_batch["saved_path"] == result["current_batch_path"]
-    assert restored.list_history() == [completed]
+    assert restored.list_history()[0]["summary"] == completed["summary"]
+    assert restored.list_history()[0]["created_at"] == completed["created_at"]
     assert PositionMonitoringService(root=old_root).latest_result == completed
     assert old_history_path.read_bytes() == old_bytes
     assert restored.evaluate()["time_source"] == "imported_at"
@@ -202,7 +203,6 @@ def test_old_and_new_history_keep_shared_trend_time_metadata(service, tmp_path, 
     assert all(row["time_source"] == row["baseline_time_source"] == "captured_at" for row in history)
     assert history[1]["observed_at"] == "2026-09-21T10:00:00+08:00"
     assert [row["debug_day_index"] for row in history] == ([0, 1, 2] if simulation else [None] * 3)
-    assert service._store.result({"path": str(old_path), "id": old["id"]}) == history[1]
     assert old_path.read_bytes() == before
 
 
@@ -231,3 +231,147 @@ def test_logs_survive_restart_and_do_not_rewrite_daily_results(service, tmp_path
     restored = PositionMonitoringService(root=service.root)
     assert restored.list_logs() == [first, second]
     assert daily_path.read_bytes() == before
+
+
+def three_evaluated_batches(service, tmp_path):
+    service.load_observations(observations(tmp_path, "B001", 0.2))
+    first = service.create_baseline("first")
+    service.load_observations(observations(tmp_path, "B002", 0.4))
+    service.evaluate()
+    service.load_observations(observations(tmp_path, "B003", 0.6))
+    service.evaluate()
+    return first
+
+
+def test_switch_baseline_recomputes_latest_and_all_observations_without_writing_history(service, tmp_path, monkeypatch):
+    first = three_evaluated_batches(service, tmp_path)
+    third = service.create_baseline("third")
+    service.evaluate()  # 同一次观测重复评估，不应成为第二个趋势点。
+    archived = service.list_history()
+    protected = {path: path.read_bytes() for path in service.storage.rglob("*.json")
+                 if path.name != "state.json"}
+
+    def no_pnp(*args, **kwargs):
+        raise AssertionError("切换基准不得重算图像")
+
+    monkeypatch.setattr("core.services.position_monitoring_service.estimate_charuco_pose", no_pnp)
+    monkeypatch.setattr("core.services.position_monitoring_service.estimate_board_pose", no_pnp)
+    curves = service.history_comparisons(include_before=True)
+    assert [row["batch_id"] for row in curves] == ["B001", "B002", "B003"]
+    assert [row["comparison_days"] for row in curves] == [-2, -1, 0]
+    assert [row["before_baseline"] for row in curves] == [True, True, False]
+    assert [row["debug_day_index"] for row in curves] == [0, 1, 2]
+    assert [row["batch_id"] for row in service.history_comparisons()] == ["B003"]
+    assert curves[0]["summary"]["rp_change"] == pytest.approx(-0.4)
+    assert service.latest_result["summary"]["rp_change"] == pytest.approx(0)
+    service.select_baseline(first["path"])
+    assert service.latest_batch["batch_id"] == service.current_batch["batch_id"] == "B003"
+    assert service.latest_result["summary"]["rp_change"] == pytest.approx(0.4)
+    assert service.latest_result["summary"]["absolute_ap_change"] == pytest.approx(0.4)
+    assert service.list_history() == archived
+    assert [row["id"] for row in service.list_baselines()] == [first["id"], third["id"]]
+    service.save_settings({"multidirectional_thresholds": {"repeatability_change": {"distance": 0.3}}})
+    assert service.compare_latest()["metric_assessments"]["repeatability_change"]["status"] == "超限"
+    assert service.history_comparisons()[-1]["metric_thresholds"]["repeatability_change"]["distance"] == 0.3
+    assert all(row["metric_thresholds"]["repeatability_change"]["distance"] is None for row in service.list_history())
+    assert {path: path.read_bytes() for path in protected} == protected
+
+
+def test_older_baseline_evaluation_and_pending_import_never_replace_latest_observation(service, tmp_path):
+    first = three_evaluated_batches(service, tmp_path)
+    service.current_batch = deepcopy(first["batch"])
+    service.create_baseline("older observation evaluated last")
+    assert service.current_batch["batch_id"] == "B001"
+    assert service.latest_batch["batch_id"] == service.latest_result["batch_id"] == "B003"
+    assert service.latest_result["summary"]["rp_change"] == pytest.approx(0.4)
+    service.load_observations(observations(tmp_path, "B004", 0.8))
+    assert service.current_batch["batch_id"] == "B004"
+    assert service.latest_batch["batch_id"] == "B003"
+    restored = PositionMonitoringService(root=service.root)
+    assert restored.current_batch["batch_id"] == "B004"
+    assert restored.latest_result["batch_id"] == "B003"
+    # 兼容旧版切换基准留下的空指针；原 history 的最后一条是 B001。
+    state_path = service.storage / "state.json"
+    state = read_document(state_path)
+    state.update({"current_batch_path": None, "latest_result": None})
+    write_document(state_path, state)
+    restored = PositionMonitoringService(root=service.root)
+    assert restored.current_batch["batch_id"] == restored.latest_batch["batch_id"] == "B003"
+    assert restored.latest_result["batch_id"] == "B003"
+
+
+@pytest.mark.parametrize("change, reason", [
+    ({"program_id": "different"}, "program_id"),
+    ({"target_id": "different"}, "target_id"),
+    ({"sampling_protocol": "same_direction"}, "采样方式"),
+    ({"different_groups": True}, "测点"),
+    ({"different_ideal": True}, "理想位姿"),
+    ({"different_parameters": True}, "参数版本"),
+])
+def test_latest_incompatible_observation_is_not_replaced_by_older_compatible_data(service, tmp_path, change, reason):
+    first = three_evaluated_batches(service, tmp_path)
+    path = observations(tmp_path, "B004", 0.8)
+    document = read_document(path)
+    if change.get("different_groups"):
+        for sample in document["samples"]:
+            sample["point_id"] = "other"
+    elif change.get("different_ideal"):
+        for sample in document["samples"]:
+            sample["ideal_pose"][0][3] += 1
+    elif change.get("different_parameters"):
+        service.save_parameters({"square_size_mm": service.parameters["square_size_mm"] + 1})
+    else:
+        document.update(change)
+    write_document(path, document)
+    service.load_observations(path)
+    current_only = service.evaluate_current()
+    before = service.list_history()
+    service.select_baseline(first["path"])
+    assert service.latest_result["batch_id"] == "B004"
+    assert reason in service.latest_result["comparison_error"]
+    assert service.latest_result["summary"]["rp_current"] == current_only["summary"]["rp_current"]
+    assert service.latest_result["summary"]["rp_change"] is None
+    assert service.latest_result["summary"]["absolute_ap_change"] is None
+    assert [row["batch_id"] for row in service.history_comparisons()] == ["B001", "B002", "B003"]
+    assert reason in service.history_comparison_warnings[0]
+    assert service.list_history() == before
+
+
+def test_real_observation_order_uses_capture_instant_and_keeps_single_period_history(service, tmp_path):
+    earlier = service.load_observations(observations(
+        tmp_path, "B001", 0.2, simulation=False, captured_at="2026-09-21T00:30:00+08:00"))
+    service.evaluate_current()
+    service.load_observations(observations(
+        tmp_path, "B002", 0.4, simulation=False, captured_at="2026-09-20T20:30:00Z"))
+    service.evaluate_current()
+    service.current_batch = earlier
+    service.evaluate_current()
+    assert service.latest_batch["batch_id"] == "B002"
+    curves = service.history_comparisons()
+    assert [row["batch_id"] for row in curves] == ["B001", "B002"]
+    assert all(row["summary"]["rp_current"] is not None for row in curves)
+    assert all(row["summary"]["rp_change"] is None for row in curves)
+    baseline = service.create_baseline()
+    assert baseline["batch"]["batch_id"] == "B001"
+    assert service.latest_result["batch_id"] == "B002"
+    assert service.latest_result["comparison_days"] == pytest.approx(4 / 24)
+    assert PositionMonitoringService(root=service.root).latest_result == service.latest_result
+
+
+@pytest.mark.parametrize("change, reason", [("groups", "测点/接近方向"), ("ideal", "理想位姿")])
+def test_current_only_trend_excludes_changed_points_or_ideal_targets(service, tmp_path, change, reason):
+    service.load_observations(observations(tmp_path, "B001"))
+    service.evaluate_current()
+    path = observations(tmp_path, "B002")
+    document = read_document(path)
+    if change == "groups":
+        document["samples"].pop()
+    else:
+        for sample in document["samples"]:
+            sample["ideal_pose"][0][3] += 1
+    write_document(path, document)
+    service.load_observations(path)
+    service.evaluate_current()
+    assert [row["batch_id"] for row in service.history_comparisons()] == ["B002"]
+    assert reason in service.history_comparison_warnings[0]
+    assert len(service.list_history()) == 2

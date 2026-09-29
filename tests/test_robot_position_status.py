@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 from datetime import datetime
-import json
 
 import numpy as np
 import pytest
@@ -29,10 +28,19 @@ class MemoryService:
         self.current_batch = None
         self.history = []
         self.latest_result = None
+        self.latest_batch = None
+        self.latest_comparison_error = ""
+        self.history_comparison_warnings = []
         self.logs = []
 
     def list_logs(self):
         return self.logs
+
+    def compare_latest(self):
+        return self.latest_result
+
+    def history_comparisons(self, include_before=False):
+        return self.history
 
     def append_log(self, message, level="INFO"):
         entry = {"timestamp": BASELINE_TIME, "level": level, "message": message}
@@ -92,7 +100,7 @@ def local_time(value):
     return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def test_time_labels_show_full_local_timestamps_and_keep_history_reference(page, evaluated):
+def test_time_labels_show_full_local_timestamps_and_current_selected_baseline(page, evaluated):
     assert page.evaluation_time_label.text() == "评价更新时间：—"
     assert page.baseline_time_label.text() == f"基准建立时间：{local_time(BASELINE_TIME)}"
     page.service.baseline.update({"id": "other", "created_at": "2026-09-27T10:00:00+00:00"})
@@ -100,7 +108,7 @@ def test_time_labels_show_full_local_timestamps_and_keep_history_reference(page,
     for index in range(page.result_metric.count()):
         page.result_metric.setCurrentIndex(index)
         assert page.evaluation_time_label.text() == f"评价更新时间：{local_time(evaluated['created_at'])}"
-        assert page.baseline_time_label.text() == f"基准建立时间：{local_time(BASELINE_TIME)}"
+        assert page.baseline_time_label.text() == f"基准建立时间：{local_time(page.service.baseline['created_at'])}"
 
 
 def test_trend_uses_elapsed_days_and_sorts_irregular_intervals_across_timezones(page, evaluated):
@@ -108,46 +116,25 @@ def test_trend_uses_elapsed_days_and_sorts_irregular_intervals_across_timezones(
         {**evaluated, "id": "late", "created_at": "2026-09-25T00:00:00+00:00"},
         {**evaluated, "id": "early", "created_at": "2026-09-20T12:00:00+00:00"},
         evaluated,
-        {**evaluated, "id": "wrong-baseline", "baseline_id": "other"},
-        {**evaluated, "id": "wrong-parameters", "parameter_version": "other"},
     ]
     page._evaluation_completed(evaluated)
     assert [record["days"] for record in page.trend_chart.history] == pytest.approx([0.5, 2, 5])
     assert all(record["X"] == pytest.approx(np.sqrt(2)) for record in page.trend_chart.history)
 
 
-@pytest.mark.parametrize("saved_baseline_id", ["b1", "unrelated", None])
-def test_old_history_reads_only_its_matching_saved_baseline_time(page, evaluated, tmp_path, saved_baseline_id):
-    evaluated.pop("baseline_created_at")
-    baseline_path = tmp_path / "historical_baseline.json"
-    evaluated["baseline_path"] = str(baseline_path)
-    if saved_baseline_id is not None:
-        baseline_path.write_text(json.dumps({
-            "id": saved_baseline_id, "created_at": BASELINE_TIME,
-        }), encoding="utf-8")
-    page.service.baseline.update({"id": "current-baseline", "created_at": "2026-09-27T00:00:00+00:00"})
-    page.service.history = [evaluated]
-    page._evaluation_completed(evaluated)
-    if saved_baseline_id == "b1":
-        assert page.baseline_time_label.text() == f"基准建立时间：{local_time(BASELINE_TIME)}"
-        assert page.trend_chart.history[0]["days"] == pytest.approx(2)
-    else:
-        assert page.baseline_time_label.text() == "基准建立时间：—"
-        assert page.trend_chart.history == []
-        assert "基准" in page.trend_chart.empty_message
-
-
 def test_standalone_result_keeps_values_without_inventing_a_baseline_time(page, evaluated):
     evaluated.update({"baseline_id": None, "baseline_created_at": None})
+    page.service.baseline = None
     page.service.history = [evaluated]
     page._evaluation_completed(evaluated)
     assert page.baseline_time_label.text() == "基准建立时间：—"
     assert float(page.axis_values["X"].text()) == pytest.approx(np.sqrt(2), abs=0.0001)
-    assert page.trend_chart.history == []
-    assert "基准" in page.trend_chart.empty_message
+    assert [row["days"] for row in page.trend_chart.history] == [0]
+    assert page.trend_chart.baseline_day is None
 
 
 def test_debug_trend_uses_batch_days_and_latest_evaluation_per_batch(page, evaluated):
+    page.service.baseline["batch"]["debug_day_index"] = 0
     records = []
     for day in range(3):
         records.append({
@@ -166,6 +153,7 @@ def test_debug_trend_uses_batch_days_and_latest_evaluation_per_batch(page, evalu
 
 
 def test_observed_time_is_separate_from_evaluation_time_and_explains_fallback(page, evaluated):
+    page.service.baseline["batch"]["observed_at"] = BASELINE_TIME
     evaluated.update({
         "observed_at": "2026-09-21T00:00:00+00:00", "baseline_observed_at": BASELINE_TIME,
         "time_source": "captured_at", "baseline_time_source": "captured_at",
@@ -224,21 +212,34 @@ def test_settings_lights_follow_configuration_and_point_editor_save(page):
     assert all(light.toolTip() for light in page.status_lights.values())
 
 
-def test_one_point_over_limit_marks_axis_red_even_when_average_passes(page, evaluated, application):
+def test_one_point_alarm_does_not_mark_passing_summary_red(page, evaluated, application):
     original_color = page.axis_values["X"].palette().color(QPalette.ColorRole.WindowText)
+    page.service.settings["metric_thresholds"] = deepcopy(evaluated["metric_thresholds"])
     page._evaluation_completed(evaluated)
     application.processEvents()
     assert float(page.axis_values["X"].text()) < evaluated["metric_thresholds"]["repeatability"]["X"]
-    assert page.axis_cards["X"].property("overLimit") is True
+    assert page.axis_cards["X"].property("overLimit") is False
     assert all(page.axis_cards[axis].property("overLimit") is False for axis in ("Y", "Z", "distance"))
-    assert page.axis_values["X"].palette().color(QPalette.ColorRole.WindowText) == QColor(DISPLAY["colors"]["error"])
+    assert "1 项超限" in page.alarm_status.text()
+    assert "逐点超限" in page.axis_cards["X"].toolTip()
     page.result_metric.setCurrentIndex(0)
     application.processEvents()
     assert all(card.property("overLimit") is False for card in page.axis_cards.values())
     assert page.axis_values["X"].palette().color(QPalette.ColorRole.WindowText) == QColor(DISPLAY["colors"]["action"])
     page.result_metric.setCurrentIndex(2)
-    assert page.axis_cards["X"].property("overLimit") is True
-    page._invalidate_result()
+    assert page.axis_cards["X"].property("overLimit") is False
+    page.service.latest_result = None
+    page._refresh_latest_result()
     application.processEvents()
     assert all(card.property("overLimit") is False for card in page.axis_cards.values())
     assert page.axis_values["X"].palette().color(QPalette.ColorRole.WindowText) == original_color
+
+
+def test_cards_compare_each_displayed_value_to_its_own_current_threshold(page, evaluated):
+    evaluated["summary"].update({"axis_3sigma_base": [0.1152, 0.1251, 0.1384], "rp_current": 0.253})
+    page.service.settings["metric_thresholds"] = {
+        "repeatability": {"X": 0.15, "Y": 0.15, "Z": 0.15, "distance": 0.2},
+    }
+    page._evaluation_completed(evaluated)
+    assert [page.axis_values[key].text() for key in METRIC_AXES] == ["0.1152", "0.1251", "0.1384", "0.2530"]
+    assert [page.axis_cards[key].property("overLimit") for key in METRIC_AXES] == [False, False, False, True]

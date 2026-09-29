@@ -31,10 +31,19 @@ class MemoryService:
         self.current_batch = None
         self.history = []
         self.latest_result = None
+        self.latest_batch = None
+        self.latest_comparison_error = ""
+        self.history_comparison_warnings = []
         self.logs = []
 
     def list_logs(self):
         return self.logs
+
+    def compare_latest(self):
+        return self.latest_result
+
+    def history_comparisons(self, include_before=False):
+        return [row for row in self.history if row["parameter_version"] == self.parameters["version"]]
 
     def append_log(self, message, level="INFO"):
         entry = {"timestamp": "2026-09-28T00:00:00+00:00", "level": level, "message": message}
@@ -98,7 +107,7 @@ def test_missing_reference_and_single_arrival_do_not_fabricate_metrics(applicati
 def test_metric_switch_and_history_use_matching_reference(application):
     service = MemoryService()
     data = result(with_reference=True, repeats=3)
-    service.history = [data, {**data, "baseline_id": "other"}, {**data, "parameter_version": "other"}]
+    service.history = [data, {**data, "parameter_version": "other"}]
     page = RobotPositionPage(service)
     page._evaluation_completed(data)
     assert [page.result_metric.itemData(index) for index in range(page.result_metric.count())] == [
@@ -126,13 +135,14 @@ def test_metric_switch_and_history_use_matching_reference(application):
             "X 方向", "Y 方向", "Z 方向",
         ]
     assert (data, service.parameters, service.settings, service.baseline, service.current_batch) == before
-    page._invalidate_result()
+    page.service.latest_result = None
+    page._refresh_latest_result()
     assert page.axis_values["distance"].text() == "—"
     assert page.measured_table.rowCount() == 0
     page.close()
 
 
-def test_historical_metrics_use_saved_thresholds_and_ignore_drift_alarms(application):
+def test_live_metrics_use_current_thresholds_without_mutating_saved_result(application):
     service = MemoryService()
     service.settings["metric_thresholds"] = {"repeatability": {"X": 0.1}}
     service.settings["thresholds"] = {"X": 0.01}
@@ -149,22 +159,22 @@ def test_historical_metrics_use_saved_thresholds_and_ignore_drift_alarms(applica
     })
     page = RobotPositionPage(service)
     page._evaluation_completed(data)
-    assert page.axis_cards["X"].property("overLimit") is False
-    assert "1 项超限" not in page.alarm_status.text()
-    assert "定位漂移" not in page.alarm_status.text()
-    page.result_metric.setCurrentIndex(1)
     assert page.axis_cards["X"].property("overLimit") is True
     assert "1 项超限" in page.alarm_status.text()
+    assert "定位漂移" not in page.alarm_status.text()
+    page.result_metric.setCurrentIndex(1)
+    assert page.axis_cards["X"].property("overLimit") is False
+    assert "未设置阈值" in page.alarm_status.text()
     page.result_metric.setCurrentIndex(0)
     assert page.axis_cards["X"].property("overLimit") is False
     assert "1 项超限" not in page.alarm_status.text()
     page.result_metric.setCurrentIndex(2)
-    # 旧记录只有漂移阈值时，不能借用当前配置补判历史 RP。
+    assert data["metric_thresholds"]["repeatability"]["X"] == 0.7
+    # 当前视图始终使用当前阈值，原历史对象保持其保存时的内容。
     data.pop("metric_thresholds")
     page._evaluation_completed(data)
-    assert page.axis_cards["X"].property("overLimit") is False
-    assert "未设" in page.alarm_status.text()
-    assert "1 项超限" not in page.alarm_status.text()
+    assert page.axis_cards["X"].property("overLimit") is True
+    assert "1 项超限" in page.alarm_status.text()
     page.close()
 
 
@@ -255,17 +265,20 @@ def test_evaluation_restores_current_observations_after_viewing_history(applicat
     page.ui_scale = 1.0
     page._observations_loaded(service.current_batch)
     assert page.observation_sample.currentData() == current_sample
+    current_result = {**result(with_reference=True, repeats=3), "id": "current-B", "batch_id": "current-B"}
+    page._evaluation_completed(current_result)
 
     def select_history():
         dialog = application.activeModalWidget()
+        QTimer.singleShot(0, lambda: application.activeModalWidget().accept())
         dialog.findChild(QTableWidget).cellDoubleClicked.emit(0, 0)
+        dialog.accept()
 
     QTimer.singleShot(0, select_history)
     page._show_history()
     assert page.observation_sample.currentData() == historical_sample
-    assert page.result["batch_id"] == "history-A"
+    assert page.result["batch_id"] == "current-B"
 
-    current_result = {**result(with_reference=True, repeats=3), "id": "current-B", "batch_id": "current-B"}
     page._evaluation_completed(current_result)
     assert page.history_batches is None
     assert page.observation_sample.count() == 1

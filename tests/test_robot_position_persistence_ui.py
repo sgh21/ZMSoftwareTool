@@ -8,7 +8,7 @@ import pytest
 from PyQt6.QtGui import QImage
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QPushButton
 
 from app.pages.robot_position_page import RobotPositionPage
 from core.services.position_monitoring_service import PositionMonitoringService, read_document, write_document
@@ -85,7 +85,7 @@ def test_restart_restores_last_result_images_three_days_and_logs(application, tm
         reopened.close()
 
 
-def test_restart_keeps_unevaluated_import_and_does_not_show_previous_result(application, tmp_path):
+def test_restart_keeps_unevaluated_import_but_cards_show_latest_evaluated_batch(application, tmp_path):
     service = PositionMonitoringService(tmp_path / "application")
     service.save_parameters({"hand_eye": np.eye(4).tolist(), "target_pose_base": np.eye(4).tolist()})
     import_batch(service, tmp_path, "B001", 0.2)
@@ -95,13 +95,143 @@ def test_restart_keeps_unevaluated_import_and_does_not_show_previous_result(appl
     import_batch(service, tmp_path, "B003", 0.6)
     reopened = RobotPositionPage(PositionMonitoringService(service.root))
     try:
-        assert reopened.result is None
-        assert reopened.task_progress_note.text() == "已恢复 B003 观测，待评估"
+        assert reopened.result["batch_id"] == "B002"
+        assert reopened.task_progress_note.text() == "已恢复 B003 观测；主卡显示 B002 最新评估"
         assert "B003" in reopened.observation_sample.currentText()
-        assert reopened.axis_values["distance"].text() == "—"
+        assert reopened.axis_values["distance"].text() == "0.4000"
         assert [row["days"] for row in reopened.trend_chart.history] == [0, 1]
     finally:
         reopened.close()
+
+
+def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_cards(application, tmp_path, monkeypatch):
+    service = PositionMonitoringService(tmp_path / "application")
+    service.save_parameters({"hand_eye": np.eye(4).tolist(), "target_pose_base": np.eye(4).tolist()})
+    import_batch(service, tmp_path, "B001", 0.2)
+    first = service.create_baseline()
+    import_batch(service, tmp_path, "B002", 0.4)
+    service.evaluate()
+    import_batch(service, tmp_path, "B003", 0.6)
+    service.evaluate()
+    page = RobotPositionPage(service)
+    try:
+        assert not page.show_before_baseline.isChecked()
+        page.ui_scale = 1.0
+        last = service.create_baseline()
+        page._baseline_created(last)
+        page.result_metric.setCurrentIndex(1)
+        assert page.result["batch_id"] == "B003"
+        assert page.axis_values["distance"].text() == "0.0000"
+        assert [row["days"] for row in page.trend_chart.history] == [2]
+        assert page.trend_chart.baseline_day == 2
+        saved = deepcopy(service.list_history())
+        page.show_before_baseline.setChecked(True)
+        assert [row["days"] for row in page.trend_chart.history] == [0, 1, 2]
+        assert [row["distance"] for row in page.trend_chart.history] == pytest.approx([-0.4, -0.2, 0])
+        assert not page.axis_cards["distance"].property("overLimit")
+
+        def choose_first(dialog):
+            choice = dialog.findChild(QComboBox)
+            assert choice.count() == 2
+            assert choice.currentData() == last["path"]
+            choice.setCurrentIndex(choice.findData(first["path"]))
+            next(button for button in dialog.findChildren(QPushButton) if button.text() == "选择").click()
+            return dialog.result()
+
+        monkeypatch.setattr(QDialog, "exec", choose_first)
+        page._select_baseline()
+        assert page.result["batch_id"] == "B003"
+        assert page.result["baseline_id"] == first["id"]
+        assert page.axis_values["distance"].text() == "0.4000"
+        assert page.trend_chart.baseline_day == 0
+        assert service.list_history() == saved
+
+        older = service.load_observations(first["batch"]["saved_path"])
+        page._observations_loaded(older)
+        page._evaluation_completed(service.evaluate())
+        assert page.result["batch_id"] == "B003"
+        assert "B001" in page.observation_sample.currentText()
+        assert "主卡仍显示最新已评估观测 B003" in page.process_log.toPlainText()
+        reopened = RobotPositionPage(PositionMonitoringService(service.root))
+        try:
+            assert reopened.result["batch_id"] == "B003"
+            assert reopened.result["baseline_id"] == first["id"]
+            assert reopened.show_before_baseline.isChecked()
+            assert [row["days"] for row in reopened.trend_chart.history] == [0, 1, 2]
+        finally:
+            reopened.close()
+    finally:
+        page.close()
+
+
+def test_current_threshold_settings_update_details_export_and_preserve_history(application, tmp_path, monkeypatch):
+    service = PositionMonitoringService(tmp_path / "application")
+    service.save_parameters({"hand_eye": np.eye(4).tolist(), "target_pose_base": np.eye(4).tolist()})
+    import_batch(service, tmp_path, "B001", 0.2)
+    service.create_baseline()
+    import_batch(service, tmp_path, "B003", 0.6)
+    service.evaluate()
+    saved = deepcopy(service.list_history())
+    page = RobotPositionPage(service)
+    page.ui_scale = 1.0
+    try:
+        def set_threshold(dialog):
+            dialog.findChild(QLineEdit, "threshold_repeatability_distance").setText("0.5")
+            next(button for button in dialog.findChildren(QPushButton) if button.text() == "保存").click()
+            return dialog.result()
+
+        monkeypatch.setattr(QDialog, "exec", set_threshold)
+        page._show_settings()
+        assert page.axis_cards["distance"].property("overLimit")
+        assert page.result["metric_thresholds"]["repeatability"]["distance"] == 0.5
+        exported = tmp_path / "live_comparison.json"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(exported), ""))
+
+        def export_details(dialog):
+            assert any("当前阈值" in label.text() and "空间 0.5000" in label.text()
+                       for label in dialog.findChildren(QLabel))
+            next(button for button in dialog.findChildren(QPushButton) if button.text() == "导出结果").click()
+            dialog.accept()
+            return dialog.result()
+
+        monkeypatch.setattr(QDialog, "exec", export_details)
+        page._open_result_details(page.result)
+        assert read_document(exported)["metric_thresholds"]["repeatability"]["distance"] == 0.5
+        assert service.list_history() == saved
+    finally:
+        page.close()
+
+
+def test_parameter_change_keeps_latest_view_and_incompatible_baseline_has_visible_reason(application, tmp_path, monkeypatch):
+    service = PositionMonitoringService(tmp_path / "application")
+    service.save_parameters({"hand_eye": np.eye(4).tolist(), "target_pose_base": np.eye(4).tolist()})
+    import_batch(service, tmp_path, "B001", 0.2)
+    service.create_baseline()
+    import_batch(service, tmp_path, "B003", 0.6)
+    service.evaluate()
+    page = RobotPositionPage(service)
+    try:
+        parameters = deepcopy(service.parameters)
+        parameters["hand_eye"][0][3] = 10
+        parameter_path = tmp_path / "changed_parameters.json"
+        write_document(parameter_path, parameters)
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(parameter_path), ""))
+        page._load_parameters()
+        assert page.result["batch_id"] == "B003"
+        assert page.axis_values["distance"].text() == "0.6000"
+        import_batch(service, tmp_path, "B002", 0.4)
+        selected = service.create_baseline()
+        page._baseline_created(selected)
+        assert page.result["batch_id"] == "B003"
+        assert page.axis_values["distance"].text() == "0.6000"
+        assert page.result["comparison_error"] in page.result_hint.text()
+        assert selected["id"] in page.baseline_time_label.toolTip()
+        assert page.trend_chart.baseline_day == 1
+        page.result_metric.setCurrentIndex(0)
+        assert page.axis_values["distance"].text() == "—"
+        assert page.result["comparison_error"] in page.alarm_message.text()
+    finally:
+        page.close()
 
 
 def test_restored_logs_scroll_to_latest_after_main_window_layout_and_preserve_user_scroll(application, tmp_path, monkeypatch):
@@ -118,10 +248,15 @@ def test_restored_logs_scroll_to_latest_after_main_window_layout_and_preserve_us
     try:
         window.resize(1600, 960)
         window.show()
-        QTest.qWait(350)
         page = window.precision_page.content_stack.widget(0)
         log = page.process_log
         scrollbar = log.verticalScrollBar()
+        # 全套 Qt 测试共享 QApplication，首次全局换样式可能触发多轮布局。
+        for _ in range(20):
+            QTest.qWait(100)
+            if (not window.scale_timer.isActive() and log.textCursor().atEnd()
+                    and scrollbar.maximum() > 0 and scrollbar.value() == scrollbar.maximum()):
+                break
         assert log.textCursor().atEnd()
         assert scrollbar.maximum() > 0
         assert scrollbar.value() == scrollbar.maximum()

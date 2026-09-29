@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
     QComboBox,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -32,7 +33,7 @@ from PyQt6.QtWidgets import (
 
 from app.resources import DISPLAY, fit_dialog
 from core.services.position_monitoring_service import (
-    METRIC_LABELS, PositionMonitoringService, assess_metric, metric_values, read_document,
+    METRIC_LABELS, PositionMonitoringService, assess_metric, metric_values,
 )
 
 
@@ -109,12 +110,17 @@ class RobotPositionPage(QWidget):
         for entry in self.service.list_logs():
             self._display_log(entry)
         if self.service.latest_result is not None:
-            self._show_saved_result(self.service.latest_result)
-            batch = self.history_batches["current"] or {}
+            self._refresh_latest_result()
+            batch = self.service.latest_batch or {}
             self.task_progress.setValue(100)
             self.task_progress_note.setText(
                 f"已恢复 {self.result['batch_id']} 评估 · {len(batch.get('samples', []))} 个观测"
             )
+            current = self.service.current_batch
+            if current and current.get("saved_path") != batch.get("saved_path"):
+                self.task_progress_note.setText(
+                    f"已恢复 {current['batch_id']} 观测；主卡显示 {self.result['batch_id']} 最新评估"
+                )
         else:
             self._render_result()
             self._refresh_observations()
@@ -144,6 +150,8 @@ class RobotPositionPage(QWidget):
         self.process_log.ensureCursorVisible()
         scrollbar = self.process_log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+        # 长行首次滚入视野才完成折行，下一轮布局后再定位一次。
+        QTimer.singleShot(0, lambda: scrollbar.setValue(scrollbar.maximum()))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -313,7 +321,15 @@ class RobotPositionPage(QWidget):
         body.setSpacing(8)
         self.trend_title = QLabel("定位精度趋势")
         self.trend_title.setProperty("robotSectionTitle", True)
-        body.addWidget(self.trend_title)
+        title_row = QHBoxLayout()
+        title_row.addWidget(self.trend_title)
+        title_row.addStretch()
+        self.show_before_baseline = QCheckBox("显示基准前历史")
+        self.show_before_baseline.setChecked(self.service.settings.get("show_before_baseline", False))
+        self.show_before_baseline.setToolTip("历史观测统一相对当前基准重新比较，原保存结果保持不变。")
+        self.show_before_baseline.toggled.connect(self._toggle_baseline_history)
+        title_row.addWidget(self.show_before_baseline)
+        body.addLayout(title_row)
         self.trend_metric = QComboBox()
         self.trend_metric.setProperty("robotInput", True)
         self.trend_metric.setAccessibleName("曲线显示方式")
@@ -350,6 +366,10 @@ class RobotPositionPage(QWidget):
         self._refresh_history()
         self.trend_chart.update()
         self.append_log(f"趋势指标已切换为{self.trend_metric.currentText()}。")
+
+    def _toggle_baseline_history(self, checked):
+        self.service.save_settings({"show_before_baseline": checked})
+        self._refresh_history()
 
     def _point_results(self) -> QWidget:
         page = QWidget()
@@ -449,9 +469,9 @@ class RobotPositionPage(QWidget):
 
         baseline = self._settings_section(body, 5, "测量基准", "baseline")
         actions = QHBoxLayout()
-        actions.addWidget(
-            self._mutation_button("建立基准", self._create_baseline)
-        )
+        create_button = self._mutation_button("建立基准", self._create_baseline)
+        create_button.setToolTip("使用当前载入的观测建立基准")
+        actions.addWidget(create_button)
         actions.addWidget(
             self._mutation_button("选择基准", self._select_baseline)
         )
@@ -609,7 +629,7 @@ class RobotPositionPage(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{self._metric_name()} · 检测历史")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note("双击记录查看已保存结果；趋势只比较相同基准和参数版本。"))
+        layout.addWidget(self._note("双击查看当时保存的原结果及阈值；当前主卡仍显示最新观测与所选基准的比较。"))
         table = self._table(["测量批次", "评估时间", "基准版本", "手眼版本", "结论"])
         self._fill_table(table, [[*[str(row.get(key) or "—") for key in
                                   ("batch_id", "created_at", "baseline_id", "parameter_version")],
@@ -618,22 +638,22 @@ class RobotPositionPage(QWidget):
         layout.addWidget(table)
 
         def select(row, _column):
-            self._show_saved_result(records[row])
-            self.append_log(f"查看历史结果：{self.result['id']}。")
-            dialog.accept()
+            try:
+                self.history_batches = self.service.load_evaluation_samples(records[row])
+            except (OSError, ValueError, KeyError) as error:
+                self.history_batches = {"current": None, "baseline": None}
+                self.append_log(f"历史图像快照未能载入：{error}", "WARN")
+            self._refresh_observations()
+            self._open_result_details(records[row], historical=True)
 
         table.cellDoubleClicked.connect(select)
         layout.addWidget(self._button("关闭", dialog.reject))
         fit_dialog(dialog, 960, 460)
         dialog.exec()
 
-    def _show_saved_result(self, result):
-        self.result = result
-        try:
-            self.history_batches = self.service.load_evaluation_samples(result)
-        except (OSError, ValueError, KeyError) as error:
-            self.history_batches = {"current": None, "baseline": None}
-            self.append_log(f"历史图像快照未能载入：{error}", "WARN")
+    def _refresh_latest_result(self):
+        self.result = self.service.compare_latest()
+        self.history_batches = None
         self._render_result()
         self._refresh_observations()
 
@@ -705,8 +725,8 @@ class RobotPositionPage(QWidget):
                 error_label.setText(str(error))
                 return
             self._refresh_settings()
-            self._render_result()
-            self.append_log("阈值已保存；新阈值将在下次评估时用于判定。")
+            self._refresh_latest_result()
+            self.append_log("阈值已保存并应用到当前视图；历史原记录的阈值保持不变。")
             dialog.accept()
 
         actions = QHBoxLayout()
@@ -725,26 +745,6 @@ class RobotPositionPage(QWidget):
     def _display_time(value):
         parsed = QDateTime.fromString(str(value), Qt.DateFormat.ISODateWithMs)
         return parsed.toLocalTime().toString("yyyy-MM-dd HH:mm:ss") if parsed.isValid() else "—"
-
-    def _baseline_created_at(self, result=None):
-        baseline = self.service.baseline
-        if result is None:
-            return baseline.get("created_at") if baseline else None
-        if not result.get("baseline_id"):
-            return None
-        if result.get("baseline_created_at"):
-            return result["baseline_created_at"]
-        if baseline and baseline["id"] == result["baseline_id"]:
-            return baseline.get("created_at")
-        # 旧历史没有时间快照，只读取该历史自己的基准，不借用其他基准。
-        if result.get("baseline_path"):
-            try:
-                baseline = read_document(result["baseline_path"])
-            except (OSError, ValueError):
-                return None
-            if baseline.get("id") == result["baseline_id"]:
-                return baseline.get("created_at")
-        return None
 
     def _run_task(self, title, operation, completed):
         if self.task is not None:
@@ -830,13 +830,6 @@ class RobotPositionPage(QWidget):
         light.setToolTip(f"{status}\n{details}")
         light.setAccessibleDescription(f"{status}；{details}")
 
-    def _invalidate_result(self):
-        self.result = None
-        self.history_batches = None
-        self._render_result()
-        self._refresh_settings()
-        self._refresh_observations()
-
     def _load_parameters(self):
         path, _ = QFileDialog.getOpenFileName(self, "加载视觉与手眼参数", "", "参数文件 (*.json *.yaml *.yml)")
         if not path:
@@ -848,8 +841,9 @@ class RobotPositionPage(QWidget):
             self.append_log(f"参数加载失败：{error}", "ERROR")
             return
         if previous_version != self.service.parameters["version"]:
-            self._invalidate_result()
-            self.append_log(f"参数已加载：{Path(path).name}；请重新导入观测并建立或选择匹配基准。")
+            self._refresh_settings()
+            self._refresh_latest_result()
+            self.append_log(f"参数已加载：{Path(path).name}；后续图像按新参数处理，最新已评估观测保留其测量参数。")
         else:
             self.append_log("参数内容未变化，保留当前观测与基准。")
 
@@ -861,8 +855,9 @@ class RobotPositionPage(QWidget):
         fit_dialog(dialog, 980, 720)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             if previous_version != self.service.parameters["version"]:
-                self._invalidate_result()
-                self.append_log("默认参数已更新，上一版已备份；请重新导入观测。")
+                self._refresh_settings()
+                self._refresh_latest_result()
+                self.append_log("默认参数已更新，上一版已备份；最新已评估观测保留其测量参数。")
             else:
                 self.append_log("参数未修改，保留当前观测与基准。")
 
@@ -886,11 +881,11 @@ class RobotPositionPage(QWidget):
     def _import_source(self, path):
         if not path:
             return
-        self._invalidate_result()
         self._run_task("导入观测", lambda progress: self.service.load_observations(path, progress),
                        self._observations_loaded)
 
     def _observations_loaded(self, batch):
+        self.history_batches = None
         self._refresh_settings()
         self._refresh_observations()
         self._render_result()
@@ -906,7 +901,7 @@ class RobotPositionPage(QWidget):
 
     def _baseline_created(self, baseline):
         self._refresh_settings()
-        self._show_saved_result(self.service.latest_result)
+        self._refresh_latest_result()
         self.append_log(f"基准已建立：{baseline['id']}。请导入复测观测。")
 
     def _select_baseline(self):
@@ -917,11 +912,14 @@ class RobotPositionPage(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("选择测量基准")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note("选择后恢复基准关联参数，请重新导入复测观测。"))
+        layout.addWidget(self._note("选择已创建的基准，重新比较最新已评估观测和可比历史。"))
         choice = QComboBox()
         choice.setProperty("robotInput", True)
         for entry in entries:
             choice.addItem(f"{entry['created_at']} · {entry.get('label') or entry['id']}", entry["path"])
+        current_index = choice.findData((self.service.baseline or {}).get("path"))
+        if current_index >= 0:
+            choice.setCurrentIndex(current_index)
         layout.addWidget(choice)
         error_label = self._note("")
         layout.addWidget(error_label)
@@ -932,8 +930,9 @@ class RobotPositionPage(QWidget):
             except (ValueError, OSError, KeyError) as error:
                 error_label.setText(str(error))
                 return
-            self._invalidate_result()
-            self.append_log(f"基准已选择：{baseline['id']}；请重新导入复测观测。")
+            self._refresh_settings()
+            self._refresh_latest_result()
+            self.append_log(f"基准已选择：{baseline['id']}，当前比较与趋势已更新。")
             dialog.accept()
 
         actions = QHBoxLayout()
@@ -953,29 +952,35 @@ class RobotPositionPage(QWidget):
         )
 
     def _evaluation_completed(self, result):
-        self.result = result
+        self.result = self.service.latest_result or result
         self.history_batches = None
         self._render_result()
         self._refresh_observations()
-        self.append_log(f"评估完成：{result['id']} · {result['status']}，结果已保存。")
+        message = f"评估完成：{result['batch_id']} · {result['status']}，结果已保存。"
+        if self.result["batch_id"] != result["batch_id"]:
+            message += f"主卡仍显示最新已评估观测 {self.result['batch_id']}。"
+        self.append_log(message)
         for warning in result.get("warnings", []):
             self.append_log(warning, "WARN")
 
     def _metric_values(self, result, group=None):
         return metric_values(result, self._metric_mode(), group)
 
-    def _metric_rows(self):
+    def _metric_rows(self, result=None):
+        result = self.result if result is None else result
         rows = []
-        for group in self.result["groups"]:
+        for group in result["groups"]:
             count = str(group["current"]["count"])
             if self._metric_mode() != "repeatability":
                 initial_count = (group.get("baseline") or {}).get("count", "—")
                 count = f"{initial_count} → {count}"
             rows.append([f"{group['point_id']} / {group['direction_id']}",
-                         *[self._number(value) for value in self._metric_values(self.result, group)], count])
+                         *[self._number(value) for value in self._metric_values(result, group)], count])
         return rows
 
     def _unavailable_reasons(self):
+        if self.result.get("comparison_error"):
+            return [self.result["comparison_error"]]
         mode = self._metric_mode()
         if mode != "repeatability" and not self.result.get("baseline_id"):
             return ["需要匹配的基准与本次观测比较结果"]
@@ -1001,12 +1006,14 @@ class RobotPositionPage(QWidget):
         name = self._metric_name()
         hint = self._metric_hint()
         self.prediction_title.setText(f"{name} · 加工点位预测")
-        assessment = assess_metric(self.result, mode) if self.result is not None else None
-        thresholds = (assessment["thresholds"] if assessment else
-                      self.service.settings.get(self._threshold_key(), {}).get(mode, {}))
+        current_thresholds = self.service.settings.get(self._threshold_key(), {})
+        assessment = assess_metric({**self.result, "metric_thresholds": current_thresholds}, mode) if self.result is not None else None
+        thresholds = current_thresholds.get(mode, {})
+        summary_values = dict(zip(("X", "Y", "Z", "distance"), self._metric_values(self.result))) if self.result else {}
         alarm_axes = {alarm["axis"] for alarm in assessment["alarms"]} if assessment else set()
         for key, card in self.axis_cards.items():
-            over_limit = key in alarm_axes
+            value, threshold = summary_values.get(key), thresholds.get(key)
+            over_limit = value is not None and threshold is not None and value > threshold
             if card.property("overLimit") != over_limit:
                 card.setProperty("overLimit", over_limit)
                 for label in card.findChildren(QLabel):
@@ -1015,13 +1022,13 @@ class RobotPositionPage(QWidget):
                     label.update()
             threshold = thresholds.get(key)
             threshold_hint = "阈值未设置" if threshold is None else f"阈值：{self._number(threshold)} mm"
-            source = "本次评估保存的阈值" if assessment else "下一次评估使用的阈值"
-            card.setToolTip(f"{source} · {threshold_hint}" + ("\n存在逐点超限，请查看报警与维护" if key in alarm_axes else ""))
+            card.setToolTip(f"当前阈值 · {threshold_hint}；卡片按汇总值判色"
+                            + ("\n存在逐点超限，请查看报警与维护" if key in alarm_axes else ""))
             self.axis_titles[key].setToolTip(hint)
         self.measured_table.horizontalHeaderItem(4).setToolTip(hint)
         context = self.result or self.service.current_batch or {}
         baseline = self.service.baseline or {}
-        baseline_time = self._baseline_created_at(self.result)
+        baseline_time = baseline.get("created_at")
         self.evaluation_time_label.setText(
             f"评价更新时间：{self._display_time(self.result.get('created_at') if self.result else None)}"
         )
@@ -1030,16 +1037,17 @@ class RobotPositionPage(QWidget):
             f"观测批次：{context.get('batch_label') or context.get('label') or context.get('batch_id') or '—'}\n"
             f"参数版本：{context.get('parameter_version') or '—'}"
         )
-        baseline_id = self.result.get("baseline_id") if self.result is not None else baseline.get("id")
+        baseline_id = baseline.get("id")
         self.baseline_time_label.setToolTip(f"基准编号：{baseline_id or '—'}")
         if self.result is None:
             for label in self.axis_values.values():
                 label.setText("—")
             pending = "等待本次观测并评估" if mode == "repeatability" else "需要基准与本次观测并评估"
-            self.result_hint.setText(pending)
+            comparison_error = self.service.latest_comparison_error
+            self.result_hint.setText(comparison_error or pending)
             self.result_hint.setToolTip(hint)
             self.alarm_status.setText(f"{name} · 尚未评估")
-            self.alarm_message.setText("尚无该指标的判定结果。")
+            self.alarm_message.setText(comparison_error or "尚无该指标的判定结果。")
             self._fill_table(self.measured_table, [])
         else:
             result = self.result
@@ -1047,7 +1055,9 @@ class RobotPositionPage(QWidget):
                 self.axis_values[key].setText(self._number(value))
             self._fill_table(self.measured_table, self._metric_rows())
             unavailable = self._unavailable_reasons()
-            self.result_hint.setText("；".join(unavailable) if unavailable else "逐点等权汇总 · 单位 mm")
+            baseline_name = (baseline.get("batch") or {}).get("batch_id") or baseline.get("label") or "无"
+            context_hint = f"最新已评估 {result['batch_id']} · 基准 {baseline_name} · "
+            self.result_hint.setText(context_hint + ("；".join(unavailable) if unavailable else "逐点等权汇总 · 单位 mm"))
             warnings = result.get("warnings", [])
             self.result_hint.setToolTip(hint + "\n" + "\n".join(warnings))
             alarms = assessment["alarms"]
@@ -1064,66 +1074,45 @@ class RobotPositionPage(QWidget):
         self._refresh_history()
 
     def _refresh_history(self):
-        baseline_id = self.result.get("baseline_id") if self.result else (
-            self.service.baseline.get("id") if self.service.baseline else None
-        )
-        history = self.service.list_history()
-        parameter_version = self.result.get("parameter_version") if self.result else self.service.parameters.get("version")
+        history = self.service.history_comparisons(include_before=True)
         baseline_batch = (self.service.baseline or {}).get("batch", {})
-        context = self.result or self.service.current_batch or baseline_batch
+        context = self.result or baseline_batch
         debug = context.get("debug_day_index") is not None
         self.trend_chart.integer_days = debug
-        baseline_day = context.get("baseline_debug_day_index", baseline_batch.get("debug_day_index"))
-        observed_origin = context.get("baseline_observed_at")
-        if observed_origin is None and (self.service.baseline or {}).get("id") == baseline_id:
-            observed_origin = baseline_batch.get("observed_at")
-        observed_time = context.get("observed_at") is not None and observed_origin is not None
-        origin_value = observed_origin if observed_time else self._baseline_created_at(self.result)
-        origin = QDateTime.fromString(str(origin_value), Qt.DateFormat.ISODateWithMs)
+        observed_time = bool(context.get("observed_at") or baseline_batch.get("observed_at"))
+        baseline_time = baseline_batch.get("observed_at") if observed_time else (self.service.baseline or {}).get("created_at")
+        baseline_stamp = QDateTime.fromString(str(baseline_time), Qt.DateFormat.ISODateWithMs)
+        timestamps = [QDateTime.fromString(str(row.get("observed_at") if observed_time else row.get("created_at")),
+                                          Qt.DateFormat.ISODateWithMs) for row in history]
+        valid_times = [stamp for stamp in [baseline_stamp, *timestamps] if stamp.isValid()]
+        origin = min(valid_times, key=lambda stamp: stamp.toMSecsSinceEpoch()) if valid_times else QDateTime()
+        baseline_day = baseline_batch.get("debug_day_index") if debug else (
+            origin.msecsTo(baseline_stamp) / 86400000 if origin.isValid() and baseline_stamp.isValid() else None
+        )
+        self.trend_chart.baseline_day = baseline_day
         if debug:
             self.trend_time_caption.setText("调试天数")
-            self.trend_time_caption.setToolTip("每个仿真批次为一天；B001 为第 0 天，重复评估同批次不增加天数。")
+            self.trend_time_caption.setToolTip("固定采集时间线：B001 为第 0 天，B002 为第 1 天；虚线标记当前基准。")
         elif not observed_time:
             self.trend_time_caption.setText("评估时间 / 天")
-            self.trend_time_caption.setToolTip("旧记录缺少采集时间，按评估时间相对基准建立时间绘制，1 天 = 24 小时。")
-        self.trend_chart.empty_message = (
-            "暂无历史评估记录" if (baseline_day is not None if debug else origin.isValid())
-            else "缺少基准时间，无法显示相对时间趋势"
-        )
-        groups = context.get("groups", context.get("samples", []))
-        point_directions = {(entry["point_id"], entry["direction_id"])
-                            for group in groups for entry in group.get("directions", [group])}
+            self.trend_time_caption.setToolTip("旧记录缺少采集时间，按最早可比记录的评估时间绘制；虚线标记当前基准。")
+        self.trend_chart.empty_message = "暂无可比历史评估记录"
         records = []
         debug_records = {}
         time_sources = set()
-        for result in history:
-            if result.get("sampling_protocol") != context.get("sampling_protocol"):
-                continue
-            if (result.get("parameter_version") != parameter_version
-                    or result.get("baseline_id") != baseline_id):
-                continue
-            if any(context.get(field) and result.get(field) != context[field]
-                   for field in ("program_id", "target_id")):
-                continue
-            record_points = {(entry["point_id"], entry["direction_id"])
-                             for group in result["groups"] for entry in group.get("directions", [group])}
-            if point_directions and record_points != point_directions:
-                continue
+        for result, timestamp in zip(history, timestamps):
             if debug:
-                day = result.get("debug_day_index")
-                if day is None or baseline_day is None:
+                days = result.get("debug_day_index")
+                if days is None:
                     continue
-                days = day - baseline_day
             else:
                 if result.get("debug_day_index") is not None:
                     continue
-                timestamp = QDateTime.fromString(
-                    str(result.get("observed_at") if observed_time else result.get("created_at")),
-                    Qt.DateFormat.ISODateWithMs,
-                )
                 if not origin.isValid() or not timestamp.isValid():
                     continue
                 days = origin.msecsTo(timestamp) / 86400000
+            if baseline_day is not None and not self.show_before_baseline.isChecked() and result.get("before_baseline", days < baseline_day):
+                continue
             values = self._metric_values(result)
             record = {"days": days, **dict(zip(("X", "Y", "Z", "distance"), values))}
             if debug:
@@ -1133,7 +1122,9 @@ class RobotPositionPage(QWidget):
             else:
                 records.append(record)
                 if observed_time:
-                    time_sources.update((result.get("time_source"), result.get("baseline_time_source")))
+                    time_sources.add(result.get("time_source"))
+                    if self.service.baseline:
+                        time_sources.add(result.get("baseline_time_source"))
         if debug:
             records = [record for _, record in debug_records.values()]
         elif observed_time:
@@ -1148,6 +1139,7 @@ class RobotPositionPage(QWidget):
             sources = "；".join(label for source, label in labels.items() if source in time_sources)
             self.trend_time_caption.setToolTip(f"当前曲线时间来源：{sources or '尚无可绘制记录'}。1 天 = 24 小时。")
         self.trend_chart.set_history(records)
+        self.trend_chart.setToolTip("\n".join(self.service.history_comparison_warnings))
         axis = "空间" if self.trend_metric.currentData() == "distance" else "基座 XYZ"
         self.trend_axis_title.setText(f"{axis} / mm")
 
@@ -1219,48 +1211,71 @@ class RobotPositionPage(QWidget):
         if self.result is None:
             self.append_log("尚无评估结果。", "WARN")
             return
+        self._open_result_details(self.result)
+
+    def _open_result_details(self, result, historical=False):
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"{self._metric_name()} · 评估明细")
+        title = "历史原记录" if historical else "当前比较明细"
+        dialog.setWindowTitle(f"{self._metric_name()} · {title}")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note(self._metric_hint()))
+        if historical:
+            state = assess_metric(result, self._metric_mode())
+            layout.addWidget(self._note(
+                f"批次 {result['batch_id']} · 原基准 {result.get('baseline_id') or '无'} · "
+                f"保存时判定：{state['status']}；此窗口保留当时的指标和阈值。"
+            ))
+        else:
+            layout.addWidget(self._note(self._metric_hint()))
+        thresholds = assess_metric(result, self._metric_mode())["thresholds"]
+        names = ("X", "Y", "Z", "空间")
+        values = metric_values(result, self._metric_mode())
+        layout.addWidget(self._note("汇总值 / mm：" + "；".join(
+            f"{name} {self._number(value)}" for name, value in zip(names, values)
+        )))
+        layout.addWidget(self._note(("保存时阈值" if historical else "当前阈值") + " / mm：" + "；".join(
+            f"{name} {self._number(thresholds.get(key))}" for name, key in zip(names, ("X", "Y", "Z", "distance"))
+        )))
         table = self._table(RESULT_COLUMNS)
-        self._fill_table(table, self._metric_rows())
+        self._fill_table(table, self._metric_rows(result))
         layout.addWidget(table, 1)
         notes = QPlainTextEdit()
         notes.setReadOnly(True)
-        notes.setPlainText(self._result_details_text())
+        notes.setPlainText(self._result_details_text(result))
         layout.addWidget(notes)
         actions = QHBoxLayout()
         actions.addStretch()
-        actions.addWidget(self._button("导出结果", self._export_result, True))
+        actions.addWidget(self._button("导出结果", lambda: self._export_result(result), True))
         actions.addWidget(self._button("关闭", dialog.reject))
         layout.addLayout(actions)
         fit_dialog(dialog, 980, 580)
         dialog.exec()
 
-    def _result_details_text(self):
-        lines = [self._metric_hint(),
+    def _result_details_text(self, result=None):
+        result = self.result if result is None else result
+        hints = MULTIDIRECTIONAL_HINTS if result.get("sampling_protocol") == "multidirectional" else METRIC_HINTS
+        lines = [hints[self._metric_mode()],
                  "单位 mm。以下诊断用 Δp 表达在各测点的固定初始参考末端系，不能混称基座 XYZ。"]
-        for group in self.result["groups"]:
+        for group in result["groups"]:
             if group.get("drift_local") is None:
                 continue
             components = ", ".join(self._number(value) for value in group["drift_local"])
             lines.append(f"{group['point_id']}/{group['direction_id']} 初始参考末端系 Δp (mm)：[{components}]")
-        for point in self.result.get("points", []):
+        for point in result.get("points", []):
             if point.get("baseline_vap") is not None or point.get("current_vap") is not None:
                 lines.append(
                     f"{point['point_id']} 接近方向均值最大间距："
                     f"基准 {self._number(point.get('baseline_vap'))} → 本次 {self._number(point.get('current_vap'))}；"
                     f"变化 {self._number(point.get('vap_change'))}（非同方向 RP）。"
                 )
-        lines.extend(self.result.get("warnings", []))
+        lines.extend(result.get("warnings", []))
         return "\n".join(lines)
 
-    def _export_result(self):
-        path, _ = QFileDialog.getSaveFileName(self, "导出定位结果", f"{self.result['id']}.json", "JSON (*.json)")
+    def _export_result(self, result=None):
+        result = self.result if result is None else result
+        path, _ = QFileDialog.getSaveFileName(self, "导出定位结果", f"{result['id']}.json", "JSON (*.json)")
         if path:
             try:
-                self.service.export_result(path, self.result)
+                self.service.export_result(path, result)
             except OSError as error:
                 self.append_log(f"导出失败：{error}", "ERROR")
                 return
@@ -1469,11 +1484,12 @@ class PositionTrendChart(QWidget):
         self.mode = "xyz"
         self.history = []
         self.integer_days = False
+        self.baseline_day = None
         self.empty_message = "暂无历史评估记录"
         self.setAccessibleName("多次评估的定位精度趋势图")
 
     def set_history(self, records: list[dict]) -> None:
-        """days 为相对基准的天数；X、Y、Z、distance 未计算时为 None。"""
+        """days 为固定采集时间线上的天数；未计算的指标为 None。"""
         self.history = sorted(records, key=lambda record: record["days"])
         self.update()
 
@@ -1522,8 +1538,8 @@ class PositionTrendChart(QWidget):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                 f"{value:.3f}",
             )
-        first_day = min(0, self.history[0]["days"])
-        last_day = max(0, self.history[-1]["days"])
+        first_day = min(0, self.history[0]["days"], self.baseline_day or 0)
+        last_day = max(0, self.history[-1]["days"], self.baseline_day or 0)
         if first_day == last_day:
             last_day = first_day + 1
         if self.integer_days:
@@ -1542,6 +1558,14 @@ class PositionTrendChart(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 tick_label,
             )
+        if self.baseline_day is not None:
+            x = plot.left() + plot.width() * (self.baseline_day - first_day) / (last_day - first_day)
+            painter.setPen(QPen(QColor(colors["inactive"]), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+            label_width = metrics.horizontalAdvance("当前基准") + 8
+            label_left = min(max(plot.left(), x + 4), plot.right() - label_width)
+            painter.drawText(QRectF(label_left, plot.top(), label_width, line_height),
+                             Qt.AlignmentFlag.AlignLeft, "当前基准")
         color_keys = {
             "X": "action",
             "Y": "axis_y",

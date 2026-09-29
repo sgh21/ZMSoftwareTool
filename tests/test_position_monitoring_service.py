@@ -168,10 +168,13 @@ def test_parameter_update_preserves_previous_version_and_requires_matching_basel
     with pytest.raises(ValueError, match="参数版本已变化"):
         service.evaluate()
     assert service.list_history() == []
+    new_version = service.parameters["version"]
+    pending = deepcopy(service.current_batch)
     service.select_baseline(baseline["path"])
-    assert service.parameters["version"] == old_version
-    service.load_observations(current_path)
-    assert service.evaluate()["groups"][0]["drift_base"] == pytest.approx([1, 0, 0], abs=1e-9)
+    assert service.parameters["version"] == new_version
+    assert service.current_batch == pending
+    with pytest.raises(ValueError, match="参数版本已变化"):
+        service.evaluate()
 
 
 @pytest.mark.parametrize("field", ["program_id", "target_id"])
@@ -471,3 +474,18 @@ def test_current_mode_still_compares_when_the_baseline_is_compatible(service, tm
     assert result["baseline_id"] == baseline["id"]
     assert result["baseline_created_at"] == baseline["created_at"]
     assert result["summary"]["rp_change"] == pytest.approx(0)
+
+
+def test_rebaselining_same_direction_observations_does_not_borrow_original_initial_errors(service, tmp_path):
+    first = establish_baseline(service, tmp_path / "first.json", initial_errors={"P1": {"D1": [1, 0, 0]}})
+    service.load_observations(batch_file(tmp_path / "second.json", repeated((101, 200, 300))))
+    second = service.create_baseline("new reference")
+    service.load_observations(batch_file(tmp_path / "third.json", repeated((102, 200, 300))))
+    service.evaluate()
+    assert service.latest_result["summary"]["absolute_ap_change"] is None
+    assert any("没有初始绝对误差" in message for message in service.latest_result["warnings"])
+    service.select_baseline(first["path"])
+    assert service.latest_result["summary"]["absolute_ap_change"] == pytest.approx(2)
+    service.select_baseline(second["path"])
+    assert service.latest_result["summary"]["absolute_ap_change"] is None
+    assert service.latest_result["groups"][0]["drift_base"] == pytest.approx([1, 0, 0])

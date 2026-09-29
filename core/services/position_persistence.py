@@ -69,12 +69,6 @@ class PositionStore:
             records.append(self._complete_times(read_json(path)))
         return sorted(records, key=lambda item: (item["created_at"], item["id"]))
 
-    def result(self, reference):
-        document = read_json(reference["path"])
-        if "evaluations" not in document:
-            return self._complete_times(document)
-        return next(item for item in document["evaluations"] if item["id"] == reference["id"])
-
     @staticmethod
     def _complete_times(result):
         """旧评估只补时间来源，不重算指标或写回已有文件。"""

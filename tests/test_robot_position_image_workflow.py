@@ -72,6 +72,7 @@ def test_saving_unchanged_parameters_preserves_observations_and_display(
     page = RobotPositionPage(service)
     page.ui_scale = 1.0
     page._evaluation_completed(result)
+    shown_result = page.result
     current = service.current_batch
     baseline = service.baseline
     version = service.parameters["version"]
@@ -98,7 +99,7 @@ def test_saving_unchanged_parameters_preserves_observations_and_display(
         assert service.previous_parameter_path.read_bytes() == previous_bytes
         assert service.current_batch is current
         assert service.baseline is baseline
-        assert page.result is result
+        assert page.result is shown_result
         assert page.axis_values["distance"].text() == shown == "0.2000"
         assert page.observation_sample.count() == 2
         assert page.measured_table.rowCount() == 1
@@ -110,6 +111,7 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
     application, service, monkeypatch,
 ):
     result = compare(service)
+    service.baseline["batch"]["observed_at"] = "2026-09-27T00:00:00+00:00"
     result.update({
         "baseline_created_at": "2026-09-27T00:00:00+00:00",
         "created_at": "2026-09-28T00:00:00+00:00",
@@ -120,19 +122,13 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
     reordered["created_at"] = "2026-09-29T00:00:00+00:00"
     reordered["observed_at"] = "2026-09-29T00:00:00+00:00"
     reordered["groups"][0]["directions"].reverse()
-    wrong_direction = deepcopy(result)
-    wrong_direction["groups"][0]["directions"][1]["direction_id"] = "D003"
-    wrong_point = deepcopy(result)
-    wrong_point["groups"][0]["point_id"] = "P002"
-    for direction in wrong_point["groups"][0]["directions"]:
-        direction["point_id"] = "P002"
-    other_protocol = {**result, "sampling_protocol": None}
     monkeypatch.setattr(
-        service, "list_history",
-        lambda: [result, reordered, wrong_direction, wrong_point, other_protocol],
+        service, "history_comparisons",
+        lambda include_before=False: [result, reordered],
     )
     page = RobotPositionPage(service)
     try:
+        service.latest_result = result
         page._evaluation_completed(result)
         assert page.result_metric.currentText() == "当前重复定位精度"
         assert "非国标同方向RP" in page.result_hint.toolTip()
@@ -169,8 +165,8 @@ def test_multidirectional_thresholds_are_separate_and_history_keeps_saved_limits
 
         service.save_settings({"multidirectional_thresholds": {"repeatability": {"X": 0.3}}})
         page._render_result()
-        assert page.axis_cards["X"].property("overLimit") is False
-        assert "2.0000" in page.axis_cards["X"].toolTip()
+        assert page.axis_cards["X"].property("overLimit") is True
+        assert "0.3000" in page.axis_cards["X"].toolTip()
         assert service.settings["metric_thresholds"]["repeatability"]["X"] == 0.1
 
         service.current_batch = batch(service, [-0.2, 0.2], multidirectional=False)
@@ -204,8 +200,8 @@ def test_one_direction_absolute_degradation_alarm_survives_point_average(applica
         page._evaluation_completed(result)
         page.result_metric.setCurrentIndex(0)
         assert page.axis_values["X"].text() == "1.0000"
-        assert page.axis_cards["X"].property("overLimit") is True
-        assert page.axis_cards["distance"].property("overLimit") is True
+        assert page.axis_cards["X"].property("overLimit") is False
+        assert page.axis_cards["distance"].property("overLimit") is False
         assert page.axis_cards["Y"].property("overLimit") is False
         assert "P001/D001 X：2.0000 > 1.5000 mm" in page.alarm_message.text()
     finally:

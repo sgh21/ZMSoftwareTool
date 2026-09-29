@@ -124,20 +124,26 @@ def test_legacy_state_migrates_once_without_deleting_old_versions(tmp_path):
     assert "parameters" not in read_document(state_path)
 
 
-def test_select_baseline_restores_exact_version_and_rolls_previous_parameters(tmp_path):
+def test_select_baseline_keeps_current_parameters_and_compares_saved_observation_parameters(tmp_path):
     service = PositionMonitoringService(root=tmp_path)
     first = service.save_parameters({"hand_eye": np.eye(4).tolist()})
     service.load_observations(observation_file(tmp_path))
     baseline = service.create_baseline("initial")
     baseline_bytes = Path(baseline["path"]).read_bytes()
     second = service.save_parameters({"square_size_mm": first["square_size_mm"] + 1})
+    assert service.current_batch is None
+    assert service.latest_batch["parameter_version"] == first["version"]
+    latest = deepcopy(service.latest_result)
     service.select_baseline(baseline["path"])
-    assert service.parameters == first
-    assert read_document(service.parameter_path) == first
-    assert read_document(service.previous_parameter_path) == second
+    assert service.parameters == second
+    assert read_document(service.parameter_path) == second
+    assert read_document(service.previous_parameter_path) == first
+    assert service.latest_result == latest
     assert Path(baseline["path"]).read_bytes() == baseline_bytes
     reopened = PositionMonitoringService(root=tmp_path)
-    assert reopened.parameters == first
+    assert reopened.parameters == second
+    assert reopened.current_batch is None
+    assert reopened.latest_result == latest
     assert reopened.baseline["parameters"]["version"] == first["version"]
     backup_bytes = reopened.previous_parameter_path.read_bytes()
     reopened.select_baseline(baseline["path"])

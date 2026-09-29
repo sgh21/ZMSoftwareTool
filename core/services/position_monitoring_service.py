@@ -101,6 +101,23 @@ def _stamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
+def _instant(value):
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return stamp if stamp.tzinfo else stamp.astimezone()
+
+
+def _newer_observation(candidate, previous):
+    """调试同一程序按模拟日，实测按采集/导入时间；重评时间仅用于同次观测。"""
+    if previous is None:
+        return True
+    same_program = all(candidate.get(key) == previous.get(key) for key in ("program_id", "target_id"))
+    days = [item.get("debug_day_index") for item in (candidate, previous)]
+    if same_program and all(day is not None for day in days) and days[0] != days[1]:
+        return days[0] > days[1]
+    return (_instant(candidate["observed_at"]), _instant(candidate["created_at"])) >= (
+        _instant(previous["observed_at"]), _instant(previous["created_at"]))
+
+
 def _rotation(value, name):
     transform = np.eye(4)
     rotation = np.asarray(value, dtype=float)
@@ -137,7 +154,11 @@ class PositionMonitoringService:
         }
         self.baseline = None
         self.current_batch = None
+        self.latest_batch = None
         self.latest_result = None
+        self.latest_comparison_error = ""
+        self.history_comparison_warnings = []
+        self._latest_evaluation = None
         self._latest_result_ref = None
         self.settings.update(state.get("settings", {}))
         if state.get("baseline_path"):
@@ -145,31 +166,28 @@ class PositionMonitoringService:
         if state.get("current_batch_path"):
             self.current_batch = read_document(state["current_batch_path"])
             self.current_batch["saved_path"] = state["current_batch_path"]
-        if state.get("latest_result"):
-            self._latest_result_ref = state["latest_result"]
-            self.latest_result = self._store.result(self._latest_result_ref)
-        elif "current_batch_path" not in state:
-            # 旧版没有保存最后导入状态，仅能从最后一条兼容评估恢复。
-            records = [item for item in self.list_history()
-                       if item.get("parameter_version") == self.parameters.get("version")
-                       and item.get("baseline_id") == (self.baseline["id"] if self.baseline else None)]
-            if records:
-                self.latest_result = records[-1]
-                self._latest_result_ref = {
-                    "path": str(self.storage / "history" / f"{self.latest_result['id']}.json"),
-                    "id": self.latest_result["id"],
-                }
-                self.current_batch = read_document(self.latest_result["current_batch_path"])
-                self.current_batch["saved_path"] = self.latest_result["current_batch_path"]
+        # 旧版切换基准会清空 state 的结果指针，仍从实际已评估观测恢复。
+        # 不按最后评估时间挑选，避免早期观测重评或建立基准覆盖最新采集。
+        for record in self.list_history():
+            if record.get("current_batch_path") and _newer_observation(record, self._latest_evaluation):
+                self._latest_evaluation = record
+        if self._latest_evaluation:
+            record = self._latest_evaluation
+            self.latest_batch = self._read_evaluated_batch(record)
+            legacy = self.storage / "history" / f"{record['id']}.json"
+            day = record.get("debug_day_index")
+            date = _instant(record["observed_at"]).astimezone().date().isoformat()
+            path = legacy if legacy.exists() else (
+                self.storage / "debug" / f"day_{day:04d}.json" if day is not None
+                else self.storage / "daily" / f"{date}.json")
+            self._latest_result_ref = {"path": str(path), "id": record["id"]}
+            if self.current_batch is None:
+                self.current_batch = deepcopy(self.latest_batch)
         if self.current_batch and self.current_batch.get("parameter_version") != self.parameters.get("version"):
             self.current_batch = None
         if self.current_batch:
-            observation_time(self.current_batch, self.latest_result["created_at"] if self.latest_result else None)
-        if (self.latest_result and (self.current_batch is None
-                or self.latest_result.get("current_batch_path") != self.current_batch.get("saved_path")
-                or self.latest_result.get("parameter_version") != self.parameters.get("version"))):
-            self.latest_result = None
-            self._latest_result_ref = None
+            observation_time(self.current_batch, self._latest_evaluation["created_at"] if self._latest_evaluation else None)
+        self.compare_latest()
         if "current_batch_path" not in state or "parameters" in state:
             self._save_state()
 
@@ -186,10 +204,18 @@ class PositionMonitoringService:
         baseline = read_document(path)
         if "batch_path" in baseline:
             baseline["batch"] = read_document(baseline["batch_path"])
+            baseline["batch"]["saved_path"] = baseline["batch_path"]
         if "batch" in baseline:
             observation_time(baseline["batch"], baseline.get("created_at"), "baseline_created_at")
         baseline["path"] = str(Path(path).resolve())
         return baseline
+
+    @staticmethod
+    def _read_evaluated_batch(result):
+        batch = read_document(result["current_batch_path"])
+        batch["saved_path"] = result["current_batch_path"]
+        observation_time(batch, result["created_at"])
+        return batch
 
     def load_evaluation_samples(self, result):
         current = read_document(result["current_batch_path"])
@@ -283,8 +309,7 @@ class PositionMonitoringService:
         write_document(self.parameter_path, parameters)
         self.parameters = parameters
         self.current_batch = None
-        self.latest_result = None
-        self._latest_result_ref = None
+        self.compare_latest()
         self._save_state()
         return deepcopy(parameters)
 
@@ -308,13 +333,12 @@ class PositionMonitoringService:
                         raise ValueError(f"{axis} 阈值必须为非负数或留空")
                 thresholds[axis] = value
         self.settings = updated
+        self.compare_latest()
         self._save_state()
 
     def load_observations(self, path, progress=None):
         """导入单批图片/目录/观测文件，逐图解算后立即保存可复用的观测结果。"""
         self.current_batch = None
-        self.latest_result = None
-        self._latest_result_ref = None
         self._save_state()
         if isinstance(path, (list, tuple)) or Path(path).is_dir() or Path(path).suffix.lower() in IMAGE_SUFFIXES:
             batch = image_batch(path, self.parameters)
@@ -494,8 +518,7 @@ class PositionMonitoringService:
             self.evaluate()
         else:
             self.current_batch = None
-            self.latest_result = None
-            self._latest_result_ref = None
+            self.compare_latest()
         self._save_state()
         return deepcopy(baseline)
 
@@ -511,14 +534,8 @@ class PositionMonitoringService:
         if not all(key in baseline for key in ("id", "batch", "parameters")):
             raise ValueError("所选文件不是定位监控基准")
         baseline["path"] = str(Path(path).resolve())
-        if self.parameters != baseline["parameters"]:
-            write_document(self.previous_parameter_path, self.parameters)
-            write_document(self.parameter_path, baseline["parameters"])
         self.baseline = baseline
-        self.parameters = deepcopy(baseline["parameters"])
-        self.current_batch = None
-        self.latest_result = None
-        self._latest_result_ref = None
+        self.compare_latest()
         self._save_state()
         return deepcopy(baseline)
 
@@ -542,11 +559,19 @@ class PositionMonitoringService:
             return self.evaluate_current(progress)
         if self.baseline is None or self.current_batch is None:
             raise ValueError("评估需要已保存的基准和本次复测观测")
-        baseline_batch = self.baseline["batch"]
-        current = self.current_batch
-        version = self.baseline["parameters"]["version"]
-        if version != self.parameters["version"] or current["parameter_version"] != version:
+        if self.current_batch["parameter_version"] != self.parameters["version"]:
             raise ValueError("参数版本已变化，请选择原基准参数并重新导入，或建立新基准")
+        result = self._compare_batches(self.current_batch, self.baseline, self.parameters)
+        return self._save_evaluation(result, self.current_batch, progress)
+
+    def _compare_batches(self, current, baseline, parameters):
+        """只比较已保存的视觉位姿；无图像解算、状态修改或文件写入。"""
+        if baseline is None:
+            return self._current_repeatability(current, parameters)
+        baseline_batch = baseline["batch"]
+        version = baseline["parameters"]["version"]
+        if version != parameters["version"] or current["parameter_version"] != version:
+            raise ValueError("参数版本已变化，所选基准与观测不能比较")
         if current.get("comparison_status") == "calibration_only":
             raise ValueError("手眼标定数据不能直接作为复测数据")
         for field in ("program_id", "target_id"):
@@ -556,14 +581,14 @@ class PositionMonitoringService:
             raise ValueError("基准与复测的采样方式不一致，不能比较不同口径的指标")
         if current.get("sampling_protocol") == "multidirectional":
             result = evaluate_multidirectional(
-                current["samples"], self.parameters["hand_eye"],
+                current["samples"], parameters["hand_eye"],
                 baseline_samples=baseline_batch["samples"],
                 base_rotations=baseline_batch.get("base_rotations"),
-                target_pose_base=self.parameters.get("target_pose_base"),
+                target_pose_base=parameters.get("target_pose_base"),
             )
         else:
             result = evaluate_position_monitoring(
-                baseline_batch["samples"], current["samples"], self.parameters["hand_eye"],
+                baseline_batch["samples"], current["samples"], parameters["hand_eye"],
                 base_rotations=baseline_batch.get("base_rotations"),
                 initial_errors=baseline_batch.get("initial_errors"),
             )
@@ -571,47 +596,53 @@ class PositionMonitoringService:
             baseline_batch.get("warnings", []) + current.get("warnings", []) + result["warnings"]
         ))
         result.update({
-            "baseline_id": self.baseline["id"], "parameter_version": version,
-            "baseline_label": self.baseline["label"],
-            "baseline_created_at": self.baseline.get("created_at"),
+            "baseline_id": baseline["id"], "parameter_version": version,
+            "baseline_label": baseline["label"],
+            "baseline_created_at": baseline.get("created_at"),
             "orientation_source": baseline_batch.get("orientation_source", "unspecified"),
             "baseline_source": baseline_batch["source_path"],
-            "baseline_path": self.baseline["path"],
+            "baseline_path": baseline["path"],
         })
-        return self._save_evaluation(result, current, baseline_batch, progress)
+        if current.get("sampling_protocol") != "multidirectional" and not baseline_batch.get("initial_errors"):
+            result["warnings"].append("所选基准没有初始绝对误差，绝对定位精度退化不可计算")
+        return self._complete_result(result, current, baseline_batch)
 
     def evaluate_current(self, progress=None):
         """无需基准计算当前重复定位；不生成虚假的零退化量。"""
         current = self.current_batch
         if current is None:
             raise ValueError("请先导入本次观测")
-        if self.parameters.get("hand_eye") is None:
+        result = self._current_repeatability(current, self.parameters)
+        return self._save_evaluation(result, current, progress)
+
+    def _current_repeatability(self, current, parameters):
+        if parameters.get("hand_eye") is None:
             raise ValueError("评估前请加载相机到末端的手眼参数")
-        if current["parameter_version"] != self.parameters["version"]:
+        if current["parameter_version"] != parameters["version"]:
             raise ValueError("参数版本已变化，请重新导入本次观测")
         if current.get("comparison_status") == "calibration_only":
             raise ValueError("手眼标定数据不能直接作为重复定位观测")
         if current.get("sampling_protocol") == "multidirectional":
             result = evaluate_multidirectional(
-                current["samples"], self.parameters["hand_eye"],
+                current["samples"], parameters["hand_eye"],
                 base_rotations=current.get("base_rotations"),
-                target_pose_base=self.parameters.get("target_pose_base"),
+                target_pose_base=parameters.get("target_pose_base"),
             )
         else:
             result = evaluate_current_repeatability(
-                current["samples"], self.parameters["hand_eye"],
+                current["samples"], parameters["hand_eye"],
                 base_rotations=current.get("base_rotations"),
             )
         result["warnings"] = list(dict.fromkeys(current.get("warnings", []) + result["warnings"]))
         result.update({
             "baseline_id": None, "baseline_label": None, "baseline_path": None,
             "baseline_created_at": None,
-            "baseline_source": None, "parameter_version": self.parameters["version"],
+            "baseline_source": None, "parameter_version": parameters["version"],
             "orientation_source": current.get("orientation_source", "unspecified"),
         })
-        return self._save_evaluation(result, current, None, progress)
+        return self._complete_result(result, current, None)
 
-    def _save_evaluation(self, result, current, baseline_batch, progress):
+    def _complete_result(self, result, current, baseline_batch):
         batches = [current] + ([baseline_batch] if baseline_batch is not None else [])
         comparison_status = (
             "debug_unverified" if any(batch.get("comparison_status") == "debug_unverified"
@@ -621,7 +652,6 @@ class PositionMonitoringService:
         if comparison_status == "debug_unverified":
             result["warnings"].append("此数据仅供调试，不能将比较结果认定为真实精度退化")
         result.update({
-            "id": _stamp(), "created_at": datetime.now(timezone.utc).isoformat(),
             "batch_id": current["batch_id"], "batch_label": current["label"],
             "program_id": current["program_id"], "target_id": current["target_id"],
             "current_source": current["source_path"], "comparison_status": comparison_status,
@@ -651,15 +681,103 @@ class PositionMonitoringService:
         else:
             status = "部分指标不可判定"
         result["status"] = status
-        # 复用已保存观测；同日的多次评估集中保存，不复制图像与观测大文件。
         result["current_batch_path"] = current["saved_path"]
+        return result
+
+    def _save_evaluation(self, result, current, progress):
+        result.update({"id": _stamp(), "created_at": datetime.now(timezone.utc).isoformat()})
+        # 复用已保存观测；同日的多次评估集中保存，不复制图像与观测大文件。
         daily_path = self._store.record("evaluations", result, current, self.parameters)
-        self.latest_result = deepcopy(result)
-        self._latest_result_ref = {"path": str(daily_path), "id": result["id"]}
+        if _newer_observation(result, self._latest_evaluation):
+            self.latest_batch = deepcopy(current)
+            self._latest_evaluation = deepcopy(result)
+            self._latest_result_ref = {"path": str(daily_path), "id": result["id"]}
+        self.compare_latest()
         self._save_state()
         if progress:
             progress(100, "评估完成，已保存结果和观测快照")
         return result
+
+    def _batch_parameters(self, batch):
+        candidates = [batch.get("parameters"), self.parameters,
+                      self.baseline.get("parameters") if self.baseline else None]
+        for parameters in candidates:
+            if parameters and parameters.get("version") == batch["parameter_version"]:
+                return parameters
+        raise ValueError("已保存观测缺少对应的参数快照，无法重新比较")
+
+    @staticmethod
+    def _comparison_metadata(result, archived):
+        # 保留原评估身份和时间，当前视图不是一次新评估。
+        result.update({key: archived[key] for key in ("id", "created_at")})
+        day, baseline_day = result.get("debug_day_index"), result.get("baseline_debug_day_index")
+        if day is not None and baseline_day is not None:
+            elapsed = day - baseline_day
+        elif day is None and baseline_day is None and result.get("baseline_observed_at"):
+            elapsed = (_instant(result["observed_at"]) - _instant(result["baseline_observed_at"])).total_seconds() / 86400
+        else:
+            elapsed = None
+        result["comparison_days"] = elapsed
+        result["before_baseline"] = elapsed is not None and elapsed < 0
+        return result
+
+    def compare_latest(self):
+        """最新已评估观测相对当前基准的即时视图；不追加或改写任何历史。"""
+        self.latest_result = None
+        self.latest_comparison_error = ""
+        if self.latest_batch is None:
+            return None
+        try:
+            parameters = self._batch_parameters(self.latest_batch)
+        except ValueError as error:
+            self.latest_comparison_error = str(error)
+            return None
+        try:
+            result = self._compare_batches(self.latest_batch, self.baseline, parameters)
+        except ValueError as error:
+            self.latest_comparison_error = str(error)
+            # 当前散布仍由该观测自己的参数计算，不能换成更早的可比观测。
+            result = self._current_repeatability(self.latest_batch, parameters)
+            result["comparison_error"] = str(error)
+            result["warnings"].append(str(error))
+        self.latest_result = self._comparison_metadata(result, self._latest_evaluation)
+        return deepcopy(self.latest_result)
+
+    def history_comparisons(self, include_before=False):
+        """每次已评估观测只取一次，用当前基准和阈值重算曲线，档案保持原样。"""
+        self.history_comparison_warnings = []
+        if self.latest_batch is None:
+            return []
+        records = {record.get("current_batch_path"): record for record in self.list_history()
+                   if record.get("current_batch_path")}
+        comparisons = []
+        for record in records.values():
+            try:
+                batch = self._read_evaluated_batch(record)
+                if self.baseline is None:
+                    for field in ("parameter_version", "program_id", "target_id", "sampling_protocol"):
+                        if batch.get(field) != self.latest_batch.get(field):
+                            raise ValueError(f"{field} 与最新观测不一致，不能合并趋势")
+                    groups = [{(sample["point_id"], sample["direction_id"]) for sample in item["samples"]}
+                              for item in (batch, self.latest_batch)]
+                    if groups[0] != groups[1]:
+                        raise ValueError("测点/接近方向与最新观测不匹配，不能合并趋势")
+                    if batch.get("sampling_protocol") == "multidirectional":
+                        ideals = [{sample["point_id"]: sample["ideal_pose"] for sample in item["samples"]
+                                   if sample.get("ideal_pose") is not None} for item in (batch, self.latest_batch)]
+                        for point in ideals[0].keys() & ideals[1].keys():
+                            if not np.allclose(ideals[0][point], ideals[1][point], atol=1e-6, rtol=0):
+                                raise ValueError(f"测点 {point} 理想位姿与最新观测不一致，不能合并趋势")
+                result = self._compare_batches(batch, self.baseline, self._batch_parameters(batch))
+                self._comparison_metadata(result, record)
+            except ValueError as error:
+                self.history_comparison_warnings.append(f"{record['batch_id']}：{error}")
+                continue
+            if include_before or not result["before_baseline"]:
+                comparisons.append(result)
+        return sorted(comparisons, key=lambda item: (
+            item["debug_day_index"] if item["debug_day_index"] is not None else 0,
+            _instant(item["observed_at"])))
 
     def list_history(self, baseline_id=None):
         records = self._store.history()
