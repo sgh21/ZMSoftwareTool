@@ -5,7 +5,7 @@ from threading import Event
 
 import numpy as np
 import pytest
-from PyQt6.QtCore import QThread, QTimer
+from PyQt6.QtCore import QEvent, QThread, QTimer
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QComboBox, QDialog, QPushButton
 
@@ -65,6 +65,31 @@ def test_startup_restores_in_worker_while_event_loop_remains_responsive(applicat
         released.set()
         wait_for_page(page)
         assert page.task_progress.value() == 100
+        assert page.show_before_baseline.isEnabled()
+    finally:
+        released.set()
+        wait_for_page(page, success=False)
+        page.close()
+
+
+def test_task_completion_survives_source_dialog_destruction(application, tmp_path):
+    page = ready_position_page(PositionMonitoringService(tmp_path))
+    dialog = QDialog(page)
+    dialog_button = QPushButton("确认", dialog)
+    released = Event()
+
+    def operation(_progress):
+        assert released.wait(2)
+
+    try:
+        page._run_task("弹窗发起任务", operation, lambda _result: None)
+        assert dialog_button not in [control for control, _enabled in page._busy_controls]
+        dialog.deleteLater()
+        application.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        released.set()
+        wait_for_page(page)
+        assert page.task_progress.value() == 100
+        assert page._busy_controls == []
         assert page.show_before_baseline.isEnabled()
     finally:
         released.set()

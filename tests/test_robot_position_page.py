@@ -315,6 +315,14 @@ def test_evaluation_restores_current_observations_after_viewing_history(applicat
     assert opened == [(historical_result, True)]
     assert page.observation_sample.currentData() == historical_sample
     assert page.result["batch_id"] == "current-B"
+    assert page.observation_source.currentText() == "历史观测"
+    assert not page.return_to_current.isHidden()
+
+    page.return_to_current.click()
+    assert page.observation_source.currentText() == "本次观测"
+    assert page.observation_sample.currentData() == current_sample
+    assert page.return_to_current.isHidden()
+    assert page.result["batch_id"] == "current-B"
 
     page._evaluation_completed(current_result)
     assert page.history_batches is None

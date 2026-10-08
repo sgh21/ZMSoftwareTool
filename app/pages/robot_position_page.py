@@ -128,7 +128,11 @@ class RobotPositionPage(QWidget):
             if self.service.current_batch is not None:
                 self.task_progress_note.setText(f"已恢复 {self.service.current_batch['batch_id']} 观测，待评估")
             else:
-                self.task_progress_note.setText("记录已读取，等待导入观测")
+                self.task_progress_note.setText(
+                    "请先加载参数，再导入观测；首次测量可建立基准"
+                    if self.service.parameters.get("hand_eye") is None
+                    else "请导入观测；首次测量可建立基准，复测后点击评估精度"
+                )
         self._restore_log_position()
 
     def showEvent(self, event):
@@ -407,6 +411,9 @@ class RobotPositionPage(QWidget):
         self.observation_sample.setProperty("robotInput", True)
         self.observation_sample.setAccessibleName("观测样本")
         row.addWidget(self.observation_sample, 1)
+        self.return_to_current = make_button("返回当前", self._return_to_current_observations)
+        self.return_to_current.hide()
+        row.addWidget(self.return_to_current)
         row.addWidget(make_button("观测结果", self._show_observation_results))
         body.addLayout(row)
         image_area = QFrame()
@@ -710,19 +717,25 @@ class RobotPositionPage(QWidget):
         layout.addWidget(tabs)
         layout.addWidget(make_note("各指标与对应上限比较；历史结果保留评估时的阈值。"))
         error_label = make_note("")
+        error_label.setProperty("validationError", True)
         layout.addWidget(error_label)
 
         def save():
-            try:
-                values = {mode: {key: float(field.text()) if field.text().strip() else None
-                                 for key, field in mode_fields.items()}
-                          for mode, mode_fields in fields.items()}
-                if any(value is not None and (not isfinite(value) or value < 0)
-                       for mode_values in values.values() for value in mode_values.values()):
-                    raise ValueError("阈值必须是有限非负数。")
-            except (ValueError, OSError) as error:
-                error_label.setText(str(error))
-                return
+            values = {}
+            for index, (mode, mode_fields) in enumerate(fields.items()):
+                values[mode] = {}
+                for key, field in mode_fields.items():
+                    try:
+                        value = float(field.text()) if field.text().strip() else None
+                        if value is not None and (not isfinite(value) or value < 0):
+                            raise ValueError
+                    except ValueError:
+                        error_label.setText(f"{field.accessibleName()}：请输入大于或等于 0 的有限数值，或留空。")
+                        tabs.setCurrentIndex(index)
+                        field.setFocus()
+                        field.selectAll()
+                        return
+                    values[mode][key] = value
             key = self._threshold_key()
             dialog.accept()
             self._run_task("更新阈值", lambda progress: self.service.save_settings({key: values}, progress=progress),
@@ -769,7 +782,8 @@ class RobotPositionPage(QWidget):
             self.append_log(f"{title}开始。")
         self.task_progress.setRange(0, 0)
         self.task_progress_note.setText(f"{title}：准备处理")
-        controls = self.findChildren(QPushButton) + self.findChildren(QComboBox) + [self.show_before_baseline]
+        # 弹窗可能在任务完成前销毁，只管理页面中持续存在的控件。
+        controls = self.scroll_area.findChildren(QPushButton) + self.scroll_area.findChildren(QComboBox) + [self.show_before_baseline]
         self._busy_controls = [(control, control.isEnabled()) for control in controls]
         for control, _enabled in self._busy_controls:
             control.setEnabled(False)
@@ -833,6 +847,7 @@ class RobotPositionPage(QWidget):
         self._task_failed_callback = None
         for control, enabled in self._busy_controls:
             control.setEnabled(enabled)
+        self._busy_controls = []
 
     def _refresh_settings(self):
         parameters = self.service.parameters
@@ -886,6 +901,8 @@ class RobotPositionPage(QWidget):
                 self.append_log(f"参数已加载：{Path(path).name}；后续图像按新参数处理，最新已评估观测保留其测量参数。")
             else:
                 self.append_log("参数内容未变化，保留当前观测与基准。")
+            if self.service.current_batch is None:
+                self.task_progress_note.setText("参数已加载，请导入观测；首次测量可建立基准")
 
         self._run_task("加载参数", lambda _progress: self.service.load_parameters(path), loaded, refresh=True)
 
@@ -924,7 +941,12 @@ class RobotPositionPage(QWidget):
         if not path:
             return
         self._run_task("导入观测", lambda progress: self.service.load_observations(path, progress),
-                       self._observations_loaded)
+                       self._observations_loaded, failed=self._observation_import_failed)
+
+    def _observation_import_failed(self, message):
+        current = self.service.current_batch
+        if current:
+            self.task_progress_note.setText(f"导入失败：{message}\n当前仍载入 {current['batch_id']}，未导入新观测。")
 
     def _observations_loaded(self, batch):
         self.history_batches = None
@@ -932,6 +954,8 @@ class RobotPositionPage(QWidget):
         self._refresh_observations()
         self._render_result()
         self.append_log(f"已导入 {len(batch['samples'])} 个观测样本。")
+        next_step = "可建立基准或评估当前精度" if self.service.baseline is None else "请点击评估精度"
+        self.task_progress_note.setText(f"已导入 {batch['batch_id']} · {len(batch['samples'])} 个观测，{next_step}")
         if batch.get("saved_path"):
             self.append_log(f"观测结果已保存：{batch['saved_path']}")
         for warning in batch.get("warnings", []):
@@ -950,6 +974,7 @@ class RobotPositionPage(QWidget):
         self._refresh_settings()
         self._refresh_latest_result()
         self.append_log(f"基准已建立：{baseline['id']}。请导入复测观测。")
+        self.task_progress_note.setText(f"基准 {baseline['batch']['batch_id']} 已建立，请导入复测观测")
 
     def _show_duplicate_baseline(self, existing):
         message = QMessageBox(self)
@@ -1018,6 +1043,7 @@ class RobotPositionPage(QWidget):
         if self.result["batch_id"] != result["batch_id"]:
             message += f"主卡仍显示最新已评估观测 {self.result['batch_id']}。"
         self.append_log(message)
+        self.task_progress_note.setText(f"{result['batch_id']} 已评估并保存，可查看逐点结果、趋势和报警")
         for warning in result.get("warnings", []):
             self.append_log(warning, "WARN")
 
@@ -1131,6 +1157,14 @@ class RobotPositionPage(QWidget):
             )
         if context.get("comparison_status") == "simulation":
             self.result_hint.setText("仿真数据 · " + self.result_hint.text())
+        current = self.service.current_batch
+        if current and (self.result is None or current.get("saved_path") != (self.service.latest_batch or {}).get("saved_path")
+                        or current["batch_id"] != self.result["batch_id"]):
+            evaluated = current.get("saved_path") and any(
+                row.get("current_batch_path") == current["saved_path"] for row in self.saved_history
+            )
+            state = "已评估" if evaluated else "待评估"
+            self.result_hint.setText(f"已载入 {current['batch_id']}，{state}。\n" + self.result_hint.text())
         self._refresh_history()
 
     def _refresh_history(self):
@@ -1214,6 +1248,10 @@ class RobotPositionPage(QWidget):
         self.trend_axis_title.setText(f"{axis} / mm")
 
     def _refresh_observations(self):
+        historical = self.history_batches is not None
+        self.observation_source.setItemText(0, "历史观测" if historical else "本次观测")
+        self.observation_source.setItemText(1, "历史基准" if historical else "基准观测")
+        self.return_to_current.setVisible(historical)
         if self.history_batches is not None:
             source = "current" if self.observation_source.currentIndex() == 0 else "baseline"
             batch = self.history_batches[source]
@@ -1231,6 +1269,11 @@ class RobotPositionPage(QWidget):
         self._show_observation()
         if self.history_batches is not None and batch is None:
             self.image_message.setText("此历史结果未保存图像快照或快照不可用")
+
+    def _return_to_current_observations(self):
+        self.history_batches = None
+        self.observation_source.setCurrentIndex(0)
+        self._refresh_observations()
 
     def _show_observation(self):
         sample = self.observation_sample.currentData()

@@ -350,17 +350,46 @@ def test_mixed_batch_images_use_first_matrix_observation_as_board_reference(serv
     assert used_references[0] == pytest.approx(first_pose[:3, :3])
 
 
-def test_failed_import_clears_old_batch_before_evaluation(service, tmp_path):
+def test_failed_import_preserves_current_batch_in_memory_and_on_restart(service, tmp_path):
     establish_baseline(service, tmp_path / "initial.json")
     service.load_observations(batch_file(tmp_path / "valid.json", repeated((101, 200, 300))))
-    assert service.current_batch is not None
+    current = service.current_batch
+    state = (service.storage / "state.json").read_bytes()
     invalid = write_json(tmp_path / "invalid.json", {"length_unit": "mm"})
     with pytest.raises(ValueError, match="program_id"):
         service.load_observations(invalid)
-    assert service.current_batch is None
-    with pytest.raises(ValueError, match="本次复测观测"):
-        service.evaluate()
+    assert service.current_batch is current
+    assert (service.storage / "state.json").read_bytes() == state
+    restored = PositionMonitoringService(service.root)
+    assert restored.current_batch["saved_path"] == current["saved_path"]
     assert service.list_history() == []
+
+
+@pytest.mark.parametrize("stage", ["record", "state"])
+def test_import_save_failure_keeps_previous_batch_and_allows_retry(service, tmp_path, monkeypatch, stage):
+    service.load_observations(batch_file(tmp_path / "first.json", repeated(), batch_id="first"))
+    previous = service.current_batch
+    state_path = service.storage / "state.json"
+    state = state_path.read_bytes()
+    source = batch_file(tmp_path / "next.json", repeated((101, 200, 300)), batch_id="next")
+
+    def fail_save(*_args):
+        raise PermissionError("存储不可写")
+
+    with monkeypatch.context() as patcher:
+        if stage == "record":
+            patcher.setattr(service._store, "record", fail_save)
+        else:
+            patcher.setattr(service, "_save_state", fail_save)
+        with pytest.raises(PermissionError, match="存储不可写"):
+            service.load_observations(source)
+    assert service.current_batch is previous
+    assert state_path.read_bytes() == state
+    assert PositionMonitoringService(service.root).current_batch["saved_path"] == previous["saved_path"]
+
+    service.load_observations(source)
+    assert service.current_batch["batch_id"] == "next"
+    assert PositionMonitoringService(service.root).current_batch["saved_path"] == service.current_batch["saved_path"]
 
 
 def test_debug_batches_remain_explicitly_unverified(service, tmp_path):

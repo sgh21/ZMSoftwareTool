@@ -13,12 +13,12 @@ from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QPalette
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QInputDialog, QLabel,
-    QTableWidget,
+    QApplication, QComboBox, QDialog, QFileDialog, QInputDialog, QLabel, QMessageBox,
+    QPushButton, QTableWidget,
 )
 
 from app.pages.spindle_rotation_page import SpindleRotationPage
-from app.resources import DISPLAY, load_stylesheet
+from app.resources import DISPLAY, UiScale, load_stylesheet
 from core.algorithms import spindle_monitoring as algorithm
 from core.services.spindle_monitoring_service import SpindleMonitoringService
 from test_spindle_algorithms import make_run
@@ -230,12 +230,30 @@ def test_status_lights_follow_model_history_and_threshold_review(model_service, 
     assert "补算" in page.status_lights["model"].toolTip()
 
 
+def test_narrow_layout_keeps_log_and_progress_separate_after_resizing(service, page_factory):
+    page = page_factory(service)
+    metrics = UiScale(page)
+    try:
+        for width, height, scale in ((640, 400, .75), (1280, 800, 1), (640, 400, .75)):
+            page.resize(width, height)
+            metrics.apply(scale)
+            QApplication.instance().setStyleSheet(load_stylesheet(scale))
+            QTest.qWait(40)
+            assert page.process_log.geometry().bottom() < page.progress.geometry().top()
+            assert page.process_log.parentWidget().rect().contains(page.process_log.geometry())
+            assert page.progress.geometry().bottom() < page.task_progress_note.geometry().top()
+    finally:
+        QApplication.instance().setStyleSheet(load_stylesheet())
+
+
 def test_model_work_lights_only_model_group_and_finishes_progress_after_refresh(model_service, page_factory):
     model_service.set_thresholds(2, 4)
     page = page_factory(model_service)
     release = Event()
 
     def operation(progress):
+        for epoch in range(30):
+            progress(epoch, f"训练 {epoch + 1}/30，训练误差 0.001")
         progress(100, "训练完成，准备刷新")
         assert release.wait(5)
 
@@ -246,11 +264,15 @@ def test_model_work_lights_only_model_group_and_finishes_progress_after_refresh(
         assert page.status_lights["acquisition"].property("state") == "ready"
         assert page.status_lights["thresholds"].property("state") == "ready"
         assert page.task_progress_note.text() == "训练完成，准备刷新"
+        assert page.process_log.document().blockCount() == 1
+        assert "训练误差" not in page.process_log.toPlainText()
     finally:
         release.set()
         wait_until(lambda: page.task is None)
     assert page.progress.value() == 100
     assert page.status_lights["model"].property("state") == "ready"
+    assert page.process_log.document().blockCount() == 2
+    assert "处理完成" in page.process_log.toPlainText()
 
 
 def test_import_runs_in_worker_and_updates_real_dsp_without_blocking_gui(
@@ -306,6 +328,25 @@ def test_import_runs_in_worker_and_updates_real_dsp_without_blocking_gui(
     assert page.plots["distribution"].series == []
     assert page.daily_button.isEnabled()
     assert page.task is None
+
+
+def test_invalid_zip_recovers_controls_without_stretching_window(service, tmp_path, page_factory, monkeypatch):
+    package = tmp_path / ("invalid_input_" * 5 + ".zip")
+    package.write_text("not a ZIP", encoding="utf-8")
+    page = page_factory(service)
+    page.resize(1100, 800)
+    QApplication.processEvents()
+    width = page.width()
+    errors = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: errors.append(args[2]))
+    page.import_packages([package])
+    wait_until(lambda: page.task is None)
+    QTest.qWait(30)
+    assert errors and not service.runs
+    assert page.daily_button.isEnabled()
+    assert page.width() == width
+    assert "处理失败" in page.task_progress_note.text()
+    assert page.progress.toolTip() == page.task_progress_note.text()
 
 
 def test_daily_training_requires_manual_healthy_label_and_opt_in(service, tmp_path, page_factory):
@@ -426,6 +467,8 @@ def test_history_opens_exact_saved_evaluation_without_changing_manual_label(mode
     assert page.model_select.currentData() == original["model_version"]
     assert page.result["id"] == original["id"]
     assert page.result["thresholds"] == {"warning": None, "fault": None}
+    assert "未设置阈值" in page.source_badge.text()
+    assert "当时阈值" in page.source_badge.toolTip()
     assert page.label_select.currentData() == "abnormal"
     assert service.runs["daily"]["manual_label"] == "abnormal"
     assert len(service.state["results"]) == len(entries)
@@ -460,6 +503,34 @@ def test_unmodeled_history_and_selector_never_display_a_trained_result(model_ser
     assert page.label_select.currentData() == "abnormal"
 
 
+def test_failed_import_preserves_exact_historical_result(model_service, tmp_path, page_factory, monkeypatch):
+    original = model_service.latest_result("daily")
+    model_service.set_thresholds(0.5, 1.5)
+    model_service.evaluate("daily")
+    page = page_factory(model_service)
+    entries = list(reversed(model_service.state["results"]))
+    row = next(index for index, entry in enumerate(entries) if entry["id"] == original["id"])
+
+    def choose_record():
+        QApplication.activeModalWidget().findChild(QTableWidget).cellActivated.emit(row, 0)
+
+    QTimer.singleShot(30, choose_record)
+    page._show_history()
+    package = tmp_path / "invalid.zip"
+    package.write_text("not a ZIP", encoding="utf-8")
+    errors = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: errors.append(args[2]))
+    page.import_packages([package])
+    wait_until(lambda: page.task is None)
+    assert errors
+    assert page.result == original
+    assert not page.uses_current_thresholds
+    assert "未设置阈值" in page.source_badge.text()
+    assert "当时阈值" in page.source_badge.toolTip()
+    assert len(model_service.state["results"]) == len(entries)
+    assert page.daily_button.isEnabled()
+
+
 def test_missing_result_clears_previous_fault_color(model_service, tmp_path, page_factory):
     service = model_service
     service.set_thresholds(warning=0.5, fault=1.5)
@@ -480,6 +551,7 @@ def test_alarm_turns_score_numbers_red_and_clears_when_normal_or_pending_review(
     service = model_service
     service.set_thresholds(warning, fault)
     page = page_factory(service)
+    assert ("预警" if warning == 1.5 else "故障") in page.source_badge.text()
     assert page.result_values["analysis"].text() == "1"
     assert service.analysis_metrics(page.result)[0] == pytest.approx(1)
     assert "正常参考均值" in page.result_values["analysis"].toolTip()
@@ -489,10 +561,13 @@ def test_alarm_turns_score_numbers_red_and_clears_when_normal_or_pending_review(
     service.settings["thresholds_model_version"] = "previous-model"
     page._refresh()
     assert "新模型阈值待复核" in page.status_lights["thresholds"].toolTip()
+    assert "新模型阈值待复核" in page.source_badge.text()
+    assert page.source_badge.styleSheet() == ""
     assert all(value.styleSheet() == "" for value in page.result_values.values())
     service.set_thresholds(3, 4)
     page._refresh()
     assert page.status_lights["thresholds"].property("state") == "ready"
+    assert "阈值内" in page.source_badge.text()
     assert all(value.styleSheet() == "" for value in page.result_values.values())
 
 
@@ -556,19 +631,20 @@ def test_signal_type_menu_uses_real_temperature_and_preserves_vibration_spectrum
     assert page.plots["waveform"].series[0][1] == page.result["telemetry"]["current_a"]
 
 
-def test_model_names_and_pointer_follow_actual_current_model(model_service, page_factory):
+def test_model_names_and_marker_follow_actual_current_model(model_service, page_factory):
     service = model_service
     current, other = service.models[0], service.models[1]
-    # 当前指针以持久化配置为准，不用列表排序推断。
+    # 当前标记以持久化配置为准，不用列表排序推断。
     service.state["current_model_version"] = current["version"]
     page = page_factory(service)
     index = page.model_select.findData(current["version"])
     name = page.model_select.itemText(index)
     assert name == page._model_name(current["version"])
     assert page.model_select.itemData(index, Qt.ItemDataRole.UserRole + 1)
-    assert "当前模型" not in page.model_select.itemText(page.model_select.findData(other["version"]))
     assert not page.model_select.itemData(page.model_select.findData(other["version"]), Qt.ItemDataRole.UserRole + 1)
-    assert page.model_select.itemText(0) == f"最新评价 → {page._model_name(current['version'])}"
+    assert page.model_select.labelDrawingMode() == QComboBox.LabelDrawingMode.UseDelegate
+    assert page.model_select.itemText(page.model_select.findData(other["version"])) == page._model_name(other["version"])
+    assert page.model_select.itemText(0) == f"最新评价 · {page._model_name(current['version'])}"
     assert f"当前模型：{page._model_name(current['version'])}" in page.status_lights["model"].toolTip()
     assert page.result["model_version"] == current["version"]
 
@@ -732,6 +808,47 @@ def test_review_defaults_to_latest_import_and_can_relabel_older_zip_without_chan
     assert service.runs["old1"]["manual_label"] == "abnormal"
     assert service.runs["old2"]["manual_label"] == service.runs["latest"]["manual_label"] == "unconfirmed"
     assert page.run_select.currentData() == "old2" and page.result == original_result
+
+
+def test_sample_dialog_review_saves_only_the_selected_older_sample(
+        service, tmp_path, page_factory, monkeypatch):
+    service.import_packages([data_package(tmp_path, service, ("older", "latest"))])
+    page = page_factory(service)
+
+    def interact(dialog):
+        if dialog.windowTitle() == "正常样本与网络模型":
+            page.run_select.setCurrentIndex(page.run_select.findData("older"))
+            button = next(button for button in dialog.findChildren(QPushButton) if button.text() == "人工判定")
+            button.click()
+        else:
+            choice = dialog.findChild(QComboBox, "spindle_review_package")
+            assert choice.currentData() == ["older"]
+            page.label_select.setCurrentIndex(page.label_select.findData("abnormal"))
+            page.label_note.setText("复核所选历史采集")
+            page.label_button.click()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", interact)
+    page._show_samples()
+    assert service.runs["older"]["manual_label"] == "abnormal"
+    assert service.runs["older"]["label_note"] == "复核所选历史采集"
+    assert service.runs["latest"]["manual_label"] == "unconfirmed"
+    assert page.run_select.currentData() == "older"
+
+
+def test_sample_dialog_disables_review_for_a_selected_training_sample(model_service, page_factory, monkeypatch):
+    page = page_factory(model_service)
+
+    def interact(dialog):
+        button = next(button for button in dialog.findChildren(QPushButton) if button.text() == "人工判定")
+        page.run_select.setCurrentIndex(page.run_select.findData(model_service.current_model["training_run_ids"][0]))
+        assert not button.isEnabled()
+        page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+        assert button.isEnabled()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", interact)
+    page._show_samples()
 
 
 def test_review_hides_trained_batch_but_allows_untrained_daily_history(model_service, page_factory, monkeypatch):

@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSizeGrip,
     QStackedWidget,
@@ -227,6 +228,18 @@ class MainWindow(QMainWindow):
             self.height() - self.size_grip.height(),
         )
         self.scale_timer.start()
+
+    def closeEvent(self, event) -> None:
+        for index in range(self.precision_page.content_stack.count()):
+            page = self.precision_page.content_stack.widget(index)
+            if getattr(page, "task", None) is not None or getattr(page, "energy_task", None) is not None:
+                event.ignore()
+                self.precision_page.tab_bar.setCurrentIndex(index)
+                QMessageBox.information(
+                    self, "任务尚未完成", "正在处理数据，请等待进度完成后再关闭软件。\n可以最小化窗口，处理会继续。"
+                )
+                return
+        super().closeEvent(event)
 
     def _update_clock(self) -> None:
         self.clock_label.setText(

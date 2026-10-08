@@ -2,6 +2,7 @@
 
 import sys
 
+from PyQt6.QtCore import QLibraryInfo, QTranslator
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication
 
@@ -12,6 +13,9 @@ from app.resources import DISPLAY, load_icon, load_stylesheet
 def create_application() -> QApplication:
     application = QApplication(sys.argv)
     application.setApplicationName(DISPLAY["title"])
+    translator = QTranslator(application)
+    translator.load("qtbase_zh_CN", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath))
+    application.installTranslator(translator)
     application.setStyle("Fusion")
     font = QFont(DISPLAY["font_family"], 10)
     font.setStyleStrategy(

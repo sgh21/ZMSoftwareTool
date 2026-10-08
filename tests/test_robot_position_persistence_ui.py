@@ -146,13 +146,17 @@ def test_baseline_selection_moves_zero_day_but_never_changes_latest_cards(applic
 
         older = service.load_observations(first["batch"]["saved_path"])
         page._observations_loaded(older)
-        page._evaluation_completed(service.evaluate())
+        assert "已载入 B001，待评估" in page.result_hint.text()
+        page._evaluate()
+        wait_for_page(page)
+        assert "已载入 B001，已评估" in page.result_hint.text()
         assert page.result["batch_id"] == "B003"
         assert "B001" in page.observation_sample.currentText()
         assert "主卡仍显示最新已评估观测 B003" in page.process_log.toPlainText()
         reopened = ready_position_page(PositionMonitoringService(service.root))
         try:
             assert reopened.result["batch_id"] == "B003"
+            assert "已载入 B001，已评估" in reopened.result_hint.text()
             assert reopened.result["baseline_id"] == first["id"]
             assert reopened.show_before_baseline.isChecked()
             assert [row["days"] for row in reopened.trend_chart.history] == [0, 1, 2]

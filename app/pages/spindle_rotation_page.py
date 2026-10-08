@@ -3,19 +3,20 @@
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from math import ceil, floor, isfinite
+from zipfile import BadZipFile
 import numpy as np
 
-from PyQt6.QtCore import QDateTime, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QDateTime, QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QActionGroup, QColor, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
+    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QSpinBox,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
-from app.resources import DISPLAY, fit_dialog, make_button, make_note, set_status_light
+from app.resources import DISPLAY, fit_dialog, load_icon, make_button, make_note, set_status_light
 from app.tasks import ServiceTask
 from core.services.spindle_monitoring_service import SpindleMonitoringService, assess_score
 
@@ -31,20 +32,31 @@ def _local_time(value):
 
 
 class CurrentModelDelegate(QStyledItemDelegate):
+    """在模型文字右侧显示标准 SVG，列表与收起后的选择框共用绘制。"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.markers = [load_icon("common/current-model.svg", color, 16)
+                        for color in (DISPLAY["colors"]["text"], "#ffffff")]
+
     def paint(self, painter, option, index):
         if not index.data(Qt.ItemDataRole.UserRole + 1):
             super().paint(painter, option, index)
             return
-        text_option = QStyleOptionViewItem(option)
-        self.initStyleOption(text_option, index)
-        text_option.text = option.fontMetrics.elidedText(text_option.text, Qt.TextElideMode.ElideRight,
-                                                        option.rect.width() - 2 * option.fontMetrics.height())
-        option.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, text_option, painter, option.widget)
-        painter.save()
-        painter.setFont(option.font)
-        painter.setPen(QColor(DISPLAY["colors"]["text"]))
-        painter.drawText(option.rect.adjusted(0, 0, -4, 0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "◀")
-        painter.restore()
+        styled = QStyleOptionViewItem(option)
+        self.initStyleOption(styled, index)
+        style = styled.widget.style()
+        text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, styled, styled.widget)
+        size = round(styled.fontMetrics.height() * 0.8)
+        gap = round(size * 0.75)
+        styled.text = styled.fontMetrics.elidedText(styled.text, Qt.TextElideMode.ElideRight,
+                                                   text_rect.width() - size - 2 * gap)
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, styled, painter, styled.widget)
+        marker_rect = QRect(text_rect.left() + styled.fontMetrics.horizontalAdvance(styled.text) + gap,
+                            text_rect.center().y() - size // 2, size, size)
+        selected = bool(styled.state & QStyle.StateFlag.State_Selected
+                        and styled.state & QStyle.StateFlag.State_Active)
+        self.markers[selected].paint(painter, marker_rect)
 
 
 class SpindleRotationPage(QScrollArea):
@@ -104,7 +116,8 @@ class SpindleRotationPage(QScrollArea):
         self.run_select.setToolTip("按真实采集日期选择每次检测")
         self.model_select = self._combo()
         self.model_select.setItemDelegate(CurrentModelDelegate(self.model_select))
-        self.model_select.setToolTip("按模型版本回看，旧评价保持不变")
+        self.model_select.setLabelDrawingMode(QComboBox.LabelDrawingMode.UseDelegate)
+        self.model_select.setToolTip("右侧星标表示当前模型；按模型版本回看，旧评价保持不变")
         self.run_select.currentIndexChanged.connect(self._selection_changed)
         self.model_select.currentIndexChanged.connect(self._selection_changed)
         self.signal_select = self._combo()
@@ -273,11 +286,14 @@ class SpindleRotationPage(QScrollArea):
         row.addWidget(self.train_button)
         row.addWidget(self._button("样本与模型", self._show_samples))
         training.addLayout(row)
+        self.workflow_hint = make_note("")
+        training.addWidget(self.workflow_hint)
         thresholds = self._section(body, "判定阈值", "thresholds")
         thresholds.addWidget(self._button("阈值设置", self._show_thresholds))
         log_area = QFrame()
         log_area.setObjectName("SpindleLogArea")
         log_layout = QVBoxLayout(log_area)
+        log_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         log_layout.setContentsMargins(0, 0, 0, 0)
         heading = QHBoxLayout()
         label = QLabel("运行日志")
@@ -299,6 +315,7 @@ class SpindleRotationPage(QScrollArea):
         self.progress.setAccessibleName("当前任务进度")
         log_layout.addWidget(self.progress)
         self.task_progress_note = make_note("尚未开始处理")
+        self.task_progress_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         log_layout.addWidget(self.task_progress_note)
         body.addWidget(log_area, 1)
         actions = QFrame()
@@ -307,9 +324,10 @@ class SpindleRotationPage(QScrollArea):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
         self.initial_button = self._button("批量导入", lambda: self._choose_packages("initial"), True)
-        self.initial_button.setToolTip("选择一个 ZIP，递归导入其中各级文件夹和 ZIP 内的初始正常样本。")
+        self.initial_button.setToolTip("选择一个 ZIP 导入整批采集，并确认正常、异常或未判定；正常样本可参与训练。")
         self.daily_button = self._button("日常导入", lambda: self._choose_packages("daily"), True)
-        self.evaluate_button = self._button("开始评估", self._evaluate, True)
+        self.daily_button.setToolTip("导入后自动分析；已有模型时自动评估并保存结果，无需再点击重新评估。")
+        self.evaluate_button = self._button("分析信号", self._evaluate, True)
         for button in (self.initial_button, self.daily_button,
                        self._button("清空日志", self.process_log.clear, True), self.evaluate_button):
             row.addWidget(button, 1)
@@ -370,6 +388,11 @@ class SpindleRotationPage(QScrollArea):
             self.run_select.setCurrentIndex(self.run_select.findData(table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
 
         def sync_row():
+            run_id = self.run_select.currentData()
+            editable = bool(run_id and not self.service.trained_run_ids().intersection(self.service.import_group(run_id)))
+            review_button.setEnabled(editable)
+            review_button.setToolTip("判定当前选中的采集；批量数据按整批保存。" if editable
+                                     else "已参与模型训练或校准的样本不能改判。" if run_id else "请先导入采集数据。")
             for row in range(table.rowCount()):
                 item = table.item(row, 0)
                 if item.data(Qt.ItemDataRole.UserRole) == self.run_select.currentData():
@@ -379,10 +402,11 @@ class SpindleRotationPage(QScrollArea):
 
         def review():
             if self.run_select.currentData():
-                self._show_review()
+                self._show_review(run_id=self.run_select.currentData())
                 populate()
                 sync_row()
 
+        review_button = self._button("人工判定", review, track=False)
         table.cellClicked.connect(select)
         table.currentCellChanged.connect(lambda row, column, *_: select(row, column) if row >= 0 else None)
         self.run_select.currentIndexChanged.connect(sync_row)
@@ -390,7 +414,7 @@ class SpindleRotationPage(QScrollArea):
         sync_row()
         body.addWidget(table, 1)
         row = QHBoxLayout()
-        row.addWidget(self._button("人工判定", review, track=False))
+        row.addWidget(review_button)
         retry_requested = False
         def retry():
             nonlocal retry_requested
@@ -420,7 +444,7 @@ class SpindleRotationPage(QScrollArea):
             self.model_select.setCurrentIndex(0)
             self._run_task("补算缺失评价", self.service.reanalyze_history, status_key="model")
 
-    def _show_review(self):
+    def _show_review(self, *, run_id=None):
         displayed_result = self.result
         uses_current_thresholds = self.uses_current_thresholds
         dialog = QDialog(self)
@@ -451,7 +475,9 @@ class SpindleRotationPage(QScrollArea):
             index = package_select.count() - 1
             scope = f"整批 {len(group)} 条样本" if run["purpose"] == "initial" else "本次采集（1 条）"
             package_select.setItemData(index, f"{source}\n{scope}\n导入：{_local_time(run['imported_at'])}", Qt.ItemDataRole.ToolTipRole)
-        package_select.setCurrentIndex(0)
+        index = 0 if run_id is None else next(
+            (index for index in range(package_select.count()) if run_id in package_select.itemData(index)), -1)
+        package_select.setCurrentIndex(index)
 
         def select_package():
             self.review_run_ids = package_select.currentData() or []
@@ -532,7 +558,7 @@ class SpindleRotationPage(QScrollArea):
         self.model_select.clear()
         model = self.service.current_model
         current_name = self._model_name(model["version"]) if model else "未建模"
-        self.model_select.addItem(f"最新评价 → {current_name}", None)
+        self.model_select.addItem(f"最新评价 · {current_name}", None)
         self.model_select.addItem("未建模", "unmodeled")
         for item in reversed(self.service.models):
             name = self._model_name(item["version"])
@@ -543,6 +569,9 @@ class SpindleRotationPage(QScrollArea):
         self.model_select.setCurrentIndex(max(0, self.model_select.findData(model_version)))
         self.model_select.blockSignals(False)
         self.train_button.setText("重新训练" if model else "训练网络")
+        self.evaluate_button.setText("重新评估" if model else "分析信号")
+        self.evaluate_button.setToolTip("使用当前模型和阈值重新评估所选采集，并追加评价记录；日常导入已自动评估。"
+                                        if model else "分析所选采集的真实信号；建立模型后才显示网络评分。")
         self._selection_changed()
         self._set_busy(self.task is not None)
 
@@ -579,6 +608,21 @@ class SpindleRotationPage(QScrollArea):
         elif configured and model is None:
             details += "\n建模后需复核阈值"
         self._set_status_light("thresholds", state, details)
+        if not count:
+            hint = "先批量导入正常样本，再训练网络；日常数据用“日常导入”。"
+        elif not model:
+            hint = (f"已有 {candidates} 次正常候选，可点击“训练网络”。" if candidates >= 3 else
+                    f"正常候选 {candidates}/3 次；请导入样本或在“人工判定”中纳入训练。")
+        elif model.get("reanalysis_status") != "complete":
+            hint = "历史评价未完成，请在“样本与模型”中补算。"
+        elif self.service.thresholds_review_required:
+            hint = "新模型已建立，请在“阈值设置”中复核并保存。"
+        elif configured < 2:
+            hint = "模型已就绪；请补齐判定阈值，日常导入后会自动评估。"
+        else:
+            hint = "模型与阈值已就绪；日常导入后自动评估并保存。"
+        self.workflow_hint.setText(hint)
+        self.train_button.setToolTip(f"使用 {candidates} 次正常候选从头训练；至少需要 3 次完整采集。")
 
     def _selection_changed(self):
         run_id = self.run_select.currentData()
@@ -628,8 +672,10 @@ class SpindleRotationPage(QScrollArea):
                           if analysis_reference is not None else "\n尚无正常参考，请先确认正常样本并建立模型。")
         self.result_values["analysis"].setToolTip(analysis_note)
         result_detail = ""
+        self.source_badge.setStyleSheet("")
+        self.source_badge.setToolTip("")
         if result:
-            self.source_badge.setText("历史回放" if result["source_type"] == "historical_replay" else "检测数据")
+            source = "历史回放" if result["source_type"] == "historical_replay" else "检测数据"
             assessment = result["assessment"]
             thresholds = result["thresholds"]
             if current_thresholds:
@@ -637,7 +683,9 @@ class SpindleRotationPage(QScrollArea):
                 assessment = assess_score(result["score"], thresholds)
                 if result["score"] is not None and self.service.thresholds_review_required:
                     assessment = {"status": "review_required", "message": "新模型阈值待复核"}
+            self.source_badge.setText(f"{source} · {assessment['message']}")
             if assessment["status"] in ("warning", "fault"):
+                self.source_badge.setStyleSheet(f"color:{DISPLAY['colors']['error']};")
                 for key in ("analysis", "network"):
                     self.result_values[key].setStyleSheet(f"color:{DISPLAY['colors']['error']};")
             role = {"training": "训练样本回评", "calibration": "校准样本回评", "independent": "未参与此模型建模"}[result["role"]]
@@ -656,6 +704,7 @@ class SpindleRotationPage(QScrollArea):
                 f"评估：{_local_time(result['evaluated_at'])} · 模型：{self._model_name(result['model_version'])}\n"
                 f"{result['window_count']} 个 1 秒窗口 · {threshold_title}：预警 {warning} / 故障 {fault}"
             )
+            self.source_badge.setToolTip(f"{assessment['message']}\n{result_detail}")
         else:
             self.source_badge.setText("暂无数据" if not self.service.runs else "暂无评价")
         run = self.service.runs.get(self.run_select.currentData())
@@ -777,6 +826,7 @@ class SpindleRotationPage(QScrollArea):
         self.task_status_key = status_key
         self.progress.setValue(0)
         self.task_progress_note.setText(f"{title}：准备处理")
+        self.progress.setToolTip(self.task_progress_note.text())
         self._set_busy(True)
         task.signals.progress.connect(self._task_progress)
         task.signals.completed.connect(self._task_done)
@@ -788,26 +838,35 @@ class SpindleRotationPage(QScrollArea):
         self.progress.setToolTip(message)
         self.task_progress_note.setText(message)
         self._set_status_light(self.task_status_key, "partial", message)
-        self._log(message)
 
     def _task_done(self, value):
         completed = self.task_completed
         self.task_completed = None
         self.task = None
         self._refresh()
-        self._log("操作完成")
         if completed:
             completed(value)
+        summary = value.get("summary", "处理完成") if isinstance(value, dict) else "处理完成"
+        if isinstance(value, dict):
+            for package in value.get("packages", []):
+                if package["status"] == "failed":
+                    self._log(package["message"], "ERROR")
+        self._log(summary)
         self.progress.setValue(100)
-        self.task_progress_note.setText(value.get("summary", "处理完成") if isinstance(value, dict) else "处理完成")
+        self.task_progress_note.setText(summary)
+        self.progress.setToolTip(self.task_progress_note.text())
 
     def _task_failed(self, message):
+        historical_result = self.result if not self.uses_current_thresholds else None
         self.task_completed = None
         self.task = None
         self._refresh()
+        if historical_result is not None:
+            self._show_result(historical_result)
         self._log(message, "ERROR")
         self.progress.setValue(0)
         self.task_progress_note.setText(f"处理失败：{message}")
+        self.progress.setToolTip(self.task_progress_note.text())
         QMessageBox.warning(self, "操作未完成", message)
 
     def _choose_packages(self, purpose):
@@ -825,14 +884,20 @@ class SpindleRotationPage(QScrollArea):
             self.import_packages([path], purpose, batch_label=label)
 
     def import_packages(self, paths, purpose="daily", *, batch_label="unconfirmed"):
+        def operation(progress):
+            try:
+                return (self.service.import_batch(paths, progress, label=batch_label) if purpose == "initial"
+                        else self.service.import_packages(paths, purpose, progress))
+            except BadZipFile as error:
+                raise ValueError("数据包不是有效的 ZIP，或文件已损坏。请重新选择或导出数据包。") from error
+
         def completed(value):
             runs = value["runs"] if purpose == "initial" else value
             if runs:
                 self.model_select.setCurrentIndex(0)
                 self._refresh(runs[-1]["run_id"])
         self._run_task("导入建模数据" if purpose == "initial" else "导入并分析日常检测",
-                       lambda progress: (self.service.import_batch(paths, progress, label=batch_label) if purpose == "initial"
-                                         else self.service.import_packages(paths, purpose, progress)), completed)
+                       operation, completed)
 
     def _evaluate(self):
         run_id = self.run_select.currentData()
@@ -866,6 +931,8 @@ class SpindleRotationPage(QScrollArea):
         form.addRow("训练轮数", epochs)
         form.addRow(make_note(f"使用 {len(self.service.training_candidates())} 次可建模采集；训练与校准按采集隔离。\n每次随机初始化，完成后自动重算历史。"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("开始训练")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
@@ -893,9 +960,19 @@ class SpindleRotationPage(QScrollArea):
             fields[key] = field
         form.addRow(make_note("评分为各1秒窗口误差倍率的P95。倍率参照模型的健康校准数据；故障阈值须高于预警阈值。"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存阈值")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         def save():
+            values = {}
+            for key, field in fields.items():
+                try:
+                    values[key] = float(field.text()) if field.text().strip() else None
+                except ValueError:
+                    QMessageBox.warning(dialog, "阈值未保存", "请输入有效数字；留空表示不设置该阈值。")
+                    field.setFocus()
+                    field.selectAll()
+                    return
             try:
-                values = {key: float(field.text()) if field.text().strip() else None for key, field in fields.items()}
                 self.service.set_thresholds(**values)
             except (ValueError, OSError) as error:
                 QMessageBox.warning(dialog, "阈值未保存", str(error))

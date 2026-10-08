@@ -385,8 +385,6 @@ class PositionMonitoringService:
 
     def load_observations(self, path, progress=None):
         """导入单批图片/目录/观测文件，逐图解算后立即保存可复用的观测结果。"""
-        self.current_batch = None
-        self._save_state()
         if isinstance(path, (list, tuple)) or Path(path).is_dir() or Path(path).suffix.lower() in IMAGE_SUFFIXES:
             batch = image_batch(path, self.parameters)
             source = Path(batch["source_path"])
@@ -527,12 +525,17 @@ class PositionMonitoringService:
         saved_path = self.storage / "observations" / f"{identifier}.json"
         batch["saved_path"] = str(saved_path)
         write_document(saved_path, batch)
-        self.current_batch = batch
         self._store.record("observations", {
             "id": identifier, "batch_id": batch["batch_id"], "path": str(saved_path),
             "observed_at": batch["observed_at"], "time_source": batch["time_source"],
         }, batch, self.parameters)
-        self._save_state()
+        previous = self.current_batch
+        self.current_batch = batch
+        try:
+            self._save_state()
+        except OSError:
+            self.current_batch = previous
+            raise
         if progress:
             progress(100, "图像托管与观测保存完成")
         return deepcopy(batch)
