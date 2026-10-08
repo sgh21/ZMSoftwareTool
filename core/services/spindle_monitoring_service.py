@@ -35,19 +35,69 @@ def _relative_member(name):
 
 
 def assess_score(score, thresholds):
-    """判定只使用人工设置的阈值，故障优先；评分不是几何误差。"""
+    """相容度越低越可疑；报警阈值独立于统计检验的 alpha。"""
     warning, fault = thresholds.get("warning"), thresholds.get("fault")
-    if score is None:
-        status, message = "unavailable", "尚未建立模型"
-    elif fault is not None and score >= fault:
+    if score is None or not math.isfinite(score) or not 0 <= score <= 1:
+        status, message = "unavailable", "正常相容度无效或尚未校准"
+    elif fault is not None and score <= fault:
         status, message = "fault", "故障 / 建议检修"
-    elif warning is not None and score >= warning:
+    elif warning is not None and score <= warning:
         status, message = "warning", "预警 / 建议复测"
     elif warning is None and fault is None:
-        status, message = "unconfigured", "未设置阈值"
+        status = "unconfigured"
+        message = "偏离正常参考 · 未设置报警阈值" if score < 1 else "未设置阈值"
+    elif score < 1:
+        status, message = "deviation", "偏离正常参考，未达报警阈值"
     else:
         status, message = "normal", "阈值内"
     return {"status": status, "message": message}
+
+
+def assess_compatibility(result, thresholds, review_required=False):
+    scores = [result.get("analysis_score"), result.get("score")]
+    assessments = [assess_score(score, thresholds.get(feature, thresholds))
+                   for feature, score in zip(("vibration", "network"), scores)]
+    invalid = any(item["status"] == "unavailable" for item in assessments)
+    reasons = [item.get("message", "正常参考无效") for item in result.get("compatibility", {}).values()
+               if item.get("status") == "invalid"]
+    invalid_message = "；".join(dict.fromkeys(reasons)) or "正常相容度无效或尚未校准"
+    if not review_required:
+        for status in ("fault", "warning"):
+            for item in assessments:
+                if item["status"] == status:
+                    return {**item, "message": item["message"] + (f"；另一项无效：{invalid_message}" if invalid else "")}
+    if invalid:
+        return {"status": "unavailable", "message": invalid_message}
+    if review_required:
+        return {"status": "review_required", "message": "新模型阈值待复核"}
+    for status in ("deviation", "unconfigured", "normal"):
+        for _, item in sorted(zip(scores, assessments), key=lambda pair: pair[0]):
+            if item["status"] == status:
+                return item
+
+
+def result_metric_settings(result):
+    """旧的共用参数等值展开；历史快照不采用当前参数。"""
+    if "metric_settings" in result:
+        return deepcopy(result["metric_settings"])
+    common = {"alpha": result.get("alpha", 0.05), **result.get("thresholds", {"warning": None, "fault": None})}
+    return {feature: deepcopy(common) for feature in ("vibration", "network")}
+
+
+def _validated_metric_settings(metrics):
+    settings = {}
+    for feature, title in (("vibration", "振动"), ("network", "网络")):
+        values = metrics[feature]
+        alpha = float(values["alpha"])
+        if not math.isfinite(alpha) or not 0 < alpha < 1:
+            raise ValueError(f"{title} alpha 必须在 0 与 1 之间")
+        thresholds = {key: None if values[key] is None else float(values[key]) for key in ("warning", "fault")}
+        if any(value is not None and (not math.isfinite(value) or not 0 <= value < 1) for value in thresholds.values()):
+            raise ValueError(f"{title}相容度报警阈值必须在 0（含）与 1（不含）之间")
+        if thresholds["warning"] is not None and thresholds["fault"] is not None and thresholds["fault"] >= thresholds["warning"]:
+            raise ValueError(f"{title}故障阈值必须低于预警阈值")
+        settings[feature] = {"alpha": alpha, **thresholds}
+    return settings
 
 
 class SpindleMonitoringService:
@@ -64,11 +114,18 @@ class SpindleMonitoringService:
         self.state = read_json(self.state_path) if self.state_path.exists() else {
             "schema_version": 1,
             "settings": {"thresholds": deepcopy(self.config["thresholds"]),
+                         "score_kind": "normal_compatibility_v1", "alpha": self.config.get("alpha", 0.05),
                          "thresholds_model_version": None},
             "runs": {}, "packages": [], "models": [], "current_model_version": None,
             "results": [],
         }
-        self._analysis_references = {}
+        # 旧倍率阈值保留备查，但不能解释为 0–1 相容度阈值。
+        if self.settings.get("score_kind") != "normal_compatibility_v1":
+            self.settings["legacy_thresholds"] = deepcopy(self.settings["thresholds"])
+            self.settings.update(thresholds={"warning": None, "fault": None},
+                                 thresholds_model_version=None, score_kind="normal_compatibility_v1",
+                                 alpha=self.config.get("alpha", 0.05))
+        self.settings.setdefault("metric_settings", result_metric_settings(self.settings))
         # 旧版初始数据曾允许未判定入训；恢复状态时统一收紧到正常标签。
         eligibility_changed = False
         for run in self.runs.values():
@@ -87,6 +144,12 @@ class SpindleMonitoringService:
         return self.state["settings"]
 
     @property
+    def metric_settings(self):
+        return result_metric_settings(self.settings)
+
+    result_metric_settings = staticmethod(result_metric_settings)
+
+    @property
     def models(self):
         return self.state["models"]
 
@@ -98,7 +161,8 @@ class SpindleMonitoringService:
     @property
     def thresholds_review_required(self):
         model = self.current_model
-        return bool(model and any(value is not None for value in self.settings["thresholds"].values())
+        return bool(model and any(values[key] is not None for values in self.metric_settings.values()
+                                  for key in ("warning", "fault"))
                     and self.settings.get("thresholds_model_version") != model["version"])
 
     def _save(self):
@@ -118,50 +182,52 @@ class SpindleMonitoringService:
         if data["target_speed_rpm"] != record["speed_rpm"]:
             raise ValueError("H5 转速与数据包声明不一致")
         data["run_id"] = record["run_id"]
+        data["calibration_context"] = {
+            "speed_rpm": record["speed_rpm"], "operation": record["operation"],
+            "condition": deepcopy(record.get("condition", {})),
+            "preprocessing": deepcopy(record.get("preprocessing", self.config["preprocessing"])),
+        }
         return data
 
     def order_band_energy(self, run_id):
         """旧评价的倍频图从托管信号重算，不改评价记录或网络评分。"""
         return algorithm.order_band_energy(self._read_run(self.runs[run_id]))
 
-    def analysis_reference(self, model_version):
-        """正常径向 RMS 均值随模型固定；旧版本从已有正常采集评价恢复。"""
-        model = next((item for item in self.models if item["version"] == model_version), None)
-        if model is None:
-            return None
-        reference = model.get("healthy_reference_rms_mm_s")
-        if reference is not None:
-            return reference
-        if model_version in self._analysis_references:
-            return self._analysis_references[model_version]
-        pending = set(model["training_run_ids"] + model["calibration_run_ids"])
-        values = []
-        for entry in reversed(self.state["results"]):
-            if entry["run_id"] in pending:
-                result = read_json(self.root / entry["result_file"])
-                rms = result.get("xy_rms_mm_s")
-                if rms is not None:
-                    values.append(rms)
-                    pending.remove(entry["run_id"])
-                    if not pending:
-                        break
-        if pending or not values:
-            return None
-        reference = math.fsum(values) / len(values)
-        if reference > 0:
-            self._analysis_references[model_version] = reference
-            return reference
-        return None
-
     def analysis_metrics(self, result):
-        if result is None:
+        if not result or result.get("score_kind") != "normal_compatibility_v1":
             return None, None
-        reference = result.get("analysis_reference_rms_mm_s")
-        if reference is None:
-            reference = self.analysis_reference(result.get("model_version"))
-        rms = result.get("xy_rms_mm_s")
-        ratio = rms / reference if rms is not None and reference is not None and reference > 0 else None
-        return ratio, reference
+        return result.get("analysis_score"), result.get("compatibility", {}).get("vibration")
+
+    def display_result(self, result, current_settings=False, metric_settings=None):
+        """显示设置只作用于副本；历史评分、alpha 和当时判定不改写。"""
+        if result is None:
+            return None
+        shown = deepcopy(result)
+        if shown.get("score_kind") != "normal_compatibility_v1":
+            shown.setdefault("legacy_assessment", deepcopy(shown.get("assessment")))
+            shown.update(score=None, analysis_score=None,
+                         assessment={"status": "legacy", "message": "旧倍率记录，请重新评估相容度"})
+            return shown
+        if current_settings or metric_settings is not None:
+            metrics = self.metric_settings if metric_settings is None else _validated_metric_settings(metric_settings)
+            review_required = self.thresholds_review_required if metric_settings is None else False
+            shown["metric_settings"] = metrics
+            shown["alpha"] = metrics["network"]["alpha"]
+            for key, p_key, feature in (("analysis_score", "vibration_p_value", "vibration"),
+                                        ("score", "network_p_value", "network")):
+                alpha = metrics[feature]["alpha"]
+                p = shown.get(p_key)
+                valid = shown.get("compatibility", {}).get(feature, {}).get("status") == "valid"
+                shown[key] = min(1.0, p / alpha) if valid and p is not None and math.isfinite(p) and 0 <= p <= 1 else None
+                if feature in shown.get("compatibility", {}):
+                    shown["compatibility"][feature]["score"] = shown[key]
+                    shown["compatibility"][feature]["alpha"] = alpha
+            shown["thresholds"] = {key: metrics["network"][key] for key in ("warning", "fault")}
+            shown["thresholds_model_version"] = (self.settings.get("thresholds_model_version")
+                                                  if metric_settings is None else self.state["current_model_version"])
+            shown["thresholds_review_required"] = review_required
+            shown["assessment"] = assess_compatibility(shown, metrics, review_required)
+        return shown
 
     def _infer_package(self, archive):
         """无清单时按 H5 内容识别采集；同目录的遥测按 CSV 列名识别。"""
@@ -470,19 +536,20 @@ class SpindleMonitoringService:
             raise
         return runs
 
-    def set_thresholds(self, warning=None, fault=None):
-        thresholds = {"warning": warning, "fault": fault}
-        for name, value in thresholds.items():
-            if value is not None:
-                value = float(value)
-                if not math.isfinite(value) or value < 0:
-                    raise ValueError("评分阈值必须是非负有限数值")
-                thresholds[name] = value
-        if (thresholds["warning"] is not None and thresholds["fault"] is not None
-                and thresholds["warning"] >= thresholds["fault"]):
-            raise ValueError("故障阈值必须高于预警阈值")
+    def set_thresholds(self, warning=None, fault=None, alpha=None):
+        """旧调用入口沿用共用参数，新界面分别设置两项。"""
+        values = {"alpha": self.settings["alpha"] if alpha is None else alpha,
+                  "warning": warning, "fault": fault}
+        self.set_metric_settings({feature: values for feature in ("vibration", "network")})
+        return self.settings["thresholds"]
+
+    def set_metric_settings(self, metrics):
+        metrics = _validated_metric_settings(metrics)
         previous = deepcopy(self.settings)
-        self.settings["thresholds"] = thresholds
+        self.settings["metric_settings"] = metrics
+        # 旧字段仅保留网络参数，供旧调用和历史格式使用；新计算使用独立参数。
+        self.settings["thresholds"] = {key: metrics["network"][key] for key in ("warning", "fault")}
+        self.settings["alpha"] = metrics["network"]["alpha"]
         self.settings["thresholds_model_version"] = self.state["current_model_version"]
         try:
             self._save()
@@ -490,27 +557,46 @@ class SpindleMonitoringService:
             self.settings.clear()
             self.settings.update(previous)
             raise
-        return thresholds
+        return deepcopy(metrics)
 
     def train(self, progress=None, training_config=None):
         candidates = deepcopy(self.training_candidates())
-        if len(candidates) < 3:
-            raise ValueError("至少需要 3 个已判定正常且可参与训练的完整 run，以隔离训练和健康校准数据")
+        if len(candidates) < 5:
+            raise ValueError("至少需要 5 个已判定正常的完整采集：至少 2 个训练、3 个独立正常校准")
+        if any(run.get("preprocessing") != self.config["preprocessing"] for run in candidates):
+            raise ValueError("正常候选的预处理版本与当前配置不匹配，请先重新处理采集数据")
         config = deepcopy(self.config["training"])
         config.update(training_config or {})
+        config["preprocessing"] = deepcopy(self.config["preprocessing"])
         fraction = float(config.get("validation_fraction", 0.2))
         if not 0 < fraction < 1:
             raise ValueError("健康校准比例必须在 0 与 1 之间")
-        random.Random(config["seed"]).shuffle(candidates)
-        count = max(1, min(len(candidates) - 2, math.ceil(len(candidates) * fraction)))
-        calibration, training = candidates[:count], candidates[count:]
+        data = {run["run_id"]: self._read_run(run) for run in candidates}
+        groups = {}
+        for run in candidates:
+            loaded = data[run["run_id"]]
+            key = json.dumps([loaded["calibration_context"], len(loaded["velocity"])], sort_keys=True)
+            groups.setdefault(key, []).append(run)
+        calibration, training = [], []
+        rng = random.Random(config["seed"])
+        for group in groups.values():
+            rng.shuffle(group)
+            count = min(len(group) - 1, max(3, math.ceil(len(group) * fraction))) if len(group) >= 4 else 0
+            calibration.extend(group[:count])
+            training.extend(group[count:])
+        if len(training) < 2:
+            needed = 2 - len(training)
+            training.extend(calibration[-needed:])
+            del calibration[-needed:]
+        if len(training) < 2 or len(calibration) < 3:
+            raise ValueError("正常参考不足：需要至少 3 次同工况、同长度的独立校准，并保留至少 2 次训练采集")
         version = "model_" + uuid4().hex[:12]
         model_path = Path("models") / version / "model.pt"
         self.root.joinpath(model_path).parent.mkdir(parents=True, exist_ok=True)
         if progress:
             progress(0, f"读取 {len(training)} 个训练 run 和 {len(calibration)} 个校准 run")
-        train_data = [self._read_run(run) for run in training]
-        calibration_data = [self._read_run(run) for run in calibration]
+        train_data = [data[run["run_id"]] for run in training]
+        calibration_data = [data[run["run_id"]] for run in calibration]
 
         def training_progress(percent, message):
             if progress:
@@ -537,9 +623,11 @@ class SpindleMonitoringService:
             "training_config": config, "initialization": "random",
             "preprocessing": deepcopy(self.config["preprocessing"]),
             "thresholds_at_training": deepcopy(self.settings["thresholds"]),
+            "metric_settings_at_training": self.metric_settings,
             "thresholds_model_version_at_training": self.settings.get("thresholds_model_version"),
             "reanalysis_status": "running",
         })
+        model["normal_reference"]["model_version"] = version
         self.models.append(model)
         self.state["current_model_version"] = version
         self._save()
@@ -554,7 +642,8 @@ class SpindleMonitoringService:
         model = self.current_model
         if model is None:
             raise ValueError("尚未建立模型，无法补算历史")
-        pending = [run for run in self.list_runs() if self.latest_result(run["run_id"]) is None]
+        pending = [run for run in self.list_runs()
+                   if (self.latest_result(run["run_id"]) or {}).get("score_kind") != "normal_compatibility_v1"]
         model["reanalysis_status"] = "running"
         model.pop("reanalysis_error", None)
         self._save()
@@ -580,12 +669,39 @@ class SpindleMonitoringService:
             progress(100, "历史评价已完整")
         return model
 
+    def _normal_reference(self, model):
+        """旧模型只使用原来留出的校准采集重建参考，待测采集不会加入。"""
+        reference = model.get("normal_reference")
+        if reference and reference.get("network_id", "").startswith("legacy:"):
+            if reference["network_id"] != algorithm._network_id({}, self.root / model["model_path"]):
+                reference = None
+        if reference is not None:
+            return reference
+        ids = model.get("calibration_run_ids", [])
+        if (len(ids) != len(set(ids)) or set(ids) & set(model.get("training_run_ids", []))
+                or any(run_id not in self.runs or self.runs[run_id]["manual_label"] != "healthy" for run_id in ids)):
+            return {"groups": [], "message": "原模型正常校准采集缺失、标签无效或与训练集重叠"}
+        reference = algorithm.calibrate_model(
+            [self._read_run(self.runs[run_id]) for run_id in ids], self.root / model["model_path"],
+            preprocessing=model.get("preprocessing", self.config["preprocessing"]),
+        )
+        reference["model_version"] = model["version"]
+        model["normal_reference"] = reference
+        write_document(self.root / Path(model["model_path"]).parent / "normal_reference.json", reference)
+        self._save()
+        return reference
+
     def evaluate(self, run_id, progress=None, reason="manual"):
         record = self.runs[run_id]
         model = self.current_model
         model_path = self.root / model["model_path"] if model else None
+        metrics = self.metric_settings
+        config = {**self.config, "alpha": metrics["network"]["alpha"],
+                  "network_alpha": metrics["network"]["alpha"], "vibration_alpha": metrics["vibration"]["alpha"]}
+        if model:
+            config["normal_reference"] = self._normal_reference(model)
         result = algorithm.evaluate_run(self._read_run(record), model_path=model_path,
-                                        config=self.config, progress=progress)
+                                        config=config, progress=progress)
         role = "independent"
         if model and run_id in model["training_run_ids"]:
             role = "training"
@@ -597,22 +713,21 @@ class SpindleMonitoringService:
             "evaluated_at": _now(), "model_version": model["version"] if model else None,
             "source_type": record["source_type"], "role": role, "reason": reason,
             "manual_label_at_evaluation": record["manual_label"],
+            "metric_settings": deepcopy(metrics),
             "thresholds": deepcopy(self.settings["thresholds"]),
             "thresholds_model_version": self.settings.get("thresholds_model_version"),
             "thresholds_review_required": self.thresholds_review_required,
         })
-        result["analysis_score"], result["analysis_reference_rms_mm_s"] = self.analysis_metrics(result)
-        if result["score"] is not None and result["thresholds_review_required"]:
-            result["assessment"] = {"status": "review_required", "message": "新模型阈值待复核"}
-        else:
-            result["assessment"] = assess_score(result["score"], result["thresholds"])
+        result["assessment"] = assess_compatibility(result, metrics, result["thresholds_review_required"])
         result_path = Path("evaluations") / f"{result['id']}.json"
         write_document(self.root / result_path, result)
         summary = {key: result[key] for key in (
             "id", "run_id", "run_name", "captured_at", "captured_date", "evaluated_at",
             "model_version", "role", "reason", "score", "thresholds", "assessment",
             "thresholds_model_version", "thresholds_review_required",
-            "analysis_score", "analysis_reference_rms_mm_s",
+            "analysis_score", "score_kind", "alpha", "vibration_p_value", "network_p_value",
+            "xy_rms_mm_s", "reconstruction_error_p95",
+            "metric_settings",
         )}
         summary["result_file"] = result_path.as_posix()
         self.state["results"].append(summary)
@@ -636,3 +751,10 @@ class SpindleMonitoringService:
             if entry["run_id"] == run_id and entry["model_version"] == model_version:
                 return read_json(self.root / entry["result_file"])
         return None
+
+    def ensure_latest_result(self, run_id, progress=None):
+        """最新视图补齐缺失或旧倍率评价；已有相容度结果直接复用，包括无效状态。"""
+        result = self.latest_result(run_id)
+        if result is not None and result.get("score_kind") == "normal_compatibility_v1":
+            return result
+        return self.evaluate(run_id, progress=progress, reason="selection_refresh")

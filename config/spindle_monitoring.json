@@ -9,6 +9,7 @@
     "channels": ["ACC1", "ACC2", "ACC3"]
   },
   "thresholds": {"warning": null, "fault": null},
+  "alpha": 0.05,
   "training": {
     "epochs": 150,
     "batch_size": 128,

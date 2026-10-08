@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.pages.feed_depth_page import FeedDepthPage
 from app.pages.robot_position_page import RobotPositionPage
 from app.pages.spindle_rotation_page import SpindleRotationPage
 from app.resources import DISPLAY, RESOURCE_ROOT, UiScale, load_icon, load_stylesheet
@@ -139,6 +140,8 @@ class MainWindow(QMainWindow):
         self.setUpdatesEnabled(False)
         QApplication.instance().setStyleSheet(load_stylesheet(scale))
         self.ui_metrics.apply(scale)
+        for index in range(self.precision_page.content_stack.count()):
+            self.precision_page.content_stack.widget(index)._update_layout_direction()
         self.navigation_marker.move(0, round(12 * scale))
         self.size_grip.move(
             self.width() - self.size_grip.width(),
@@ -307,7 +310,7 @@ class PrecisionMonitorPage(QWidget):
             elif index == 1:
                 page = SpindleRotationPage()
             else:
-                page = self._create_placeholder(title)
+                page = FeedDepthPage()
             self.content_stack.addWidget(page)
 
         layout.addWidget(self.tab_bar)
@@ -325,49 +328,6 @@ class PrecisionMonitorPage(QWidget):
             self.tab_bar.setTabIcon(
                 tab_index, active if tab_index == index else inactive
             )
-
-    @staticmethod
-    def _create_placeholder(title: str) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("PlaceholderPanel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        heading = QFrame()
-        heading.setObjectName("PanelHeading")
-        heading_layout = QHBoxLayout(heading)
-        heading_layout.setContentsMargins(16, 0, 16, 0)
-        marker = QFrame()
-        marker.setObjectName("HeadingMarker")
-        marker.setFixedSize(3, 15)
-        heading_layout.addWidget(marker)
-        heading_layout.addSpacing(4)
-        heading_layout.addWidget(QLabel(title))
-        heading_layout.addStretch()
-        layout.addWidget(heading)
-
-        center = QWidget()
-        center_layout = QVBoxLayout(center)
-        center_layout.setSpacing(14)
-        center_layout.addStretch()
-        placeholder_icon = QLabel()
-        placeholder_icon.setObjectName("PendingIllustration")
-        placeholder_icon.setFixedSize(64, 64)
-        placeholder_icon.setPixmap(
-            load_icon(
-                "common/pending.svg", DISPLAY["colors"]["placeholder"], 32
-            ).pixmap(QSize(32, 32), 3.0)
-        )
-        placeholder_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(placeholder_icon, 0, Qt.AlignmentFlag.AlignHCenter)
-        message = QLabel("待开发")
-        message.setObjectName("PlaceholderMessage")
-        message.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(message)
-        center_layout.addStretch()
-        layout.addWidget(center, 1)
-        return panel
 
 
 class PrecisionTabBar(QTabBar):

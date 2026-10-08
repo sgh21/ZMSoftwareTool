@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+from math import exp, sqrt
 from pathlib import Path
 from threading import Event, get_ident
 from time import monotonic
@@ -14,7 +15,7 @@ from PyQt6.QtGui import QPalette
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QInputDialog, QLabel, QMessageBox,
-    QPushButton, QTableWidget,
+    QPushButton, QTableWidget, QLineEdit, QDialogButtonBox,
 )
 
 from app.pages.spindle_rotation_page import SpindleRotationPage
@@ -48,7 +49,7 @@ def page_factory(application):
 
     yield create
     for page in pages:
-        wait_until(lambda: page.task is None)
+        wait_until(lambda: page.task is None and not page.selection_timer.isActive())
         wait_until(lambda: page.energy_task is None)
         page.close()
         page.deleteLater()
@@ -97,6 +98,8 @@ def data_package(tmp_path, service, run_ids, name="samples.zip"):
                 "source_metadata_file": folder + "/metadata.json",
             }
             manifest["runs"].append(record)
+            with h5py.File(h5_path, "r+") as h5:
+                h5["windows_10s/velocity"][:] = run["velocity"] * (1 + .05 * index)
             archive.write(h5_path, record["data_file"])
             archive.writestr(record["telemetry_file"],
                              "time_s,actual_speed_rpm,current_a\n610,7000,0.4\n611,7000,0.6\n")
@@ -158,15 +161,28 @@ def model_service(service, tmp_path, monkeypatch):
         nonlocal model_number
         model_number += 1
         Path(output_path).write_text(str(model_number), encoding="utf-8")
-        return {"healthy_reference_mse": 0.2}
+        return {"normal_reference": {"groups": []}, "score_kind": algorithm.SCORE_KIND}
 
     def infer(run, model_path=None, config=None, progress=None):
         result = evaluate(run, config=config, progress=progress)
         if model_path:
-            score = float(Path(model_path).read_text(encoding="utf-8"))
+            from scipy.stats import t
+
+            number = float(Path(model_path).read_text(encoding="utf-8"))
+            alpha = config["alpha"]
+            rms = result["xy_rms_mm_s"]
+            vibration_reference = algorithm.fit_normal_reference([rms * .9, rms, rms * 1.1])
+            network_reference = algorithm.fit_normal_reference([.18, .2, .22])
+            error = exp(network_reference["mu"] + t.isf(.04 / number, 2) * network_reference["s"] * sqrt(1 + 1 / 3))
+            vibration = algorithm.normal_compatibility(rms, vibration_reference, alpha, two_sided=True)
+            network = algorithm.normal_compatibility(error, network_reference, alpha)
             result.update({
-                "score": score, "window_scores": [score] * result["window_count"],
-                "reference_scores": [0.8, 1.0, 1.2],
+                "score": network["score"], "analysis_score": vibration["score"],
+                "score_kind": algorithm.SCORE_KIND, "alpha": alpha,
+                "network_p_value": network["p_value"], "vibration_p_value": vibration["p_value"],
+                "reconstruction_error_p95": error, "window_errors": [error] * result["window_count"],
+                "reference_features": {"network": network_reference["values"], "vibration": vibration_reference["values"]},
+                "compatibility": {"network": network, "vibration": vibration},
                 "reconstruction": {
                     "time_s": result["waveform"]["time_s"],
                     "original": result["waveform"]["values"],
@@ -178,7 +194,7 @@ def model_service(service, tmp_path, monkeypatch):
 
     monkeypatch.setattr(algorithm, "train_model", train)
     monkeypatch.setattr(algorithm, "evaluate_run", infer)
-    service.import_packages([data_package(tmp_path, service, ("initial1", "initial2", "initial3"))], "initial")
+    service.import_packages([data_package(tmp_path, service, ("initial1", "initial2", "initial3", "initial4", "initial5"))], "initial")
     service.set_label("initial1", "healthy", "整批确认正常")
     service.import_packages([data_package(tmp_path, service, ("daily",), "daily.zip")])
     service.set_label("daily", "abnormal", "人工确认异常")
@@ -214,14 +230,14 @@ def test_status_lights_follow_model_history_and_threshold_review(model_service, 
     assert "7000 r/min" in page.status_lights["acquisition"].toolTip()
     assert model_service.current_model["version"] in page.status_lights["model"].toolTip()
 
-    model_service.set_thresholds(2, 4)
+    model_service.set_thresholds(.5, .2)
     page._refresh()
     assert page.status_lights["thresholds"].property("state") == "ready"
     model_service.settings["thresholds_model_version"] = "old-model"
     page._refresh()
     assert page.status_lights["thresholds"].property("state") == "partial"
     assert "新模型阈值待复核" in page.status_lights["thresholds"].toolTip()
-    model_service.set_thresholds(2, None)
+    model_service.set_thresholds(.5, None)
     page._refresh()
     assert page.status_lights["thresholds"].property("state") == "partial"
     model_service.current_model["reanalysis_status"] = "failed"
@@ -247,7 +263,7 @@ def test_narrow_layout_keeps_log_and_progress_separate_after_resizing(service, p
 
 
 def test_model_work_lights_only_model_group_and_finishes_progress_after_refresh(model_service, page_factory):
-    model_service.set_thresholds(2, 4)
+    model_service.set_thresholds(.5, .2)
     page = page_factory(model_service)
     release = Event()
 
@@ -376,7 +392,7 @@ def test_daily_training_requires_manual_healthy_label_and_opt_in(service, tmp_pa
 
 
 def test_initial_data_requires_healthy_batch_label_before_training(service, tmp_path, page_factory):
-    service.import_packages([data_package(tmp_path, service, ("initial1", "initial2", "initial3"))], "initial")
+    service.import_packages([data_package(tmp_path, service, ("initial1", "initial2", "initial3", "initial4", "initial5"))], "initial")
     page = page_factory(service)
     assert not page.train_button.isEnabled()
     assert not service.training_candidates()
@@ -387,16 +403,16 @@ def test_initial_data_requires_healthy_batch_label_before_training(service, tmp_
 
     def confirm():
         dialog = QApplication.activeModalWidget()
-        assert len(dialog.findChild(QComboBox, "spindle_review_package").currentData()) == 3
+        assert len(dialog.findChild(QComboBox, "spindle_review_package").currentData()) == 5
         page.label_select.setCurrentIndex(page.label_select.findData("healthy"))
         assert page.training_check.isChecked()
-        assert "3 条" in page.label_button.text()
+        assert "5 条" in page.label_button.text()
         page.label_button.click()
 
     QTimer.singleShot(30, confirm)
     page._show_review()
     assert all(run["manual_label"] == "healthy" for run in service.runs.values())
-    assert len(service.training_candidates()) == 3 and page.train_button.isEnabled()
+    assert len(service.training_candidates()) == 5 and page.train_button.isEnabled()
 
     def reject_batch():
         page.label_select.setCurrentIndex(page.label_select.findData("abnormal"))
@@ -415,7 +431,7 @@ def test_run_and_model_selection_show_matching_results_and_preserve_labels(model
     first, second = service.models
     originals = deepcopy(service.state["results"])
     page.run_select.setCurrentIndex(page.run_select.findData("daily"))
-    for model, expected in ((first, "1"), (second, "2")):
+    for model, expected in ((first, "0.8"), (second, "0.4")):
         page.model_select.setCurrentIndex(page.model_select.findData(model["version"]))
         assert page.result["run_id"] == "daily"
         assert page.result["model_version"] == model["version"]
@@ -428,6 +444,255 @@ def test_run_and_model_selection_show_matching_results_and_preserve_labels(model
     assert page.label_select.currentData() == "healthy"
     assert service.state["results"] == originals
     assert not page.initial_button.isEnabled()
+
+
+def test_selecting_current_samples_refreshes_both_scores_without_inference(model_service, page_factory, monkeypatch):
+    from core.services.position_persistence import write_document
+
+    result = model_service.latest_result("daily")
+    result.update(vibration_p_value=.03, network_p_value=.035)
+    entry = next(item for item in model_service.state["results"] if item["id"] == result["id"])
+    write_document(model_service.root / entry["result_file"], result)
+    calls = []
+    monkeypatch.setattr(model_service, "ensure_latest_result", lambda *args: calls.append(args))
+    page = page_factory(model_service)
+    original = deepcopy(model_service.state["results"])
+    page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+    assert page.result_values["analysis"].text() == "0.6"
+    assert page.result_values["network"].text() == "0.7"
+    assert "当前设置" in page.current_run_button.text()
+    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert "偏离" in page.source_badge.text()
+    page.run_select.setCurrentIndex(page.run_select.findData("initial1"))
+    assert page.result_values["analysis"].text() == "1"
+    assert page.result_values["network"].text() == "0.4"
+    QApplication.processEvents()
+    assert not calls and model_service.state["results"] == original
+    result["compatibility"]["vibration"].update(status="invalid", message="正常参考无效")
+    write_document(model_service.root / entry["result_file"], result)
+    page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+    QApplication.processEvents()
+    assert page.result_values["analysis"].text() == "—"
+    assert not calls
+
+
+@pytest.mark.parametrize("stale", ["missing", "legacy"])
+@pytest.mark.parametrize("first_show", [False, True])
+def test_current_selection_automatically_updates_missing_or_legacy_evaluation_once(
+        model_service, page_factory, monkeypatch, stale, first_show):
+    from core.services.position_persistence import write_document
+
+    page = None if first_show else page_factory(model_service)
+    target = model_service.list_runs()[-1]["run_id"] if first_show else "daily"
+    version = model_service.current_model["version"]
+    result = model_service.latest_result(target)
+    entry = next(item for item in model_service.state["results"] if item["id"] == result["id"])
+    if stale == "missing":
+        model_service.state["results"].remove(entry)
+    else:
+        result["score_kind"] = entry["score_kind"] = "legacy_ratio"
+        result["score"] = 3.0
+        write_document(model_service.root / entry["result_file"], result)
+    count = len(model_service.state["results"])
+    ensure = model_service.ensure_latest_result
+    entered, release = Event(), Event()
+    calls = []
+
+    def gated(run_id, progress=None):
+        calls.append((run_id, get_ident()))
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("自动补算测试门未释放")
+        return ensure(run_id, progress)
+
+    monkeypatch.setattr(model_service, "ensure_latest_result", gated)
+    try:
+        if first_show:
+            page = page_factory(model_service)
+        else:
+            page.run_select.setCurrentIndex(page.run_select.findData(target))
+        page.run_select.activated.emit(page.run_select.currentIndex())
+        page.run_select.activated.emit(page.run_select.currentIndex())
+        wait_until(entered.is_set)
+        assert page.task is not None
+        assert page.result_values["network"].text() == "—"
+    finally:
+        release.set()
+        if page is not None:
+            wait_until(lambda: page.task is None)
+    assert len(calls) == 1 and calls[0][0] == target and calls[0][1] != get_ident()
+    assert page.result["model_version"] == version
+    assert page.result["score_kind"] == algorithm.SCORE_KIND
+    assert page.result_values["analysis"].text() == "1"
+    assert page.result_values["network"].text() == "0.4"
+    assert len(model_service.state["results"]) == count + 1
+
+
+def test_failed_automatic_update_does_not_retry_during_refresh(model_service, page_factory, monkeypatch):
+    target = model_service.list_runs()[-1]["run_id"]
+    result = model_service.latest_result(target)
+    model_service.state["results"][:] = [item for item in model_service.state["results"] if item["id"] != result["id"]]
+    calls, errors = [], []
+
+    def fail(run_id, progress=None):
+        calls.append(run_id)
+        raise OSError("无法读取采集")
+
+    monkeypatch.setattr(model_service, "ensure_latest_result", fail)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: errors.append(args[2]))
+    page = page_factory(model_service)
+    wait_until(lambda: bool(errors) and page.task is None)
+    page._refresh()
+    page.run_select.activated.emit(page.run_select.currentIndex())
+    QApplication.processEvents()
+    assert calls == [target]
+    assert page.task is None and page.daily_button.isEnabled()
+    assert page.result_values["network"].text() == "—"
+
+
+def test_historical_selection_never_starts_automatic_evaluation(model_service, page_factory, monkeypatch):
+    from core.services.position_persistence import write_document
+
+    page = page_factory(model_service)
+    original = model_service.latest_result("daily", model_service.models[0]["version"])
+    entry = next(item for item in model_service.state["results"] if item["id"] == original["id"])
+    original["score_kind"] = entry["score_kind"] = "legacy_ratio"
+    write_document(model_service.root / entry["result_file"], original)
+    calls = []
+    monkeypatch.setattr(model_service, "ensure_latest_result", lambda *args: calls.append(args))
+    page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+    page.model_select.setCurrentIndex(page.model_select.findData(original["model_version"]))
+    page.run_select.activated.emit(page.run_select.currentIndex())
+    QApplication.processEvents()
+    assert not calls
+    assert page.result["id"] == original["id"]
+    assert page.result_values["network"].text() == "—"
+    assert "历史设置" in page.current_run_button.text()
+
+
+@pytest.mark.parametrize("history", [False, True])
+def test_automatic_update_completion_preserves_the_current_selection(model_service, page_factory, monkeypatch, history):
+    page = page_factory(model_service)
+    result = model_service.latest_result("daily")
+    model_service.state["results"][:] = [item for item in model_service.state["results"] if item["id"] != result["id"]]
+    ensure = model_service.ensure_latest_result
+    entered, release = Event(), Event()
+
+    def gated(run_id, progress=None):
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("自动补算测试门未释放")
+        return ensure(run_id, progress)
+
+    monkeypatch.setattr(model_service, "ensure_latest_result", gated)
+    try:
+        page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+        wait_until(entered.is_set)
+        page.run_select.setCurrentIndex(page.run_select.findData("initial1"))
+        if history:
+            page.model_select.setCurrentIndex(page.model_select.findData(model_service.models[0]["version"]))
+    finally:
+        release.set()
+        wait_until(lambda: page.task is None)
+    assert page.result["run_id"] == "initial1"
+    assert page.result["model_version"] == model_service.models[0 if history else -1]["version"]
+    assert page.result_values["network"].text() == ("0.8" if history else "0.4")
+    assert page.uses_current_thresholds is not history
+
+
+def test_automatic_update_preserves_exact_historical_record_with_same_model(model_service, page_factory, monkeypatch):
+    historical = model_service.latest_result("initial1")
+    newer = model_service.evaluate("initial1")
+    assert historical["id"] != newer["id"]
+    page = page_factory(model_service)
+    removed = model_service.latest_result("daily")
+    model_service.state["results"][:] = [item for item in model_service.state["results"] if item["id"] != removed["id"]]
+    ensure = model_service.ensure_latest_result
+    entered, release = Event(), Event()
+
+    def gated(run_id, progress=None):
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("历史竞态测试门未释放")
+        return ensure(run_id, progress)
+
+    monkeypatch.setattr(model_service, "ensure_latest_result", gated)
+    try:
+        page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+        wait_until(entered.is_set)
+        entries = list(reversed(model_service.state["results"]))
+        row = next(index for index, item in enumerate(entries) if item["id"] == historical["id"])
+
+        def open_history():
+            QApplication.activeModalWidget().findChild(QTableWidget).cellActivated.emit(row, 0)
+
+        QTimer.singleShot(20, open_history)
+        page._show_history()
+        assert page.result["id"] == historical["id"]
+    finally:
+        release.set()
+        wait_until(lambda: page.task is None)
+    assert page.result["id"] == historical["id"]
+    assert not page.uses_current_thresholds
+    assert "历史设置" in page.current_run_button.text()
+
+
+def test_closing_review_keeps_result_completed_while_review_was_open(model_service, page_factory, monkeypatch):
+    page = page_factory(model_service)
+    removed = model_service.latest_result("daily")
+    model_service.state["results"][:] = [item for item in model_service.state["results"] if item["id"] != removed["id"]]
+    page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+    assert page.result is None
+
+    def review(dialog):
+        wait_until(lambda: page.result is not None and page.task is None)
+        assert page.result["score_kind"] == algorithm.SCORE_KIND
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", review)
+    page._show_review()
+    assert page.result["id"] == model_service.latest_result("daily")["id"]
+    assert page.result_values["network"].text() == "0.4"
+    assert page.uses_current_thresholds
+
+
+def test_sample_dialog_actions_follow_automatic_evaluation_busy_state(model_service, page_factory, monkeypatch):
+    page = page_factory(model_service)
+    removed = model_service.latest_result("daily")
+    model_service.state["results"][:] = [item for item in model_service.state["results"] if item["id"] != removed["id"]]
+    model_service.current_model["reanalysis_status"] = "failed"
+    ensure = model_service.ensure_latest_result
+    entered, release = Event(), Event()
+
+    def gated(run_id, progress=None):
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("样本窗口测试门未释放")
+        return ensure(run_id, progress)
+
+    monkeypatch.setattr(model_service, "ensure_latest_result", gated)
+
+    def inspect(dialog):
+        review = next(button for button in dialog.findChildren(QPushButton) if button.text() == "人工判定")
+        retry = next(button for button in dialog.findChildren(QPushButton) if button.text() == "补算缺失评价")
+        assert retry.isEnabled()
+        try:
+            page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+            wait_until(entered.is_set)
+            assert not review.isEnabled() and not retry.isEnabled()
+            retry.click()
+        finally:
+            release.set()
+            wait_until(lambda: page.task is None)
+        assert review.isEnabled() and retry.isEnabled()
+        assert model_service.current_model["reanalysis_status"] == "failed"
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", inspect)
+    page._show_samples()
+    assert page.result["id"] == model_service.latest_result("daily")["id"]
 
 
 def test_selecting_model_without_run_evaluation_clears_scores_and_plots(
@@ -447,7 +712,7 @@ def test_selecting_model_without_run_evaluation_clears_scores_and_plots(
 def test_history_opens_exact_saved_evaluation_without_changing_manual_label(model_service, page_factory):
     service = model_service
     original = service.latest_result("daily", service.models[0]["version"])
-    service.set_thresholds(warning=0.5, fault=1.5)
+    service.set_thresholds(warning=0.8, fault=0.5)
     service.evaluate("daily")
     page = page_factory(service)
     entries = list(reversed(service.state["results"]))
@@ -467,7 +732,7 @@ def test_history_opens_exact_saved_evaluation_without_changing_manual_label(mode
     assert page.model_select.currentData() == original["model_version"]
     assert page.result["id"] == original["id"]
     assert page.result["thresholds"] == {"warning": None, "fault": None}
-    assert "未设置阈值" in page.source_badge.text()
+    assert "未设置报警阈值" in page.source_badge.text()
     assert "当时阈值" in page.source_badge.toolTip()
     assert page.label_select.currentData() == "abnormal"
     assert service.runs["daily"]["manual_label"] == "abnormal"
@@ -505,7 +770,7 @@ def test_unmodeled_history_and_selector_never_display_a_trained_result(model_ser
 
 def test_failed_import_preserves_exact_historical_result(model_service, tmp_path, page_factory, monkeypatch):
     original = model_service.latest_result("daily")
-    model_service.set_thresholds(0.5, 1.5)
+    model_service.set_thresholds(0.8, 0.5)
     model_service.evaluate("daily")
     page = page_factory(model_service)
     entries = list(reversed(model_service.state["results"]))
@@ -525,7 +790,7 @@ def test_failed_import_preserves_exact_historical_result(model_service, tmp_path
     assert errors
     assert page.result == original
     assert not page.uses_current_thresholds
-    assert "未设置阈值" in page.source_badge.text()
+    assert "未设置报警阈值" in page.source_badge.text()
     assert "当时阈值" in page.source_badge.toolTip()
     assert len(model_service.state["results"]) == len(entries)
     assert page.daily_button.isEnabled()
@@ -533,7 +798,7 @@ def test_failed_import_preserves_exact_historical_result(model_service, tmp_path
 
 def test_missing_result_clears_previous_fault_color(model_service, tmp_path, page_factory):
     service = model_service
-    service.set_thresholds(warning=0.5, fault=1.5)
+    service.set_thresholds(warning=0.8, fault=0.5)
     service.import_packages([data_package(tmp_path, service, ("late",), "late.zip")])
     page = page_factory(service)
     page.run_select.setCurrentIndex(page.run_select.findData("late"))
@@ -545,18 +810,18 @@ def test_missing_result_clears_previous_fault_color(model_service, tmp_path, pag
     assert all(value.styleSheet() == "" for value in page.result_values.values())
 
 
-@pytest.mark.parametrize(("warning", "fault"), [(1.5, 3), (.5, 1.5)])
-def test_alarm_turns_score_numbers_red_and_clears_when_normal_or_pending_review(
+@pytest.mark.parametrize(("warning", "fault"), [(.5, .2), (.8, .5)])
+def test_alarm_colors_only_the_triggering_score_and_clears_when_normal_or_pending_review(
         model_service, page_factory, warning, fault):
     service = model_service
     service.set_thresholds(warning, fault)
     page = page_factory(service)
-    assert ("预警" if warning == 1.5 else "故障") in page.source_badge.text()
+    assert ("预警" if fault == .2 else "故障") in page.source_badge.text()
     assert page.result_values["analysis"].text() == "1"
     assert service.analysis_metrics(page.result)[0] == pytest.approx(1)
-    assert "正常参考均值" in page.result_values["analysis"].toolTip()
-    for key in ("analysis", "network"):
-        assert page.result_values[key].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
+    assert "对数参考 μ" in page.result_values["analysis"].toolTip()
+    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
+    assert page.result_values["analysis"].styleSheet() == ""
     assert page.result_values["temperature"].styleSheet() == page.result_values["current"].styleSheet() == ""
     service.settings["thresholds_model_version"] = "previous-model"
     page._refresh()
@@ -564,11 +829,220 @@ def test_alarm_turns_score_numbers_red_and_clears_when_normal_or_pending_review(
     assert "新模型阈值待复核" in page.source_badge.text()
     assert page.source_badge.styleSheet() == ""
     assert all(value.styleSheet() == "" for value in page.result_values.values())
-    service.set_thresholds(3, 4)
+    service.set_thresholds(.3, .1)
     page._refresh()
     assert page.status_lights["thresholds"].property("state") == "ready"
-    assert "阈值内" in page.source_badge.text()
-    assert all(value.styleSheet() == "" for value in page.result_values.values())
+    assert "偏离参考" in page.source_badge.text()
+    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert page.result_values["analysis"].styleSheet() == ""
+
+
+def test_vibration_alarm_colors_vibration_without_coloring_normal_network(model_service, page_factory):
+    model_service.set_thresholds(.5, .2)
+    page = page_factory(model_service)
+    result = model_service.latest_result("daily")
+    result.update(vibration_p_value=.005, network_p_value=.3)
+    page._show_result(result, current_thresholds=True)
+    assert page.result["assessment"]["status"] == "fault"
+    assert page.result_values["analysis"].text() == "0.1"
+    assert page.result_values["network"].text() == "1"
+    assert page.result_values["analysis"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
+    assert page.result_values["network"].styleSheet() == ""
+
+
+def test_invalid_compatibility_and_legacy_ratio_never_display_full_compatibility(model_service, page_factory):
+    model_service.set_thresholds(.3, .2)
+    page = page_factory(model_service)
+    result = model_service.latest_result("daily")
+    result["compatibility"]["vibration"].update(status="invalid", score=None, p_value=None,
+                                                  message="正常参考对数样本标准差为 0")
+    result["analysis_score"] = result["vibration_p_value"] = None
+    page._show_result(result, current_thresholds=True)
+    assert page.result_values["analysis"].text() == "—"
+    assert page.result["assessment"]["status"] == "unavailable"
+    assert "无效" in page.source_badge.text()
+    assert "标准差为 0" in page.result_values["analysis"].toolTip()
+    assert "标准差为 0" in page.source_badge.toolTip()
+    assert page.result_values["analysis"].styleSheet() == ""
+
+    legacy = deepcopy(result)
+    legacy.pop("score_kind")
+    legacy["score"] = legacy["analysis_score"] = 5.0
+    page._show_result(legacy)
+    assert all(page.result_values[key].text() == "—" for key in ("analysis", "network"))
+    assert "旧倍率" in page.source_badge.text()
+    assert "重新评估" in page.result_values["network"].toolTip()
+
+
+@pytest.mark.parametrize("review_required", [False, True])
+def test_invalid_vibration_preserves_network_alarm_only_after_threshold_review(model_service, page_factory, review_required):
+    model_service.set_thresholds(.8, .5)
+    if review_required:
+        model_service.settings["thresholds_model_version"] = "previous-model"
+    page = page_factory(model_service)
+    result = model_service.latest_result("daily")
+    reason = "正常参考对数样本标准差为 0，不能计算振动正常相容度"
+    result["compatibility"]["vibration"].update(status="invalid", score=None, p_value=None, message=reason)
+    result["analysis_score"] = result["vibration_p_value"] = None
+    page._show_result(result, current_thresholds=True)
+    assert page.result_values["analysis"].text() == "—"
+    assert page.result_values["network"].text() == "0.4"
+    assert page.result_values["analysis"].styleSheet() == ""
+    assert reason in page.source_badge.toolTip()
+    assert reason not in page.source_badge.text()
+    if review_required:
+        assert page.result["assessment"]["status"] == "unavailable"
+        assert all(value.styleSheet() == "" for value in page.result_values.values())
+        assert page.source_badge.styleSheet() == ""
+    else:
+        assert page.result["assessment"]["status"] == "fault"
+        assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
+        assert page.source_badge.styleSheet()
+
+
+def test_network_distribution_uses_one_value_per_reference_acquisition(model_service, page_factory):
+    page = page_factory(model_service)
+    result = page.result
+    plot = page.plots["distribution"]
+    assert plot.xlabel == "采集级重建误差 P95"
+    assert plot.ylabel == "采集比例"
+    assert plot._y_limits(0, 1) == (0, 1)
+    assert sum(plot.series[0][1]) == pytest.approx(1)
+    assert plot.series[1][0] == [result["reconstruction_error_p95"]] * 2
+    assert "初步校准" in page.source_badge.text()
+    assert "p：" in page.result_values["network"].toolTip()
+    assert "正常概率" not in " ".join(label.text() for label in page.findChildren(QLabel))
+
+
+def test_threshold_form_previews_and_saves_independent_settings_without_inference(model_service, page_factory, monkeypatch):
+    from core.services.position_persistence import write_document
+
+    result = model_service.latest_result("daily")
+    result["vibration_p_value"] = .03
+    entry = next(item for item in model_service.state["results"] if item["id"] == result["id"])
+    write_document(model_service.root / entry["result_file"], result)
+    page = page_factory(model_service)
+    page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+    stored = deepcopy(model_service.state["results"])
+    original_settings = deepcopy(model_service.settings)
+    evaluations = []
+    monkeypatch.setattr(model_service, "evaluate", lambda *args, **kwargs: evaluations.append(args))
+
+    def save(dialog):
+        preview = dialog.findChild(QLabel, "spindle_threshold_preview")
+        assert "振动 0.6，网络 0.4" in preview.text()
+        dialog.findChild(QLineEdit, "spindle_vibration_alpha").setText("0.1")
+        assert "振动 0.3，网络 0.4" in preview.text()
+        dialog.findChild(QLineEdit, "spindle_vibration_warning_threshold").setText("0.2")
+        dialog.findChild(QLineEdit, "spindle_vibration_fault_threshold").setText("0.1")
+        assert "振动 0.3，网络 0.4" in preview.text()
+        dialog.findChild(QLineEdit, "spindle_network_alpha").setText("0.1")
+        assert "振动 0.3，网络 0.2" in preview.text()
+        dialog.findChild(QLineEdit, "spindle_network_warning_threshold").setText("0.5")
+        dialog.findChild(QLineEdit, "spindle_network_fault_threshold").setText("0.25")
+        assert "振动 0.3，网络 0.2" in preview.text() and "故障" in preview.text()
+        assert model_service.settings == original_settings
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+        return dialog.result()
+
+    monkeypatch.setattr(QDialog, "exec", save)
+    page._show_thresholds()
+    QApplication.processEvents()
+    assert model_service.metric_settings == {
+        "vibration": {"alpha": .1, "warning": .2, "fault": .1},
+        "network": {"alpha": .1, "warning": .5, "fault": .25},
+    }
+    assert float(page.result_values["analysis"].text()) == pytest.approx(.3)
+    assert float(page.result_values["network"].text()) == pytest.approx(.2)
+    assert page.result["assessment"]["status"] == "fault"
+    assert page.result_values["analysis"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
+    assert not evaluations
+    assert model_service.state["results"] == stored
+    page.model_select.setCurrentIndex(page.model_select.findData(model_service.current_model["version"]))
+    assert float(page.result_values["network"].text()) == pytest.approx(.4)
+    assert page.result["alpha"] == .05
+
+
+def test_cancelling_independent_setting_preview_does_not_save_or_evaluate(model_service, page_factory, monkeypatch):
+    page = page_factory(model_service)
+    original = deepcopy(model_service.state)
+    values = {key: label.text() for key, label in page.result_values.items()}
+
+    def cancel(dialog):
+        field = dialog.findChild(QLineEdit, "spindle_network_alpha")
+        field.setText("0.2")
+        preview = dialog.findChild(QLabel, "spindle_threshold_preview")
+        assert "网络 0.1" in preview.text()
+        field.setText("0")
+        assert "有效" in preview.text()
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", cancel)
+    page._show_thresholds()
+    QApplication.processEvents()
+    assert model_service.state == original
+    assert {key: label.text() for key, label in page.result_values.items()} == values
+
+
+def test_historical_departure_is_explicit_and_can_return_to_current_without_overwriting(model_service, page_factory):
+    from core.services.position_persistence import write_document
+
+    historical = model_service.latest_result("daily", model_service.models[0]["version"])
+    historical.update(analysis_score=.9689, score=.04338,
+                      vibration_p_value=.048445, network_p_value=.002169,
+                      assessment={"status": "unconfigured", "message": "未设置阈值"})
+    entry = next(item for item in model_service.state["results"] if item["id"] == historical["id"])
+    write_document(model_service.root / entry["result_file"], historical)
+    stored = deepcopy(model_service.state["results"])
+    page = page_factory(model_service)
+    page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+    page.model_select.setCurrentIndex(page.model_select.findData(historical["model_version"]))
+    assert page.result == historical
+    assert "历史快照" in page.result_context.text()
+    assert "偏离正常参考" in page.source_badge.text()
+    assert "偏离正常参考" in page.result_notes["analysis"].text()
+    assert "偏离正常参考" in page.result_notes["network"].text()
+    assert "径向 RMS" in page.result_notes["analysis"].text()
+    assert "重建误差 P95" in page.result_notes["network"].text()
+    assert page.latest_button.isVisible()
+    page.latest_button.click()
+    assert page.uses_current_thresholds
+    assert page.result["model_version"] == model_service.current_model["version"]
+    assert not page.latest_button.isVisible()
+    assert model_service.state["results"] == stored
+    assert model_service.latest_result("daily", historical["model_version"]) == historical
+
+
+def test_training_and_calibration_reevaluations_are_not_presented_as_independent(model_service, page_factory):
+    page = page_factory(model_service)
+    for run_id in model_service.current_model["training_run_ids"] + model_service.current_model["calibration_run_ids"]:
+        page.run_select.setCurrentIndex(page.run_select.findData(run_id))
+        assert "不能作为独立验证" in page.result_context.text()
+    page.run_select.setCurrentIndex(page.run_select.findData("daily"))
+    assert "未参与此模型建模" in page.result_context.text()
+
+
+def test_historical_threshold_form_identifies_current_model_and_coverage(model_service, page_factory, monkeypatch):
+    page = page_factory(model_service)
+    page.model_select.setCurrentIndex(page.model_select.findData(model_service.models[0]["version"]))
+    original = deepcopy(page.result)
+
+    def inspect(dialog):
+        preview = dialog.findChild(QLabel, "spindle_threshold_preview")
+        assert "当前模型最新评价" in preview.text()
+        assert "网络 0.4" in preview.text()
+        dialog.findChild(QLineEdit, "spindle_vibration_alpha").setText("0.25")
+        assert "振动 75%" in preview.text() and "网络 95%" in preview.text()
+        assert any("历史分数及当时设置保留" in label.text() for label in dialog.findChildren(QLabel))
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", inspect)
+    page._show_thresholds()
+    assert page.result == original
+    assert model_service.metric_settings["vibration"]["alpha"] == .05
 
 
 def test_condition_details_distinguish_recorded_and_missing_air_pressure(service, tmp_path, page_factory):
@@ -681,7 +1155,7 @@ def test_legacy_energy_is_recomputed_in_worker_without_rewriting_saved_evaluatio
 
 def test_review_dialog_save_and_cancel_preserve_exact_history_view(model_service, page_factory):
     original = model_service.latest_result("daily")
-    model_service.set_thresholds(warning=0.5, fault=1.5)
+    model_service.set_thresholds(warning=0.8, fault=0.5)
     model_service.evaluate("daily")
     page = page_factory(model_service)
     page.run_select.setCurrentIndex(page.run_select.findData("daily"))
@@ -941,28 +1415,28 @@ def test_current_threshold_change_applies_to_other_runs_without_rewriting_histor
     service = model_service
     page = page_factory(service)
     original = deepcopy(service.state['results'])
-    service.set_thresholds(0.5, 1.5)
+    service.set_thresholds(0.8, 0.5)
     page._refresh('daily')
     assert page.result_values['network'].styleSheet()
-    assert page.result['assessment']['status'] == 'unconfigured'
+    assert page.result['assessment']['status'] == 'fault'
     page.run_select.setCurrentIndex(page.run_select.findData('initial1'))
     assert page.result_values['network'].styleSheet()
-    assert '当前阈值：预警 0.5 倍 / 故障 1.5 倍' in page.current_run_button.toolTip()
+    assert '当前阈值（网络）：预警 0.8 / 故障 0.5' in page.current_run_button.toolTip()
     page.model_select.setCurrentIndex(page.model_select.findData(service.current_model['version']))
-    assert page.result_values['network'].styleSheet() == ''
-    assert '当时阈值：预警 未设置 / 故障 未设置' in page.current_run_button.toolTip()
+    assert page.result_values['network'].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert '当时阈值（网络）：预警 未设置 / 故障 未设置' in page.current_run_button.toolTip()
     assert service.state['results'] == original
 
 
 def test_threshold_confirmation_clears_review_for_all_current_views_but_not_history(model_service, page_factory):
     service = model_service
-    service.set_thresholds(0.5, 1.5)
+    service.set_thresholds(0.8, 0.5)
     service.train()
     page = page_factory(service)
     assert '新模型阈值待复核' in page.status_lights['thresholds'].toolTip()
     assert page.result_values['network'].styleSheet() == ''
     historical = deepcopy(service.state['results'])
-    service.set_thresholds(1, 5)
+    service.set_thresholds(0.8, 0.5)
     page._refresh()
     for run_id in service.runs:
         page.run_select.setCurrentIndex(page.run_select.findData(run_id))
@@ -1049,7 +1523,7 @@ def test_real_cuda_training_can_be_followed_by_another_inference_task(service, t
     from PyQt6.QtWidgets import QSpinBox
     if not torch.cuda.is_available():
         pytest.skip('CUDA 任务切换回归需要 GPU')
-    service.import_packages([data_package(tmp_path, service, ('first', 'second', 'third'))], 'initial')
+    service.import_packages([data_package(tmp_path, service, ('first', 'second', 'third', 'fourth', 'fifth'))], 'initial')
     service.set_label('first', 'healthy', '整批确认正常')
     service.config['training'].update({'epochs': 1, 'device': 'cuda', 'batch_size': 8})
     page = page_factory(service)

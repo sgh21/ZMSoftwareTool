@@ -146,13 +146,14 @@ QLabel#RobotPageTitle, QLabel[monitorTitle="true"] {
     font-weight: 700;
 }
 
-QFrame#RobotResults, QFrame#RobotSettings, QFrame#SpindleResults, QFrame#SpindleSettings {
+QFrame#RobotResults, QFrame#RobotSettings, QFrame#SpindleResults, QFrame#SpindleSettings,
+QFrame#FeedDepthResults, QFrame#FeedDepthSettings {
     background: #ffffff;
     border: 1px solid @border@;
     border-radius: 6px;
 }
 
-QFrame#Region6 QPushButton, QFrame#SpindleActions QPushButton {
+QFrame#Region6 QPushButton, QFrame#SpindleActions QPushButton, QFrame#FeedDepthActions QPushButton {
     padding: 6px 3px;
 }
 
@@ -277,6 +278,7 @@ QFrame[axisMetric="true"][axis="Y"] QLabel { color: @axis_y@; }
 QFrame[axisMetric="true"][axis="Z"] QLabel { color: @axis_z@; }
 QFrame[axisMetric="true"][axis="distance"] QLabel { color: @distance@; }
 QFrame[axisMetric="true"][overLimit="true"] QLabel { color: @error@; }
+QLabel[spindleValue="true"][overLimit="true"] { color: @error@; }
 
 QLabel[statusLight="true"] {
     border: none;
@@ -286,7 +288,7 @@ QLabel[statusLight="true"] {
 QLabel[statusLight="true"][state="ready"] { background: @accent@; }
 QLabel[statusLight="true"][state="partial"] { background: @warning@; }
 
-QPlainTextEdit#RobotProcessLog, QPlainTextEdit#SpindleProcessLog {
+QPlainTextEdit#RobotProcessLog, QPlainTextEdit#SpindleProcessLog, QPlainTextEdit#FeedDepthProcessLog {
     background: #f8fafc;
     color: @text@;
     border: 1px solid @border@;
@@ -323,9 +325,16 @@ QTabWidget#RobotDetailTabs QTabBar::tab:hover {
 }
 
 /* 主轴页复用面板、文字与按钮样式；以下仅为该页补充。 */
-QScrollArea#SpindleRotationPage, QWidget#SpindleCanvas {
+QScrollArea#SpindleRotationPage, QWidget#SpindleCanvas,
+QScrollArea#FeedDepthPage, QWidget#FeedDepthCanvas {
     background: @background@;
     border: none;
+}
+
+QFrame[feedDepthPlot="true"] {
+    background: #f8fafc;
+    border: 1px solid @border@;
+    border-radius: 4px;
 }
 
 QLabel#SpindleDemoBadge {

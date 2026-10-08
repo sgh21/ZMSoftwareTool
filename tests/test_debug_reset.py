@@ -41,7 +41,7 @@ def test_reset_removes_usage_and_preserves_parameters_settings_and_sources(root,
         position.parameter_path.unlink()
     write_document(position.storage / "state.json", state)
     spindle = SpindleMonitoringService(root / "storage/spindle_monitoring")
-    spindle.set_thresholds(2, 4)
+    spindle.set_thresholds(.5, .2, alpha=.1)
     spindle.state.update(runs={"old": {"manual_label": "healthy"}}, packages=["old"],
                          models=[{"version": "old"}], current_model_version="old", results=["old"])
     spindle.settings["thresholds_model_version"] = "old"
@@ -66,7 +66,8 @@ def test_reset_removes_usage_and_preserves_parameters_settings_and_sources(root,
     assert restored.list_history() == restored.list_baselines() == restored.list_logs() == []
     assert {path.name for path in position.storage.iterdir()} == {"parameters", "state.json"}
     spindle = SpindleMonitoringService(spindle.root)
-    assert spindle.settings["thresholds"] == {"warning": 2, "fault": 4}
+    assert spindle.settings["thresholds"] == {"warning": .5, "fault": .2}
+    assert spindle.settings["alpha"] == .1
     assert spindle.settings["thresholds_model_version"] is None
     assert spindle.runs == {} and spindle.models == [] and spindle.history() == []
     assert spindle.state["packages"] == [] and spindle.current_model is None

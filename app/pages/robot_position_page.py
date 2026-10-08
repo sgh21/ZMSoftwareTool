@@ -162,7 +162,10 @@ class RobotPositionPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        stacked = self.width() < 1000
+        self._update_layout_direction()
+
+    def _update_layout_direction(self):
+        stacked = self.width() < 1000 * getattr(self.window(), "ui_scale", 1.0)
         direction = QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight
         if self.columns.direction() != direction:
             self.columns.setDirection(direction)
@@ -636,10 +639,10 @@ class RobotPositionPage(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{self._metric_name()} · 检测历史")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(make_note("双击查看当时保存的原结果及阈值；当前主卡仍显示最新观测与所选基准的比较。"))
+        layout.addWidget(make_note("双击或回车查看当时保存的原结果及阈值；当前主卡仍显示最新观测与所选基准的比较。"))
         table = self._table(["测量批次", "评估时间", "基准版本", "手眼版本", "结论"])
-        self._fill_table(table, [[*[str(row.get(key) or "—") for key in
-                                  ("batch_id", "created_at", "baseline_id", "parameter_version")],
+        self._fill_table(table, [[str(row.get("batch_id") or "—"), self._display_time(row.get("created_at")),
+                                 *[str(row.get(key) or "—") for key in ("baseline_id", "parameter_version")],
                                  assess_metric(row, self._metric_mode())["status"]]
                                 for row in records])
         layout.addWidget(table)
@@ -655,7 +658,7 @@ class RobotPositionPage(QWidget):
 
             self._run_task("载入历史图片", lambda _progress: self.service.load_evaluation_samples(record), loaded)
 
-        table.cellDoubleClicked.connect(select)
+        table.cellActivated.connect(select)
         layout.addWidget(make_button("关闭", dialog.reject))
         fit_dialog(dialog, 960, min(460, 150 + 32 * table.rowCount()))
         dialog.exec()
@@ -670,7 +673,7 @@ class RobotPositionPage(QWidget):
         rows = []
         for result in self.saved_history:
             for alarm in assess_metric(result, self._metric_mode())["alarms"]:
-                rows.append([result["created_at"], result["batch_id"],
+                rows.append([self._display_time(result["created_at"]), result["batch_id"],
                              f"{alarm['point_id']} / {alarm['direction_id']} / {alarm['axis']}",
                              f"{alarm['value']:.4f} / {alarm['threshold']:.4f}", "待复测确认"])
         self._show_records(
@@ -1001,7 +1004,7 @@ class RobotPositionPage(QWidget):
         choice = QComboBox()
         choice.setProperty("robotInput", True)
         for entry in entries:
-            choice.addItem(f"{entry['created_at']} · {entry.get('label') or entry['id']}", entry["path"])
+            choice.addItem(f"{self._display_time(entry['created_at'])} · {entry.get('label') or entry['id']}", entry["path"])
         current_index = choice.findData(preferred_path or (self.service.baseline or {}).get("path"))
         if current_index >= 0:
             choice.setCurrentIndex(current_index)

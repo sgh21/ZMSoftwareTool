@@ -1,11 +1,13 @@
 """主轴数据读取、速度频谱与从头训练的 TCN；不依赖界面。
 
-速度转换与 TCN 源自 Self-SupervisedReconstruction。每日评分使用固定健康
-校准集的误差中位数，未知检测数据不参与归一化、基线拟合或模型训练。
+速度转换与 TCN 源自 Self-SupervisedReconstruction。正常相容度仅使用
+独立正常校准采集的特征参考，待测数据不参与参考拟合或模型训练。
 """
 
 import csv
+import json
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 
@@ -14,6 +16,12 @@ SAMPLE_RATE_HZ = 2048
 CHANNELS = ["ACC1", "ACC2", "ACC3"]
 TEMPERATURE_CHANNELS = ["NTC1", "RTD1"]
 MODEL_ARCHITECTURE = "tcn_1s"
+SCORE_KIND = "normal_compatibility_v1"
+PREPROCESSING = {
+    "id": "velocity_2048_10_900_v1", "sample_rate_hz": SAMPLE_RATE_HZ,
+    "frequency_band_hz": [10, 900], "unit": "mm/s", "channels": CHANNELS,
+}
+PRELIMINARY_REFERENCE_COUNT = 20
 TRAINING_DEFAULTS = {
     "epochs": 150, "batch_size": 128, "learning_rate": 0.003,
     "weight_decay": 1e-5, "seed": 20260929, "device": "auto",
@@ -119,6 +127,130 @@ def velocity_rms_mm_s(velocity):
     return np.sqrt(np.mean(np.asarray(velocity, dtype=float) ** 2, axis=(0, 2)))
 
 
+def fit_normal_reference(values, run_ids=None) -> dict:
+    """每次独立采集一个正特征；检查对数分布，不以窗口扩大校准样本数。"""
+    from scipy.stats import shapiro
+
+    values = np.asarray(values, dtype=float)
+    count = len(values)
+    reference = {
+        "mu": None, "s": None, "M": count, "values": _json_values(values),
+        "run_ids": list(run_ids or []), "status": "invalid", "message": "",
+        "calibration_level": "preliminary" if count < PRELIMINARY_REFERENCE_COUNT else "calibrated",
+        "normality_p_value": None,
+    }
+    if count < 3:
+        reference["message"] = "正常参考不足 3 次独立采集"
+        return reference
+    if values.ndim != 1 or not np.isfinite(values).all() or np.any(values <= 0):
+        reference["message"] = "正常参考特征必须为有限正数，不能含 NaN/Inf"
+        return reference
+    if run_ids is not None and (len(run_ids) != count or len(set(run_ids)) != count):
+        reference["message"] = "正常参考必须来自不同的完整采集，采集编号不能重复"
+        return reference
+    logarithms = np.log(values)
+    mu = float(logarithms.mean())
+    deviation = float(logarithms.std(ddof=1))
+    reference.update(mu=mu, s=deviation)
+    if np.ptp(logarithms) == 0 or deviation == 0 or not np.isfinite(deviation):
+        reference["message"] = "正常参考对数样本标准差为 0 或无效，不能计算相容度"
+        return reference
+    # Shapiro 是适用性诊断，不能证明高斯分布或采集间独立性。
+    normality_p = float(shapiro(logarithms).pvalue)
+    reference["normality_p_value"] = normality_p
+    if normality_p < 0.01:
+        reference["message"] = "对数参考的高斯适用性检查未通过（p < 0.01），请检查工况或分组"
+        return reference
+    reference["status"] = "valid"
+    prefix = "初步校准；" if count < PRELIMINARY_REFERENCE_COUNT else ""
+    reference["message"] = prefix + "对数高斯检查未见明显偏离；采集独立性及工况仍需人工确认"
+    return reference
+
+
+def normal_compatibility(value, reference, alpha=0.05, *, two_sided=False) -> dict:
+    """有限正常参考下的 t 预测检验；相容度不是设备正常的后验概率。"""
+    from scipy.stats import t
+
+    result = {**reference, "score": None, "p_value": None, "u": None,
+              "alpha": alpha, "feature": value, "status": "invalid"}
+    if not np.isfinite(alpha) or not 0 < alpha < 1:
+        result["alpha"] = alpha if np.isfinite(alpha) else None
+        result["message"] = "alpha 必须在 0 与 1 之间"
+        return result
+    if value is None or not np.isfinite(value) or value <= 0:
+        result["feature"] = float(value) if value is not None and np.isfinite(value) else None
+        result["message"] = "当前采集特征必须为有限正数，不能含 NaN/Inf"
+        return result
+    if reference.get("status") != "valid":
+        return result
+    count, mu, deviation = reference.get("M", 0), reference.get("mu"), reference.get("s")
+    if count < 3 or mu is None or deviation is None or not np.isfinite([mu, deviation]).all() or deviation <= 0:
+        result["message"] = "正常参考参数无效，请重新校准"
+        return result
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        u = (float(np.log(value)) - mu) / (deviation * np.sqrt(1 + 1 / count))
+    if not np.isfinite(u):
+        result["message"] = "当前偏离程度超出数值范围，不能计算有效相容度"
+        return result
+    p_value = float(2 * t.sf(abs(u), df=count - 1) if two_sided else t.sf(u, df=count - 1))
+    result.update(status="valid", u=float(u), p_value=p_value, score=min(1.0, p_value / alpha))
+    return result
+
+
+def _calibration_context(run, preprocessing=None):
+    supplied = run.get("calibration_context", {})
+    return {
+        "speed_rpm": supplied.get("speed_rpm", run["target_speed_rpm"]),
+        "operation": supplied.get("operation", "idle"),
+        "condition": supplied.get("condition", {}),
+        "preprocessing": supplied.get("preprocessing", preprocessing or PREPROCESSING),
+    }
+
+
+def _network_id(checkpoint, model_path):
+    if checkpoint.get("network_id"):
+        return checkpoint["network_id"]
+    path = Path(model_path).resolve()
+    stat = path.stat()
+    return f"legacy:{path}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _build_normal_reference(validation_runs, run_errors, network_id, preprocessing):
+    groups = {}
+    for run, errors in zip(validation_runs, run_errors):
+        context = _calibration_context(run, preprocessing)
+        count = len(_windows(run))
+        key = json.dumps([context, count], sort_keys=True, ensure_ascii=False)
+        group = groups.setdefault(key, {"context": context, "one_second_window_count": count,
+                                        "run_ids": [], "vibration_values": [], "network_values": []})
+        group["run_ids"].append(run["run_id"])
+        group["vibration_values"].append(float(np.linalg.norm(velocity_rms_mm_s(run["velocity"])[:2])))
+        group["network_values"].append(float(np.quantile(errors[:, :2].mean(axis=1), 0.95)))
+    for group in groups.values():
+        for feature in ("vibration", "network"):
+            group[feature] = fit_normal_reference(group.pop(f"{feature}_values"), group["run_ids"])
+        condition = group["context"]["condition"]
+        if not condition or any(value is None for value in condition.values()):
+            for feature in ("vibration", "network"):
+                group[feature]["message"] += "；工况信息缺失，需人工确认匹配"
+    return {"score_kind": SCORE_KIND, "network_id": network_id,
+            "preprocessing": preprocessing, "groups": list(groups.values())}
+
+
+def _matched_reference(normal_reference, run, network_id, preprocessing):
+    if not normal_reference:
+        return None, "未建立独立正常采集参考，请重新校准"
+    if normal_reference.get("score_kind") != SCORE_KIND or normal_reference.get("network_id") != network_id:
+        return None, "正常参考与当前网络版本不匹配，请重新校准"
+    if normal_reference.get("preprocessing") != preprocessing:
+        return None, "正常参考与当前预处理版本不匹配，请重新校准"
+    context = _calibration_context(run, preprocessing)
+    for group in normal_reference.get("groups", []):
+        if group["context"] == context and group["one_second_window_count"] == len(_windows(run)):
+            return group, ""
+    return None, "没有工况、采集长度及预处理匹配的正常参考，请重新校准"
+
+
 def _device(torch, name):
     if name == "auto":
         name = "cuda" if torch.cuda.is_available() else "cpu"
@@ -143,7 +275,7 @@ def _infer(model, windows, center, scale, device, batch_size):
 
 
 def train_model(train_runs, validation_runs, output_path, config, progress=None) -> dict:
-    """用指定健康 run 从随机初始化训练，固定校准误差基线随模型保存。"""
+    """从随机初始化训练，冻结网络后仅用隔离校准采集建立正常参考。"""
     import torch
     from torch.utils.data import DataLoader, TensorDataset
     from core.algorithms.spindle_network import TCNAutoencoder
@@ -153,6 +285,8 @@ def train_model(train_runs, validation_runs, output_path, config, progress=None)
     validation_ids = [run["run_id"] for run in validation_runs]
     if not train_ids or not validation_ids or set(train_ids) & set(validation_ids):
         raise ValueError("训练集和健康校准集必须非空且按完整 run 隔离")
+    if len(set(train_ids)) != len(train_ids) or len(set(validation_ids)) != len(validation_ids):
+        raise ValueError("训练和正常校准采集编号不能重复")
     if any(run["target_speed_rpm"] != 7000 for run in train_runs + validation_runs):
         raise ValueError("当前模型只使用 7000 rpm 数据训练和校准")
     if int(settings["epochs"]) < 1 or int(settings["batch_size"]) < 1:
@@ -204,22 +338,18 @@ def train_model(train_runs, validation_runs, output_path, config, progress=None)
     # 固定轮数后冻结网络；校准集仅用于建立参考，不能用于选择权重。
     final_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
     errors, _ = _infer(model, validation, center, scale, device, batch_size)
-    primary_errors = errors[:, :2].mean(axis=1)
-    reference_mse = float(np.median(primary_errors))
-    if reference_mse <= 0:
-        raise ValueError("正常校准集的重建误差基线必须大于零")
+    run_errors = np.split(errors, np.cumsum([len(_windows(run)) for run in validation_runs])[:-1])
+    network_id = str(uuid4())
+    preprocessing = settings.get("preprocessing", PREPROCESSING)
+    normal_reference = _build_normal_reference(validation_runs, run_errors, network_id, preprocessing)
     summary = {
         "architecture": MODEL_ARCHITECTURE, "initialization": "random", "config": settings,
         "trained_epochs": epochs, "selection": "fixed_epochs", "train_run_ids": train_ids,
         "validation_run_ids": validation_ids, "train_window_count": len(train),
         "validation_window_count": len(validation), "device": str(device),
-        "healthy_reference_mse": reference_mse,
-        "healthy_reference_rms_mm_s": float(np.mean([
-            np.linalg.norm(velocity_rms_mm_s(run["velocity"])[:2])
-            for run in train_runs + validation_runs
-        ])),
-        "reference_errors": (primary_errors / reference_mse).tolist(), "history": history,
-        "score_definition": "P95 of 1s ACC1+ACC2 normalized reconstruction MSE / healthy calibration median",
+        "network_id": network_id, "preprocessing": preprocessing, "score_kind": SCORE_KIND,
+        "normal_reference": normal_reference, "history": history,
+        "score_definition": "min(1, t predictive tail p / alpha); acquisition radial RMS two-sided, reconstruction P95 upper-sided",
     }
     checkpoint = {
         **summary, "model_state": final_state, "center": center.cpu(), "scale": scale.cpu(),
@@ -231,6 +361,30 @@ def train_model(train_runs, validation_runs, output_path, config, progress=None)
     if progress:
         progress(100, "模型与健康校准参考已保存")
     return summary
+
+
+def calibrate_model(validation_runs, model_path, preprocessing=None) -> dict:
+    """冻结现有权重，重新计算独立正常采集参考；不修改 checkpoint。"""
+    import torch
+    from core.algorithms.spindle_network import TCNAutoencoder
+
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
+    run_ids = [run["run_id"] for run in validation_runs]
+    if len(set(run_ids)) != len(run_ids) or set(run_ids) & set(checkpoint["train_run_ids"]):
+        raise ValueError("正常校准采集必须独立，不能重复或与网络训练采集重叠")
+    settings = {**TRAINING_DEFAULTS, **checkpoint["config"]}
+    device = _device(torch, settings["device"])
+    model = TCNAutoencoder().to(device)
+    model.load_state_dict(checkpoint["model_state"])
+    center, scale = checkpoint["center"].to(device), checkpoint["scale"].to(device)
+    run_errors = [
+        _infer(model, _windows(run), center, scale, device, int(settings["batch_size"]))[0]
+        for run in validation_runs
+    ]
+    return _build_normal_reference(
+        validation_runs, run_errors, _network_id(checkpoint, model_path),
+        preprocessing or checkpoint.get("preprocessing", PREPROCESSING),
+    )
 
 
 def _json_values(array):
@@ -279,8 +433,13 @@ def order_band_energy(run) -> dict:
 
 
 def evaluate_run(run, model_path=None, config=None, progress=None) -> dict:
-    """真实 DSP 始终可用；有模型时额外给出重建误差，不自动设置健康标签。"""
+    """保留 DSP 与重建误差，只使用匹配的独立正常采集参考计算相容度。"""
+    config = config or {}
+    vibration_alpha = float(config.get("vibration_alpha", config.get("alpha", 0.05)))
+    network_alpha = float(config.get("network_alpha", config.get("alpha", 0.05)))
     velocity = np.asarray(run["velocity"], dtype=np.float32)
+    if not np.isfinite(velocity).all():
+        raise ValueError("当前采集振动速度包含 NaN/Inf，正常相容度无效")
     starts = np.asarray(run["start_time_s"])
     windows = _windows(run)
     window_times = (starts[:, None] + np.arange(10)).ravel()
@@ -308,8 +467,11 @@ def evaluate_run(run, model_path=None, config=None, progress=None) -> dict:
         "current_a": _median(current[selected_telemetry]),
         "temperature_c": [_median(channel) for channel in temperature],
         "rms_mm_s": rms.tolist(), "xy_rms_mm_s": float(np.linalg.norm(rms[:2])),
-        "score": None, "normalized_mse": None, "channel_mse": None,
-        "window_scores": [], "window_time_s": window_times.tolist(), "reference_scores": [],
+        "score": None, "analysis_score": None, "score_kind": SCORE_KIND, "alpha": network_alpha,
+        "network_p_value": None, "vibration_p_value": None, "reconstruction_error_p95": None,
+        "normalized_mse": None, "channel_mse": None,
+        "window_errors": [], "window_time_s": window_times.tolist(),
+        "reference_features": {"vibration": [], "network": []},
         "window_count": len(windows), "reconstruction": None,
         "waveform": {"time_s": (starts[0] + np.arange(2048) / SAMPLE_RATE_HZ).tolist(),
                      "channels": CHANNELS, "values": windows[0].tolist()},
@@ -324,12 +486,18 @@ def evaluate_run(run, model_path=None, config=None, progress=None) -> dict:
     }
     if progress:
         progress(40, "频谱、倍频能量和温度遥测已分析")
+    invalid_reference = {"status": "invalid", "message": "未建立独立正常采集参考，请训练或重新校准",
+                         "mu": None, "s": None, "M": 0}
+    result["compatibility"] = {
+        "vibration": normal_compatibility(result["xy_rms_mm_s"], invalid_reference, vibration_alpha, two_sided=True),
+        "network": {**invalid_reference, "score": None, "p_value": None, "u": None, "alpha": network_alpha},
+    }
     if model_path is not None and run["target_speed_rpm"] == 7000:
         import torch
         from core.algorithms.spindle_network import TCNAutoencoder
 
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
-        settings = {**checkpoint["config"], **(config or {})}
+        settings = {**TRAINING_DEFAULTS, **checkpoint["config"], **config}
         device = _device(torch, settings["device"])
         model = TCNAutoencoder().to(device)
         model.load_state_dict(checkpoint["model_state"])
@@ -338,14 +506,30 @@ def evaluate_run(run, model_path=None, config=None, progress=None) -> dict:
             device, int(settings["batch_size"]),
         )
         primary = errors[:, :2].mean(axis=1)
-        scores = primary / float(checkpoint["healthy_reference_mse"])
+        feature = float(np.quantile(primary, 0.95))
+        normal_reference = config.get("normal_reference", checkpoint.get("normal_reference"))
+        group, message = _matched_reference(
+            normal_reference, run, _network_id(checkpoint, model_path),
+            config.get("preprocessing", checkpoint.get("preprocessing", PREPROCESSING)),
+        )
+        invalid_reference = {"status": "invalid", "message": message, "mu": None, "s": None, "M": 0}
+        vibration_reference = group["vibration"] if group else invalid_reference
+        network_reference = group["network"] if group else invalid_reference
+        vibration = normal_compatibility(result["xy_rms_mm_s"], vibration_reference, vibration_alpha, two_sided=True)
+        network = normal_compatibility(feature, network_reference, network_alpha)
         result.update({
-            "score": float(np.quantile(scores, 0.95)), "normalized_mse": float(primary.mean()),
-            "channel_mse": errors.mean(axis=0).tolist(), "window_channel_mse": errors.tolist(),
-            "window_scores": scores.tolist(), "reference_scores": checkpoint["reference_errors"],
+            "score": network["score"], "analysis_score": vibration["score"],
+            "network_p_value": network["p_value"], "vibration_p_value": vibration["p_value"],
+            "compatibility": {"vibration": vibration, "network": network},
+            "reconstruction_error_p95": feature if np.isfinite(feature) else None,
+            "normalized_mse": float(primary.mean()) if np.isfinite(primary).all() else None,
+            "channel_mse": _json_values(errors.mean(axis=0)), "window_channel_mse": _json_values(errors),
+            "window_errors": _json_values(primary),
+            "reference_features": {"vibration": vibration_reference.get("values", []),
+                                   "network": network_reference.get("values", [])},
             "reconstruction": {"time_s": result["waveform"]["time_s"],
-                               "original": windows[0].tolist(), "reconstructed": reconstructed.tolist()},
+                               "original": windows[0].tolist(), "reconstructed": _json_values(reconstructed)},
         })
     if progress:
-        progress(100, "分析完成" if result["score"] is not None else "信号分析完成，未计算网络评分")
+        progress(100, "分析完成" if result["score"] is not None else "信号分析完成，正常相容度无效或待校准")
     return result

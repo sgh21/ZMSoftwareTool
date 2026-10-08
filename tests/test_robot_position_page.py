@@ -285,7 +285,8 @@ def test_current_repeatability_can_be_evaluated_without_baseline(application, tm
     page.close()
 
 
-def test_evaluation_restores_current_observations_after_viewing_history(application, tmp_path, monkeypatch):
+@pytest.mark.parametrize("activation", ["enter", "double_click"])
+def test_evaluation_restores_current_observations_after_viewing_history(application, tmp_path, monkeypatch, activation):
     service = MemoryService()
     historical_sample = {"point_id": "P1", "direction_id": "D1", "sample_id": "history-A"}
     current_sample = {"point_id": "P1", "direction_id": "D1", "sample_id": "current-B"}
@@ -306,7 +307,18 @@ def test_evaluation_restores_current_observations_after_viewing_history(applicat
 
     def select_history():
         dialog = application.activeModalWidget()
-        dialog.findChild(QTableWidget).cellDoubleClicked.emit(0, 0)
+        table = dialog.findChild(QTableWidget)
+        assert table.item(0, 1).text() == page._display_time(historical_result["created_at"])
+        table.setCurrentCell(0, 0)
+        table.setFocus()
+        if activation == "enter":
+            QTest.keyClick(table, Qt.Key.Key_Return)
+        else:
+            position = table.visualItemRect(table.item(0, 0)).center()
+            QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=position)
+            QTest.mouseDClick(table.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        if dialog.isVisible():
+            dialog.reject()
 
     QTimer.singleShot(0, select_history)
     page._show_history()
@@ -397,6 +409,37 @@ def test_narrow_page_stacks_panels_without_horizontal_clipping(application):
         application.processEvents()
         assert page.columns.direction() == QBoxLayout.Direction.LeftToRight
         assert page.scroll_area.horizontalScrollBar().maximum() == 0
+    finally:
+        page.close()
+        application.setStyleSheet(previous_style)
+
+
+def test_large_ui_scale_stacks_panels_and_reflows_without_resizing(application):
+    previous_style = application.styleSheet()
+    application.setStyleSheet(load_stylesheet())
+    page = ready_position_page(MemoryService())
+    page.ui_scale = 1.0
+    metrics = UiScale(page)
+    try:
+        page.resize(1500, 850)
+        page.show()
+        application.processEvents()
+        assert page.columns.direction() == QBoxLayout.Direction.LeftToRight
+        page.ui_scale = 2.0
+        application.setStyleSheet(load_stylesheet(2.0))
+        metrics.apply(2.0)
+        page._update_layout_direction()
+        application.processEvents()
+        application.processEvents()
+        assert page.columns.direction() == QBoxLayout.Direction.TopToBottom
+        assert page.scroll_area.widget().width() <= page.scroll_area.viewport().width()
+        assert page.scroll_area.horizontalScrollBar().maximum() == 0
+        page.ui_scale = 1.0
+        application.setStyleSheet(load_stylesheet())
+        metrics.apply(1.0)
+        page._update_layout_direction()
+        application.processEvents()
+        assert page.columns.direction() == QBoxLayout.Direction.LeftToRight
     finally:
         page.close()
         application.setStyleSheet(previous_style)

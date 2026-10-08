@@ -6,7 +6,7 @@ from math import ceil, floor, isfinite
 from zipfile import BadZipFile
 import numpy as np
 
-from PyQt6.QtCore import QDateTime, QPointF, QRect, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QDateTime, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QActionGroup, QColor, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 
 from app.resources import DISPLAY, fit_dialog, load_icon, make_button, make_note, set_status_light
 from app.tasks import ServiceTask
-from core.services.spindle_monitoring_service import SpindleMonitoringService, assess_score
+from core.services.spindle_monitoring_service import SpindleMonitoringService, assess_compatibility, assess_score
 
 
 LABELS = {"unconfirmed": "未判定", "healthy": "正常", "abnormal": "异常"}
@@ -61,6 +61,7 @@ class CurrentModelDelegate(QStyledItemDelegate):
 
 class SpindleRotationPage(QScrollArea):
     label_saved = pyqtSignal()
+    busy_changed = pyqtSignal(bool)
 
     def __init__(self, service=None):
         super().__init__()
@@ -70,6 +71,10 @@ class SpindleRotationPage(QScrollArea):
         self.task = None
         self.task_completed = None
         self.task_status_key = "acquisition"
+        self.auto_evaluation_attempts = set()
+        self.selection_timer = QTimer(self)
+        self.selection_timer.setSingleShot(True)
+        self.selection_timer.timeout.connect(self._ensure_selection_result)
         self.review_run_ids = None
         self.energy_task = None
         self.order_energy_by_run = {}
@@ -119,6 +124,7 @@ class SpindleRotationPage(QScrollArea):
         self.model_select.setLabelDrawingMode(QComboBox.LabelDrawingMode.UseDelegate)
         self.model_select.setToolTip("右侧星标表示当前模型；按模型版本回看，旧评价保持不变")
         self.run_select.currentIndexChanged.connect(self._selection_changed)
+        self.run_select.activated.connect(self._selection_changed)
         self.model_select.currentIndexChanged.connect(self._selection_changed)
         self.signal_select = self._combo()
         self.signal_select.addItems(CHANNELS)
@@ -150,15 +156,17 @@ class SpindleRotationPage(QScrollArea):
         heading.addStretch()
         self.source_badge = QLabel("暂无数据")
         self.source_badge.setObjectName("SpindleDemoBadge")
+        self.source_badge.setWordWrap(True)
         heading.addWidget(self.source_badge)
         body.addLayout(heading)
 
         metrics = QHBoxLayout()
         metrics.setSpacing(12)
         self.result_values = {}
+        self.result_notes = {}
         for key, title, hint in (
-            ("analysis", "解析评价", "正常均值 / 倍"),
-            ("network", "网络评分", "P95 / 倍"),
+            ("analysis", "振动正常相容度", "径向 RMS · 尚无评价"),
+            ("network", "网络正常相容度", "重建误差 P95 · 尚无评价"),
             ("temperature", "温度", "NTC1 / °C"),
             ("current", "电流", "驱动器读数 / A"),
         ):
@@ -176,14 +184,22 @@ class SpindleRotationPage(QScrollArea):
             self.result_values[key] = value
             note = make_note(hint)
             note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.result_notes[key] = note
             for widget in (label, value, note):
                 content.addWidget(widget)
             metrics.addWidget(metric, 1)
-        self.result_values["analysis"].setToolTip("本次前轴承 X/Y 合成速度 RMS / 模型正常样本的平均 RMS；正常平均水平为 1 倍。")
-        self.result_values["network"].setToolTip("相对健康校准参考的重建误差倍率 P95；反映信号差异，不能直接换算为 μm。")
+        self.result_values["analysis"].setToolTip("径向速度 RMS 的双侧正常相容度；正常接受范围内为 1，过大或过小均降低。")
+        self.result_values["network"].setToolTip("采集级重建误差 P95 的上尾正常相容度；仅误差增大降低。不是设备正常的后验概率。")
         self.result_values["temperature"].setToolTip("轴承温度有效采样点的中位数；缺失点不参与统计。")
         self.result_values["current"].setToolTip("稳定采集段内驱动器有效读数的有符号中位数，不是交流电流有效值；不参与网络评分。")
         body.addLayout(metrics)
+        context = QHBoxLayout()
+        self.result_context = make_note("")
+        context.addWidget(self.result_context, 1)
+        self.latest_button = self._button("返回最新评价", self._show_latest, True)
+        self.latest_button.setVisible(False)
+        context.addWidget(self.latest_button)
+        body.addLayout(context)
 
         self.signal_button = QToolButton()
         self.signal_button.setObjectName("SpindleSignalSelect")
@@ -371,6 +387,7 @@ class SpindleRotationPage(QScrollArea):
         table.verticalHeader().hide()
 
         def populate():
+            table.blockSignals(True)
             table.setRowCount(0)
             for run in self.service.list_runs():
                 row = table.rowCount()
@@ -383,13 +400,19 @@ class SpindleRotationPage(QScrollArea):
                     item.setToolTip(value)
                     table.setItem(row, column, item)
                 table.item(row, 0).setData(Qt.ItemDataRole.UserRole, run["run_id"])
+            table.blockSignals(False)
 
         def select(row, column):
-            self.run_select.setCurrentIndex(self.run_select.findData(table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
+            index = self.run_select.findData(table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+            if index == self.run_select.currentIndex():
+                self._selection_changed()
+            else:
+                self.run_select.setCurrentIndex(index)
 
         def sync_row():
             run_id = self.run_select.currentData()
-            editable = bool(run_id and not self.service.trained_run_ids().intersection(self.service.import_group(run_id)))
+            editable = bool(self.task is None and run_id
+                            and not self.service.trained_run_ids().intersection(self.service.import_group(run_id)))
             review_button.setEnabled(editable)
             review_button.setToolTip("判定当前选中的采集；批量数据按整批保存。" if editable
                                      else "已参与模型训练或校准的样本不能改判。" if run_id else "请先导入采集数据。")
@@ -401,7 +424,7 @@ class SpindleRotationPage(QScrollArea):
                     break
 
         def review():
-            if self.run_select.currentData():
+            if self.task is None and self.run_select.currentData():
                 self._show_review(run_id=self.run_select.currentData())
                 populate()
                 sync_row()
@@ -418,15 +441,24 @@ class SpindleRotationPage(QScrollArea):
         retry_requested = False
         def retry():
             nonlocal retry_requested
+            if self.task is not None:
+                return
             retry_requested = True
             dialog.accept()
         retry_button = self._button("补算缺失评价", retry, track=False)
-        model = self.service.current_model
-        evaluated = {entry["run_id"] for entry in self.service.state["results"]
-                     if model and entry["model_version"] == model["version"]}
-        retry_button.setEnabled(bool(model and (model.get("reanalysis_status") != "complete"
-                                                or set(self.service.runs) - evaluated)))
-        retry_button.setToolTip("沿用当前模型补齐缺失评价，无需重新训练。")
+
+        def update_actions(busy):
+            sync_row()
+            model = self.service.current_model
+            evaluated = {entry["run_id"] for entry in self.service.state["results"]
+                         if model and entry["model_version"] == model["version"]
+                         and entry.get("score_kind") == "normal_compatibility_v1"}
+            retry_button.setEnabled(bool(not busy and model and (model.get("reanalysis_status") != "complete"
+                                                                  or set(self.service.runs) - evaluated)))
+
+        self.busy_changed.connect(update_actions)
+        update_actions(self.task is not None)
+        retry_button.setToolTip("沿用当前网络，补算缺失或旧倍率评价并重建正常参考，无需重训。")
         row.addWidget(retry_button)
         row.addStretch()
         row.addWidget(self._button("关闭", dialog.reject, track=False))
@@ -436,6 +468,7 @@ class SpindleRotationPage(QScrollArea):
             dialog.exec()
         finally:
             self.run_select.currentIndexChanged.disconnect(sync_row)
+            self.busy_changed.disconnect(update_actions)
             for widget in borrowed:
                 widget.setParent(self.detail_holder)
                 widget.hide()
@@ -526,7 +559,8 @@ class SpindleRotationPage(QScrollArea):
                 widget.hide()
             self.label_saved.disconnect(dialog.accept)
             self._selection_changed()
-            self._show_result(displayed_result, current_thresholds=uses_current_thresholds)
+            if not uses_current_thresholds:
+                self._show_result(displayed_result)
             dialog.deleteLater()
 
     def _log(self, message, level="INFO"):
@@ -571,7 +605,7 @@ class SpindleRotationPage(QScrollArea):
         self.train_button.setText("重新训练" if model else "训练网络")
         self.evaluate_button.setText("重新评估" if model else "分析信号")
         self.evaluate_button.setToolTip("使用当前模型和阈值重新评估所选采集，并追加评价记录；日常导入已自动评估。"
-                                        if model else "分析所选采集的真实信号；建立模型后才显示网络评分。")
+                                        if model else "分析所选采集的真实信号；建立正常参考后才显示相容度。")
         self._selection_changed()
         self._set_busy(self.task is not None)
 
@@ -594,15 +628,20 @@ class SpindleRotationPage(QScrollArea):
             if state == "partial":
                 details += "\n历史评价未完成，请在样本与模型中补算"
         elif count:
-            details += "\n至少 3 次正常候选采集后可训练网络"
+            details += "\n至少 5 次正常候选采集（2 次训练、至少 3 次独立校准）"
         self._set_status_light("model", state, details)
-        thresholds = self.service.settings["thresholds"]
-        configured = sum(value is not None for value in thresholds.values())
+        metrics = self.service.metric_settings
+        configured = sum(metric[key] is not None for metric in metrics.values() for key in ("warning", "fault"))
         state = "partial" if configured else "missing"
-        if configured == 2 and model and not self.service.thresholds_review_required:
+        if configured == 4 and model and not self.service.thresholds_review_required:
             state = "ready"
-        details = "\n".join(f"{label}：{'未设置' if thresholds[key] is None else f'{thresholds[key]:g} 倍'}"
-                            for key, label in (("warning", "预警"), ("fault", "故障")))
+        lines = []
+        for feature, name in (("vibration", "振动"), ("network", "网络")):
+            metric = metrics[feature]
+            limits = " / ".join(f"{label} {'未设置' if metric[key] is None else f'≤ {metric[key]:g}'}"
+                                for key, label in (("warning", "预警"), ("fault", "故障")))
+            lines.append(f"{name}：α = {metric['alpha']:g}；{limits}")
+        details = "\n".join(lines) + "\n两项相容度各用各自设置，任一触发即报警。"
         if self.service.thresholds_review_required:
             details += "\n新模型阈值待复核"
         elif configured and model is None:
@@ -611,18 +650,18 @@ class SpindleRotationPage(QScrollArea):
         if not count:
             hint = "先批量导入正常样本，再训练网络；日常数据用“日常导入”。"
         elif not model:
-            hint = (f"已有 {candidates} 次正常候选，可点击“训练网络”。" if candidates >= 3 else
-                    f"正常候选 {candidates}/3 次；请导入样本或在“人工判定”中纳入训练。")
+            hint = (f"已有 {candidates} 次正常候选，可点击“训练网络”。" if candidates >= 5 else
+                    f"正常候选 {candidates}/5 次；请导入样本或在“人工判定”中纳入训练。")
         elif model.get("reanalysis_status") != "complete":
             hint = "历史评价未完成，请在“样本与模型”中补算。"
         elif self.service.thresholds_review_required:
             hint = "新模型已建立，请在“阈值设置”中复核并保存。"
-        elif configured < 2:
+        elif configured < 4:
             hint = "模型已就绪；请补齐判定阈值，日常导入后会自动评估。"
         else:
             hint = "模型与阈值已就绪；日常导入后自动评估并保存。"
         self.workflow_hint.setText(hint)
-        self.train_button.setToolTip(f"使用 {candidates} 次正常候选从头训练；至少需要 3 次完整采集。")
+        self.train_button.setToolTip(f"使用 {candidates} 次正常候选从头训练；至少 2 次训练、3 次独立校准。3 次仅为计算门槛。")
 
     def _selection_changed(self):
         run_id = self.run_select.currentData()
@@ -640,6 +679,23 @@ class SpindleRotationPage(QScrollArea):
         else:
             result = self.service.latest_result(run_id, version) if run else None
         self._show_result(result, current_thresholds=version is None)
+        self.selection_timer.start(0)
+
+    def _ensure_selection_result(self):
+        """合并选择信号；只为最新视图补算缺失或旧倍率评价。"""
+        run_id = self.run_select.currentData()
+        if (not run_id or self.model_select.currentData() is not None
+                or not self.uses_current_thresholds or self.task is not None):
+            return
+        if self.result and self.result.get("score_kind") == "normal_compatibility_v1":
+            return
+        model = self.service.current_model
+        key = (run_id, model["version"] if model else None)
+        if key in self.auto_evaluation_attempts:
+            return
+        self.auto_evaluation_attempts.add(key)
+        self.source_badge.setText("正在更新当前采集评价")
+        self._run_task("自动更新当前采集评价", lambda progress: self.service.ensure_latest_result(run_id, progress))
 
     def _label_changed(self):
         run_ids = self.review_run_ids if self.review_run_ids is not None else [self.run_select.currentData()]
@@ -655,39 +711,85 @@ class SpindleRotationPage(QScrollArea):
             self.training_check.setChecked(True)
 
     def _show_result(self, result, current_thresholds=False):
+        if not current_thresholds:
+            self.selection_timer.stop()
+        result = self.service.display_result(result, current_settings=current_thresholds)
+        metrics = self.service.result_metric_settings(result) if result else self.service.metric_settings
         self.result = result
         self.uses_current_thresholds = current_thresholds
-        analysis_score, analysis_reference = self.service.analysis_metrics(result)
-        values = {"analysis": analysis_score,
+        self.latest_button.setVisible(bool(result) and not current_thresholds)
+        self.result_context.setVisible(bool(result))
+        if result:
+            mode = "当前设置" if current_thresholds else "历史快照 · 当时设置"
+            role = {"training": "训练样本回评，不能作为独立验证", "calibration": "校准样本回评，不能作为独立验证",
+                    "independent": "未参与此模型建模"}[result["role"]]
+            self.result_context.setText(f"{mode} · {self._model_name(result['model_version'])} · {role}")
+        values = {"analysis": result.get("analysis_score") if result else None,
                   "network": result.get("score") if result else None,
                   "temperature": result.get("temperature_c", [None])[0] if result else None,
                   "current": result.get("current_a") if result else None}
         for key, value in values.items():
-            self.result_values[key].setText("—" if value is None else f"{value:.4g}")
+            self.result_values[key].setText("—" if value is None or not isfinite(value) else f"{value:.4g}")
             self.result_values[key].setStyleSheet("")
-        analysis_note = "本次径向速度 RMS / 模型正常采集的平均 RMS，正常平均水平为 1 倍。"
-        if result and result.get("xy_rms_mm_s") is not None:
-            analysis_note += f"\n本次径向 RMS：{result['xy_rms_mm_s']:.5g} mm/s。"
-        analysis_note += (f"\n正常参考均值：{analysis_reference:.5g} mm/s。"
-                          if analysis_reference is not None else "\n尚无正常参考，请先确认正常样本并建立模型。")
-        self.result_values["analysis"].setToolTip(analysis_note)
+        for key, feature, raw_key, p_key, description in (
+            ("analysis", "vibration", "xy_rms_mm_s", "vibration_p_value", "本次径向 RMS（R，mm/s）；双侧检验，过大或过小均扣分。"),
+            ("network", "network", "reconstruction_error_p95", "network_p_value", "本次全部窗口重建误差的 P95（E）；上尾检验，仅误差增大扣分。"),
+        ):
+            notes = [description, "C = min(1, p / α)，正常接受范围内为 1；不是设备正常的后验概率。",
+                     "两项针对不同特征，数值不要求相近；低于 1 均表示偏离各自的正常接受范围。"]
+            score = values[key]
+            state = "尚无评价" if not result else "参考无效 / 未校准"
+            if score is not None and isfinite(score):
+                state = "正常接受范围" if score == 1 else "偏离正常参考"
+            self.result_notes[key].setText(f"{'径向 RMS' if key == 'analysis' else '重建误差 P95'}\n{state}")
+            if result:
+                raw_value = result.get(raw_key)
+                p_value = result.get(p_key)
+                notes.append(f"{'R' if feature == 'vibration' else 'E'}：{'无效 / 未计算' if raw_value is None else f'{raw_value:.6g}'}")
+                notes.append(f"p：{'无效 / 未计算' if p_value is None else f'{p_value:.6g}'}；α：{metrics[feature]['alpha']:g}")
+                calibration = result.get("compatibility", {}).get(feature, {})
+                if calibration.get("message"):
+                    notes.append(calibration["message"])
+                if calibration.get("M") is not None:
+                    notes.append(f"独立正常校准：{calibration['M']} 次")
+                if calibration.get("mu") is not None and calibration.get("s") is not None:
+                    notes.append(f"对数参考 μ = {calibration['mu']:.6g}，s = {calibration['s']:.6g}")
+                if calibration.get("u") is not None:
+                    notes.append(f"预测偏离 u = {calibration['u']:.6g}")
+                if calibration.get("normality_p_value") is not None:
+                    notes.append(f"对数高斯适用性检验 p = {calibration['normality_p_value']:.4g}；不能证明独立性或高斯分布。")
+                if result.get("score_kind") != "normal_compatibility_v1" and result.get("model_version"):
+                    notes.append("旧倍率记录：请重新评估以计算正常相容度。")
+            else:
+                notes.append("尚无正常参考，请先确认正常样本并建立模型。")
+            self.result_values[key].setToolTip("\n".join(notes))
         result_detail = ""
         self.source_badge.setStyleSheet("")
         self.source_badge.setToolTip("")
         if result:
             source = "历史回放" if result["source_type"] == "historical_replay" else "检测数据"
-            assessment = result["assessment"]
-            thresholds = result["thresholds"]
-            if current_thresholds:
-                thresholds = self.service.settings["thresholds"]
-                assessment = assess_score(result["score"], thresholds)
-                if result["score"] is not None and self.service.thresholds_review_required:
-                    assessment = {"status": "review_required", "message": "新模型阈值待复核"}
-            self.source_badge.setText(f"{source} · {assessment['message']}")
+            assessment = (assess_compatibility(result, metrics, result.get("thresholds_review_required", False))
+                          if result.get("score_kind") == "normal_compatibility_v1" else result["assessment"])
+            status_text = {"unavailable": "正常相容度无效", "legacy": "旧倍率记录 · 待重新评估",
+                           "fault": "故障 / 建议检修", "warning": "预警 / 建议复测",
+                           "deviation": "偏离参考 · 未达报警阈值"}.get(
+                assessment["status"], assessment["message"])
+            self.source_badge.setText(f"{source} · {status_text}")
+            if any(item.get("calibration_level") == "preliminary" for item in result.get("compatibility", {}).values()):
+                self.source_badge.setText(self.source_badge.text() + " · 初步校准")
             if assessment["status"] in ("warning", "fault"):
                 self.source_badge.setStyleSheet(f"color:{DISPLAY['colors']['error']};")
-                for key in ("analysis", "network"):
-                    self.result_values[key].setStyleSheet(f"color:{DISPLAY['colors']['error']};")
+            elif assessment["status"] == "deviation" or (
+                    assessment["status"] == "unconfigured" and any(
+                        value is not None and value < 1 for value in (result.get("score"), result.get("analysis_score")))):
+                self.source_badge.setStyleSheet(f"color:{DISPLAY['colors']['warning']};")
+            if (assessment["status"] not in ("review_required", "legacy")
+                    and not result.get("thresholds_review_required")):
+                for key, score_key, feature in (("analysis", "analysis_score", "vibration"), ("network", "score", "network")):
+                    if assess_score(result.get(score_key), metrics[feature])["status"] in ("warning", "fault"):
+                        self.result_values[key].setStyleSheet(f"color:{DISPLAY['colors']['error']};")
+                    elif result.get(score_key) is not None and result[score_key] < 1:
+                        self.result_values[key].setStyleSheet(f"color:{DISPLAY['colors']['warning']};")
             role = {"training": "训练样本回评", "calibration": "校准样本回评", "independent": "未参与此模型建模"}[result["role"]]
             run = self.service.runs[result["run_id"]]
             condition = run.get("condition", {})
@@ -695,22 +797,32 @@ class SpindleRotationPage(QScrollArea):
             pressure = condition.get("seal_pressure_mpa")
             pressure_text = "密封气压未记录" if pressure is None else f"密封气压 {pressure:g} MPa"
             operation = "空转" if run["operation"] == "idle" else run["operation"]
-            warning = "未设置" if thresholds["warning"] is None else f"{thresholds['warning']:g} 倍"
-            fault = "未设置" if thresholds["fault"] is None else f"{thresholds['fault']:g} 倍"
-            threshold_title = "当前阈值" if current_thresholds else "当时阈值"
+            legacy = result.get("score_kind") != "normal_compatibility_v1" and result.get("model_version")
+            unit = " 倍（旧）" if legacy else ""
+            threshold_title = "当前阈值" if current_thresholds and not legacy else "当时阈值"
             result_detail = (
                 f"{run['speed_rpm']:g} rpm · {operation} · {remounted} · {pressure_text}\n"
                 f"采集：{_local_time(result['captured_at'])} · {role}\n"
                 f"评估：{_local_time(result['evaluated_at'])} · 模型：{self._model_name(result['model_version'])}\n"
-                f"{result['window_count']} 个 1 秒窗口 · {threshold_title}：预警 {warning} / 故障 {fault}"
+                f"{result['window_count']} 个 1 秒窗口"
             )
+            for feature, name in (("vibration", "振动"), ("network", "网络")):
+                metric = metrics[feature]
+                warning = "未设置" if metric["warning"] is None else f"{metric['warning']:g}{unit}"
+                fault = "未设置" if metric["fault"] is None else f"{metric['fault']:g}{unit}"
+                result_detail += f"\n{threshold_title}（{name}）：预警 {warning} / 故障 {fault}；α = {metric['alpha']:g}"
+            if not legacy:
+                result_detail += "\n两项相容度任一 ≤ 阈值即触发；故障优先。"
+            elif result.get("legacy_assessment"):
+                result_detail += f"\n旧倍率当时判定：{result['legacy_assessment']['message']}"
             self.source_badge.setToolTip(f"{assessment['message']}\n{result_detail}")
         else:
             self.source_badge.setText("暂无数据" if not self.service.runs else "暂无评价")
         run = self.service.runs.get(self.run_select.currentData())
         if run:
             short_name = run["run_name"].split("rpm_", 1)[-1]
-            self.current_run_button.setText(f"{_local_time(run['captured_at'])} · {short_name}")
+            mode = "当前设置" if current_thresholds else "历史设置"
+            self.current_run_button.setText(f"{_local_time(run['captured_at'])} · {short_name} · {mode}")
             self.current_run_button.setToolTip(result_detail or self.run_select.currentText())
         else:
             self.current_run_button.setText("选择采集记录")
@@ -768,15 +880,19 @@ class SpindleRotationPage(QScrollArea):
         else:
             self.plots["energy"].set_data([], "", "正在分析倍频能量" if self.energy_task else "倍频能量不可用")
             self.plots["energy"].setToolTip("")
-        distributions = [r["window_scores"], r["reference_scores"]]
-        if distributions[0] and distributions[1]:
-            edges = np.histogram_bin_edges(distributions[0] + distributions[1], bins=35)
+        reference = r.get("reference_features", {}).get("network", [])
+        current = r.get("reconstruction_error_p95")
+        if (reference and current is not None and isfinite(current)
+                and r.get("compatibility", {}).get("network", {}).get("status") == "valid"):
+            edges = np.histogram_bin_edges(reference + [current], bins=20)
             centers = ((edges[:-1] + edges[1:]) / 2).tolist()
-            series = [(centers, (np.histogram(values, edges)[0] / len(values)).tolist(), name)
-                      for values, name in zip(distributions, ("本次", "健康参考"))]
-            self.plots["distribution"].set_data(series, "重建误差倍率", "窗口比例")
+            series = [(centers, (np.histogram(reference, edges)[0] / len(reference)).tolist(), "正常采集"),
+                      ([current, current], [0, 1], "本次 P95")]
+            self.plots["distribution"].set_data(series, "采集级重建误差 P95", "采集比例")
+            self.plots["distribution"].setToolTip("每次独立校准采集仅贡献一个 P95；竖线为本次采集 P95。未将窗口误差混入正常参考。")
         else:
-            self.plots["distribution"].set_data([], "", "尚未建立模型")
+            self.plots["distribution"].set_data([], "", "正常参考不可用")
+            self.plots["distribution"].setToolTip("请建立与当前工况、采集长度和预处理匹配的独立正常参考。")
 
     def _load_order_energy(self, run_id):
         task = ServiceTask(lambda progress: (run_id, self.service.order_band_energy(run_id)))
@@ -803,7 +919,7 @@ class SpindleRotationPage(QScrollArea):
             button.setEnabled(not busy)
         has_run = self.run_select.currentData() is not None
         self.initial_button.setEnabled(not busy and self.service.current_model is None)
-        self.train_button.setEnabled(not busy and len(self.service.training_candidates()) >= 3)
+        self.train_button.setEnabled(not busy and len(self.service.training_candidates()) >= 5)
         self.evaluate_button.setEnabled(not busy and has_run)
         self.label_button.setEnabled(not busy and has_run)
         self.review_button.setEnabled(not busy and has_run)
@@ -815,6 +931,7 @@ class SpindleRotationPage(QScrollArea):
         self._refresh_status_lights()
         if busy:
             self._set_status_light(self.task_status_key, "partial", self.task_progress_note.text())
+        self.busy_changed.emit(busy)
 
     def _run_task(self, title, operation, completed=None, *, status_key="acquisition"):
         if self.task is not None:
@@ -840,10 +957,13 @@ class SpindleRotationPage(QScrollArea):
         self._set_status_light(self.task_status_key, "partial", message)
 
     def _task_done(self, value):
+        historical_result = self.result if not self.uses_current_thresholds else None
         completed = self.task_completed
         self.task_completed = None
         self.task = None
         self._refresh()
+        if historical_result is not None:
+            self._show_result(historical_result)
         if completed:
             completed(value)
         summary = value.get("summary", "处理完成") if isinstance(value, dict) else "处理完成"
@@ -950,41 +1070,84 @@ class SpindleRotationPage(QScrollArea):
         dialog.setWindowTitle("人工判定阈值")
         form = QFormLayout(dialog)
         fields = {}
-        for key, title in (("warning", "预警阈值 / 倍"), ("fault", "故障检修阈值 / 倍")):
-            value = self.service.settings["thresholds"][key]
-            field = QLineEdit("" if value is None else str(value))
-            field.setObjectName("spindle_" + key + "_threshold")
-            field.setProperty("robotInput", True)
-            field.setPlaceholderText("留空表示未设置")
-            form.addRow(title, field)
-            fields[key] = field
-        form.addRow(make_note("评分为各1秒窗口误差倍率的P95。倍率参照模型的健康校准数据；故障阈值须高于预警阈值。"))
+        for feature, name in (("vibration", "振动正常相容度"), ("network", "网络正常相容度")):
+            heading = QLabel(name)
+            heading.setProperty("robotSectionTitle", True)
+            form.addRow(heading)
+            fields[feature] = {}
+            for key, title in (("alpha", "评分灵敏度 α"), ("warning", "预警相容度 ≤"), ("fault", "故障相容度 ≤")):
+                value = self.service.metric_settings[feature][key]
+                field = QLineEdit("" if value is None else str(value))
+                field.setObjectName(f"spindle_{feature}_{key}" + ("" if key == "alpha" else "_threshold"))
+                field.setProperty("robotInput", True)
+                if key != "alpha":
+                    field.setPlaceholderText("留空表示未设置")
+                form.addRow(title, field)
+                fields[feature][key] = field
+        form.addRow(make_note("两项各用各自设置，任一相容度 ≤ 对应阈值即触发，故障优先。每项 0 ≤ 故障 < 预警 < 1；阈值可留空。\n"
+                             "α 越大，越早降低评分；默认 0.05 对应模型成立时单项 95% 的正常接受范围。"
+                             "α 须在 0～1 之间。调报警阈值不改变评分；满分不保证设备正常。"))
+        preview = make_note("")
+        preview.setObjectName("spindle_threshold_preview")
+        form.addRow(preview)
+        current = self.service.latest_result(self.run_select.currentData())
+
+        def read_values():
+            return {feature: {key: float(field.text()) if field.text().strip() or key == "alpha" else None
+                              for key, field in entries.items()} for feature, entries in fields.items()}
+
+        def update_preview():
+            try:
+                values = read_values()
+                shown = self.service.display_result(current, metric_settings=values)
+            except ValueError:
+                preview.setText("当前采集预览：请填写有效的 α 和报警阈值。")
+                return
+            if not shown or shown.get("score_kind") != "normal_compatibility_v1":
+                preview.setText("当前采集尚无相容度评价；保存后自动补算。")
+                return
+            scores = ["—" if shown[key] is None else f"{shown[key]:.4g}" for key in ("analysis_score", "score")]
+            coverage = "；".join(f"{name} {(1 - values[feature]['alpha']) * 100:g}%"
+                                 for feature, name in (("vibration", "振动"), ("network", "网络")))
+            preview.setText(f"当前模型最新评价（保存后）：振动 {scores[0]}，网络 {scores[1]}\n"
+                            f"{shown['assessment']['message']}\n模型成立时单项正常接受覆盖：{coverage}")
+
+        for entries in fields.values():
+            for field in entries.values():
+                field.textChanged.connect(update_preview)
+        update_preview()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存阈值")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         def save():
-            values = {}
-            for key, field in fields.items():
-                try:
-                    values[key] = float(field.text()) if field.text().strip() else None
-                except ValueError:
-                    QMessageBox.warning(dialog, "阈值未保存", "请输入有效数字；留空表示不设置该阈值。")
-                    field.setFocus()
-                    field.selectAll()
-                    return
             try:
-                self.service.set_thresholds(**values)
+                values = read_values()
+            except ValueError:
+                QMessageBox.warning(dialog, "阈值未保存", "请输入有效数字；报警阈值可留空，两项 α 必须填写。")
+                return
+            try:
+                self.service.set_metric_settings(values)
             except (ValueError, OSError) as error:
                 QMessageBox.warning(dialog, "阈值未保存", str(error))
                 return
             dialog.accept()
         buttons.accepted.connect(save)
         buttons.rejected.connect(dialog.reject)
+        if not self.uses_current_thresholds and self.result:
+            form.addRow(make_note("正在查看历史快照。保存后返回当前模型的最新评价；历史分数及当时设置保留。"))
         form.addRow(buttons)
         fit_dialog(dialog, 520)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.model_select.blockSignals(True)
+            self.model_select.setCurrentIndex(0)
+            self.model_select.blockSignals(False)
             self._refresh()
-            self._evaluate()
+
+    def _show_latest(self):
+        self.model_select.blockSignals(True)
+        self.model_select.setCurrentIndex(0)
+        self.model_select.blockSignals(False)
+        self._selection_changed()
 
     def _show_alerts(self):
         self._show_history(alerts_only=True)
@@ -995,7 +1158,7 @@ class SpindleRotationPage(QScrollArea):
         layout = QVBoxLayout(dialog)
         table = QTableWidget()
         table.setProperty("robotTable", True)
-        columns = ["采集时间", "采集名称", "模型", "评分 / 倍", "判定", "数据用途"]
+        columns = ["采集时间", "采集名称", "模型", "振动相容度", "网络相容度", "判定", "数据用途"]
         table.setColumnCount(len(columns))
         table.setHorizontalHeaderLabels(columns)
         entries = [entry for entry in reversed(self.service.state["results"])
@@ -1003,8 +1166,13 @@ class SpindleRotationPage(QScrollArea):
         table.setRowCount(len(entries))
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         for row, result in enumerate(entries):
+            legacy = result.get("score_kind") != "normal_compatibility_v1" and result.get("model_version")
+            scores = ["—" if result.get(key) is None else f"{result[key]:.4g}"
+                      for key in ("analysis_score", "score")]
+            if legacy:
+                scores = ["旧倍率记录", "—" if result.get("score") is None else f"旧：{result['score']:.4g} 倍"]
             values = [_local_time(result["captured_at"]), result["run_name"], self._model_name(result["model_version"]),
-                      "—" if result["score"] is None else f"{result['score']:.4g}", result["assessment"]["message"],
+                      *scores, result["assessment"]["message"],
                       {"training": "训练回评", "calibration": "校准回评", "independent": "独立于此模型"}[result["role"]]]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -1028,7 +1196,13 @@ class SpindleRotationPage(QScrollArea):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.columns.setDirection(QHBoxLayout.Direction.TopToBottom if self.width() < 1000 else QHBoxLayout.Direction.LeftToRight)
+        self._update_layout_direction()
+
+    def _update_layout_direction(self):
+        stacked = self.width() < 1000 * getattr(self.window(), "ui_scale", 1.0)
+        self.columns.setDirection(QHBoxLayout.Direction.TopToBottom if stacked else QHBoxLayout.Direction.LeftToRight)
+        self.columns.setStretch(0, 0 if stacked else 13)
+        self.columns.setStretch(1, 0 if stacked else 7)
 
 
 class SpindlePlot(QWidget):
@@ -1052,7 +1226,7 @@ class SpindlePlot(QWidget):
             span = max(5, (ymax - ymin) * 1.16)
             center = (ymin + ymax) / 2
             return floor(center - span / 2), ceil(center + span / 2)
-        if self.ylabel == "窗口比例":
+        if self.ylabel == "采集比例":
             return 0, 1
         if self.ylabel == "能量占比 / %":
             return 0, 100
