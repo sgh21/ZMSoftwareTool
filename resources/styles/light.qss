@@ -5,6 +5,13 @@ QWidget {
     font-weight: 400;
 }
 
+QProgressBar {
+    min-height: 22px;
+    color: @text@;
+    selection-background-color: @action@;
+    selection-color: #ffffff;
+}
+
 QWidget#ApplicationRoot, QWidget#PrecisionMonitorPage {
     background: @background@;
 }
@@ -137,13 +144,6 @@ QWidget#RobotPositionPage, QScrollArea#RobotPageScroll, QWidget#RobotPageCanvas 
 QLabel#RobotPageTitle, QLabel[monitorTitle="true"] {
     font-size: 22px;
     font-weight: 700;
-}
-
-QLabel#SpindleConclusion {
-    background: #e8edf2;
-    color: @inactive@;
-    border-radius: 4px;
-    padding: 9px 12px;
 }
 
 QFrame#RobotResults, QFrame#RobotSettings, QFrame#SpindleResults, QFrame#SpindleSettings {
@@ -341,9 +341,6 @@ QLabel[spindleValue="true"] {
     font-weight: 700;
 }
 
-QLabel[spindleSeries="normal"] { color: @axis_y@; font-size: 14px; }
-QLabel[spindleSeries="current"] { color: @action@; font-size: 14px; }
-
 QToolButton#SpindleSignalSelect {
     background: #ffffff;
     border: 1px solid #b9c9d8;
@@ -380,8 +377,6 @@ QMenu[spindleMenu="true"]::item {
 QMenu[spindleMenu="true"]::item:selected {
     background: #edf3f8;
 }
-
-QCheckBox#SpindleNormalReview { font-size: 15px; }
 
 QPushButton[robotAction="true"][primary="true"]:disabled {
     background: #edf2f7;

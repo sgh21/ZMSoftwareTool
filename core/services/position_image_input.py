@@ -1,9 +1,10 @@
 """图片批次与仿真交付格式的读取边界；原始文件只读。"""
 
 from copy import deepcopy
-import json
 from pathlib import Path
 import re
+
+from core.services.position_persistence import read_json
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
@@ -35,10 +36,6 @@ def image_identity(path):
     return tuple(value.upper() for value in match.groups())
 
 
-def _json(path):
-    return json.loads(path.read_text(encoding="utf-8-sig"))
-
-
 def image_batch(source, parameters):
     """读取单批次图片、目录或精简 record.json；测量始终从图片解算。"""
     record = None
@@ -56,13 +53,13 @@ def image_batch(source, parameters):
         if folder.name == "calibration_images":
             folder = folder.parent
         if path.is_file():
-            record = _json(path)
+            record = read_json(path)
         image_folder = folder / "calibration_images"
         if not image_folder.is_dir():
             image_folder = folder
         images = sorted(path for path in image_folder.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
     if record is None and (folder / "record.json").is_file():
-        record = _json(folder / "record.json")
+        record = read_json(folder / "record.json")
     frames = {}
     if record is not None:
         for frame in record["frames"]:

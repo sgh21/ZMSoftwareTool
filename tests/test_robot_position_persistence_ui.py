@@ -104,7 +104,7 @@ def test_restart_keeps_unevaluated_import_but_cards_show_latest_evaluated_batch(
         reopened.close()
 
 
-def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_cards(application, tmp_path, monkeypatch):
+def test_baseline_selection_moves_zero_day_but_never_changes_latest_cards(application, tmp_path, monkeypatch):
     service = PositionMonitoringService(tmp_path / "application")
     service.save_parameters({"hand_eye": np.eye(4).tolist(), "target_pose_base": np.eye(4).tolist()})
     import_batch(service, tmp_path, "B001", 0.2)
@@ -123,12 +123,12 @@ def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_card
         page.result_metric.setCurrentIndex(1)
         assert page.result["batch_id"] == "B003"
         assert page.axis_values["distance"].text() == "0.0000"
-        assert [row["days"] for row in page.trend_chart.history] == [2]
-        assert page.trend_chart.baseline_day == 2
+        assert [row["days"] for row in page.trend_chart.history] == [0]
+        assert page.trend_chart.baseline_day == 0
         saved = deepcopy(service.list_history())
         page.show_before_baseline.setChecked(True)
         wait_for_page(page)
-        assert [row["days"] for row in page.trend_chart.history] == [0, 1, 2]
+        assert [row["days"] for row in page.trend_chart.history] == [-2, -1, 0]
         assert [row["distance"] for row in page.trend_chart.history] == pytest.approx([-0.4, -0.2, 0])
         assert not page.axis_cards["distance"].property("overLimit")
 
@@ -161,6 +161,63 @@ def test_baseline_selection_rebases_fixed_timeline_but_never_changes_latest_card
             assert reopened.result["baseline_id"] == first["id"]
             assert reopened.show_before_baseline.isChecked()
             assert [row["days"] for row in reopened.trend_chart.history] == [0, 1, 2]
+        finally:
+            reopened.close()
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("simulation", [True, False])
+def test_middle_baseline_starts_at_zero_and_earlier_reevaluation_keeps_latest_batch(application, tmp_path, simulation):
+    service = PositionMonitoringService(tmp_path / "application")
+    service.save_parameters({"hand_eye": np.eye(4).tolist(), "target_pose_base": np.eye(4).tolist()})
+    service.save_settings({"multidirectional_thresholds": {"repeatability": {"distance": 0.1}}})
+    capture_times = [
+        "2026-09-20T00:00:00+00:00", "2026-09-20T12:00:00+00:00",
+        "2026-09-21T18:00:00+00:00", "2026-09-23T00:00:00+00:00",
+        "2026-09-25T06:00:00+00:00", "2026-09-28T00:00:00+00:00",
+    ]
+    baselines = []
+    for index, captured_at in enumerate(capture_times, 3):
+        import_batch(service, tmp_path, f"B{index:03d}", 0.2 * (index - 2),
+                     simulation=simulation, captured_at=captured_at)
+        if index in (3, 4):
+            baselines.append(service.create_baseline())
+        else:
+            service.evaluate()
+    page = ready_position_page(service)
+    expected_days = [0, 1, 2, 3, 4] if simulation else [0, 1.25, 2.5, 4.75, 7.5]
+    try:
+        assert page.result["batch_id"] == "B008"
+        assert page.result["baseline_id"] == baselines[1]["id"]
+        assert page.trend_chart.baseline_day == 0
+        assert [row["days"] for row in page.trend_chart.history] == pytest.approx(expected_days)
+        saved = deepcopy(service.list_history())
+        page.show_before_baseline.setChecked(True)
+        wait_for_page(page)
+        assert [row["days"] for row in page.trend_chart.history] == pytest.approx(
+            [-1 if simulation else -0.5, *expected_days]
+        )
+        assert service.list_history() == saved
+
+        service.current_batch = deepcopy(baselines[0]["batch"])
+        earlier = service.current_batch
+        page._observations_loaded(earlier)
+        page._evaluation_completed(service.evaluate())
+        assert page.result["batch_id"] == "B008"
+        assert page.axis_values["distance"].text() == "1.2000"
+        messages = service.list_logs()
+        assert any("批次 B003 已评估并保存；综合阈值判定：超限。"
+                   "主卡仍显示最新已评估观测 B008。" in entry["message"] for entry in messages)
+        assert not any(entry["level"] == "WARN" for entry in messages)
+        reopened = ready_position_page(PositionMonitoringService(service.root))
+        try:
+            assert reopened.result["batch_id"] == "B008"
+            assert reopened.trend_chart.baseline_day == 0
+            assert reopened.show_before_baseline.isChecked()
+            assert [row["days"] for row in reopened.trend_chart.history] == pytest.approx(
+                [-1 if simulation else -0.5, *expected_days]
+            )
         finally:
             reopened.close()
     finally:
@@ -232,7 +289,7 @@ def test_parameter_change_keeps_latest_view_and_incompatible_baseline_has_visibl
         assert page.axis_values["distance"].text() == "0.6000"
         assert page.result["comparison_error"] in page.result_hint.text()
         assert selected["id"] in page.baseline_time_label.toolTip()
-        assert page.trend_chart.baseline_day == 1
+        assert page.trend_chart.baseline_day == 0
         page.result_metric.setCurrentIndex(0)
         assert page.axis_values["distance"].text() == "—"
         assert page.result["comparison_error"] in page.alarm_message.text()

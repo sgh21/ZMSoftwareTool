@@ -1,0 +1,15 @@
+{
+  "dataset": "output/approved_30poses_three_inertias",
+  "bias_source": "_work/B003/target_bias.json",
+  "fixed_plan": "fixed_observation_plan.json",
+  "scene_source": "_work/scene_snapshot.blend",
+  "samples": 32,
+  "poll_minutes": 30,
+  "batches": [
+    {"batch": "B004", "inertia": 0.03, "target_bias": 0.01},
+    {"batch": "B005", "inertia": 0.05, "target_bias": 0.02},
+    {"batch": "B006", "inertia": 0.1, "target_bias": 0.03},
+    {"batch": "B007", "inertia": 0.13, "target_bias": 0.05},
+    {"batch": "B008", "inertia": 0.17, "target_bias": 0.07}
+  ]
+}

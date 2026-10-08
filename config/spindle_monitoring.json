@@ -1,0 +1,25 @@
+{
+  "storage_root": "storage/spindle_monitoring",
+  "target_speed_rpm": 7000,
+  "preprocessing": {
+    "id": "velocity_2048_10_900_v1",
+    "sample_rate_hz": 2048,
+    "frequency_band_hz": [10, 900],
+    "unit": "mm/s",
+    "channels": ["ACC1", "ACC2", "ACC3"]
+  },
+  "thresholds": {"warning": null, "fault": null},
+  "training": {
+    "epochs": 150,
+    "batch_size": 128,
+    "learning_rate": 0.003,
+    "seed": 20260929,
+    "device": "auto",
+    "validation_fraction": 0.2
+  },
+  "score": {
+    "metric": "normalized_mse_acc1_acc2",
+    "aggregation": "p95",
+    "reference": "validation_median"
+  }
+}

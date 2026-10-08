@@ -128,6 +128,52 @@ def test_evaluation_saves_history_and_actual_observation_snapshot(service, tmp_p
     assert read_document(result["current_batch_path"]) == snapshot
 
 
+def test_patent_rms_centroid_metrics_survive_restore_and_use_point_alarms(service, tmp_path):
+    positions = [("P1", f"D{i}", (100 + x, 200, 300))
+                 for i, x in enumerate((-0.1, 0, 0.1))]
+    establish_baseline(service, tmp_path / "initial.json", positions,
+                       sampling_protocol="multidirectional")
+    current = [("P1", f"D{i}", (100 + x, 200, 300))
+               for i, x in enumerate((-0.2, 0, 0.2))]
+    source = batch_file(tmp_path / "current.json", current, sampling_protocol="multidirectional")
+    service.load_observations(source)
+    service.save_settings({"multidirectional_thresholds": {
+        "absolute_change": {"distance": 0.01},
+        "repeatability": {"X": 0.17, "distance": 0.17},
+    }})
+    result = service.evaluate()
+    rms = 0.2 * np.sqrt(2 / 3)
+    assert result["metric_definition"] == "patent_v6_rms"
+    assert metric_values(result, "repeatability") == pytest.approx([rms, 0, 0, rms], abs=1e-10)
+    assert metric_values(result, "repeatability_change") == pytest.approx(
+        [rms / 2, 0, 0, rms / 2], abs=1e-10)
+    # 两侧方向各自移动，但中心未动；不能把逐方向位移模长均值当中心漂移。
+    assert metric_values(result, "absolute_change") == pytest.approx([0] * 4, abs=1e-10)
+    assert assess_metric(result, "absolute_change")["alarms"] == []
+    assert assess_metric(result, "repeatability")["alarms"] == []
+    service.save_settings({"multidirectional_thresholds": {"repeatability": {"distance": 0.15}}})
+    alarms = assess_metric(service.latest_result, "repeatability")["alarms"]
+    assert len(alarms) == 1 and alarms[0]["direction_id"] == "多方向"
+    archived = service.list_history()
+    reopened = PositionMonitoringService(root=service.root)
+    assert metric_values(reopened.latest_result, "repeatability") == pytest.approx(
+        [rms, 0, 0, rms], abs=1e-10)
+    assert reopened.list_history() == archived
+    assert len(reopened.history_comparisons()) == 1
+    assert metric_values(reopened.history_comparisons()[0], "repeatability") == pytest.approx(
+        [rms, 0, 0, rms], abs=1e-10)
+
+
+def test_old_multidirectional_snapshot_retains_original_metric_definition():
+    result = {
+        "sampling_protocol": "multidirectional",
+        "summary": {"axis_3sigma_base": [3, 0, 0], "rp_current": 2.4,
+                    "absolute_axis_change": [-0.2, 0, 0], "absolute_ap_change": -0.2},
+    }
+    assert metric_values(result, "repeatability") == [3, 0, 0, 2.4]
+    assert metric_values(result, "absolute_change") == [-0.2, 0, 0, -0.2]
+
+
 def test_alarm_checks_each_group_even_when_overall_average_is_below_limit(service, tmp_path):
     positions = sum((repeated(point=point) for point in ("P1", "P2", "P3")), [])
     establish_baseline(service, tmp_path / "initial.json", positions, initial_errors={

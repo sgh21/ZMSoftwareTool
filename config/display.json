@@ -9,11 +9,6 @@
   },
   "sidebar_width": 168,
   "font_family": "Microsoft YaHei",
-  "spindle_preview_channels": {
-    "vibration": ["X", "Y", "Z"],
-    "temperature": ["T1", "T2", "T3"],
-    "current": ["I1"]
-  },
   "branding": {
     "image": "icons/branding/reference-interface.png",
     "source_rect": [108, 3, 270, 54],

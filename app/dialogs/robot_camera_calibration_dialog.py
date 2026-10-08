@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 
 from app.pages.robot_position_page import ServiceTask
 from core.services.position_monitoring_service import read_document
-from diagnostics.camera_calibration import calibrate_dataset
+from debug.diagnostics.camera_calibration import calibrate_dataset
 
 
 class RobotCameraCalibrationDialog(QDialog):

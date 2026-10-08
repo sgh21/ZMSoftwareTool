@@ -102,12 +102,19 @@ class UiScale:
             layout.invalidate()
 
 
-def fit_dialog(dialog: QWidget, width: int, height: int) -> None:
-    """弹窗沿用主窗口比例；字体由已缩放的应用样式提供。"""
+def fit_dialog(dialog: QWidget, width: int, height: int | None = None) -> None:
+    """沿用主窗口比例；未指定高度的表单按内容收紧。"""
     scale = dialog.parentWidget().window().ui_scale
     UiScale(dialog, include_widget_sizes=False).apply(scale)
-    size = QSize(round(width * scale), round(height * scale))
-    dialog.resize(size.boundedTo(dialog.screen().availableGeometry().size()))
+    available = dialog.screen().availableGeometry().size()
+    width = min(round(width * scale), available.width())
+    layout = dialog.layout()
+    layout.activate()
+    if height is None:
+        height = layout.totalHeightForWidth(width) if layout.hasHeightForWidth() else dialog.sizeHint().height()
+    else:
+        height = round(height * scale)
+    dialog.resize(QSize(width, height).boundedTo(available))
 
 
 def load_icon(name: str, color: str, size: int = 24) -> QIcon:

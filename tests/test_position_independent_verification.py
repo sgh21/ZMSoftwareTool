@@ -25,6 +25,11 @@ def test_symmetric_directions_have_expected_scatter_and_degradation():
     np.testing.assert_allclose(report["summary"]["repeatability"], [*[3 * 0.4 * np.sqrt(2 / 5)] * 3, 0.4])
     np.testing.assert_allclose(report["summary"]["absolute_change"], [0.2 / 3] * 3 + [0.2])
     np.testing.assert_allclose(report["summary"]["repeatability_change"], report["summary"]["baseline_scatter"])
+    patent = report["patent_v6"]["summary"]
+    np.testing.assert_allclose(patent["baseline_scatter"], [*[0.2 / np.sqrt(3)] * 3, 0.2])
+    np.testing.assert_allclose(patent["repeatability"], [*[0.4 / np.sqrt(3)] * 3, 0.4])
+    np.testing.assert_allclose(patent["absolute_change"], 0, atol=1e-13)
+    np.testing.assert_allclose(patent["repeatability_change"], patent["baseline_scatter"])
 
 
 def test_spatial_scatter_is_translation_and_rotation_invariant():
@@ -34,6 +39,10 @@ def test_spatial_scatter_is_translation_and_rotation_invariant():
     after = verification.scatter(points @ rotation.T + [100, 200, -500])
     np.testing.assert_allclose(before[3], after[3])
     np.testing.assert_allclose(after[:3], before[[1, 2, 0]])
+    before_rms = verification.rms_scatter(points)
+    after_rms = verification.rms_scatter(points @ rotation.T + [100, 200, -500])
+    np.testing.assert_allclose(before_rms[3], after_rms[3])
+    np.testing.assert_allclose(after_rms[:3], before_rms[[1, 2, 0]])
 
 
 def test_fixed_point_bias_changes_absolute_error_but_not_repeatability():
@@ -51,3 +60,30 @@ def test_fixed_point_bias_changes_absolute_error_but_not_repeatability():
     assert report["summary"]["absolute_change"][3] > 0
     for point, bias in biases.items():
         np.testing.assert_allclose(report["groups"][point]["centroid_change_xyz_mm"], bias, atol=1e-13)
+        patent = report["patent_v6"]["groups"][point]
+        np.testing.assert_allclose(patent["repeatability_change"], 0, atol=1e-13)
+        np.testing.assert_allclose(patent["absolute_change"], [*np.abs(bias), np.linalg.norm(bias)])
+
+
+def test_unbalanced_directions_follow_centroid_rms_identity():
+    directions = np.eye(3)
+    radius = 0.2
+    measured = verification.rms_scatter(radius * directions + [10, 20, 30])
+    # 三个非对称方向的质心不在生成球心；中心化 RMS = r sqrt(1 - |mean(d)|²)。
+    expected = radius * np.sqrt(1 - np.dot(directions.mean(axis=0), directions.mean(axis=0)))
+    np.testing.assert_allclose(measured[3], expected)
+    assert measured[3] < radius
+    np.testing.assert_allclose(measured[:3], radius * np.sqrt(2) / 3)
+
+
+def test_point_centroid_shift_magnitudes_do_not_cancel_across_points():
+    initial, current, targets = {}, {}, {}
+    for point, bias in (("P001", np.array([0.3, 0, 0])), ("P002", np.array([-0.3, 0, 0]))):
+        for index, direction in enumerate(np.vstack([np.eye(3), -np.eye(3)]), 1):
+            key = (point, f"D{index:03d}")
+            targets[key] = np.zeros(3)
+            initial[key] = 0.2 * direction
+            current[key] = initial[key] + bias
+    summary = verification.metrics(initial, current, targets)["patent_v6"]["summary"]
+    np.testing.assert_allclose(summary["centroid_change_xyz_mm"], 0, atol=1e-13)
+    np.testing.assert_allclose(summary["absolute_change"], [0.3, 0, 0, 0.3], atol=1e-13)

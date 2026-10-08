@@ -106,8 +106,14 @@ def test_image_measurement_and_truth_report_are_isolated_and_source_files_unchan
     assert report["truth_result"]["summary"]["rp_current"] == pytest.approx(0.4)
     assert report["measured_result"]["summary"]["absolute_ap_change"] == pytest.approx(0.25)
     assert report["truth_result"]["summary"]["absolute_ap_change"] == pytest.approx(0.2)
+    assert report["measured_result"]["metric_definition"] == "patent_v6_rms"
+    assert report["measured_result"]["summary"]["scatter_rms_current"] == pytest.approx(0.5)
+    assert report["truth_result"]["summary"]["scatter_rms_current"] == pytest.approx(0.4)
     comparison = {row["metric"]: row for row in report["metric_comparison"]}
-    assert comparison["absolute_change"]["difference"] == pytest.approx([0.05, 0, 0, 0.05], abs=1e-10)
+    # 两组都只扩大半径，质心未动；旧逐方向绝对误差变化仍留作诊断。
+    assert comparison["absolute_change"]["measured"] == pytest.approx([0] * 4, abs=1e-10)
+    assert comparison["absolute_change"]["truth"] == pytest.approx([0] * 4, abs=1e-10)
+    assert comparison["absolute_change"]["difference"] == pytest.approx([0] * 4, abs=1e-10)
     assert comparison["repeatability"]["difference"][3] == pytest.approx(0.1)
     assert report["point_metric_comparison"][0]["point_id"] == "P001"
     summary = report["measurement_summary"]

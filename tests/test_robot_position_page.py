@@ -8,7 +8,7 @@ import pytest
 from PyQt6.QtCore import QEventLoop, QPoint, QRect, QThread, QTimer, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QApplication, QBoxLayout, QLabel, QLineEdit, QPushButton, QStyle, QStyleOptionComboBox,
+    QApplication, QBoxLayout, QDialog, QLabel, QLineEdit, QPushButton, QStyle, QStyleOptionComboBox,
     QTableWidget, QTabWidget,
 )
 
@@ -193,6 +193,8 @@ def test_threshold_dialog_saves_three_independent_sets_and_blank_fields(applicat
         fields = dialog.findChildren(QLineEdit)
         observed["field_count"] = len(fields)
         tabs = dialog.findChild(QTabWidget)
+        assert all(not tabs.widget(index).findChildren(QLabel)[-1].text().startswith("各轴 3σ")
+                   for index in range(tabs.count()))
         observed["tab_count"] = tabs.count()
         observed["selected"] = tabs.currentIndex()
         for mode, value in (("absolute_change", "1.2"), ("repeatability_change", "0.2"),
@@ -212,6 +214,41 @@ def test_threshold_dialog_saves_three_independent_sets_and_blank_fields(applicat
     assert "0.7000" in page.axis_cards["X"].toolTip()
     page.result_metric.setCurrentIndex(0)
     assert "1.2000" in page.axis_cards["X"].toolTip()
+    page.close()
+
+
+@pytest.mark.parametrize(("context", "expected"), [
+    (None, ["导入观测", "导入观测", "导入观测"]),
+    ({"metric_definition": "patent_v6_rms", "sampling_protocol": "multidirectional"},
+     ["质心", "RMS", "RMS"]),
+    ({"metric_definition": "patent_v6_rms"}, ["质心", "RMS", "RMS"]),
+    ({"sampling_protocol": "multidirectional"}, ["旧定义", "3σ", "3σ"]),
+    ({"sampling_protocol": "same_direction"}, ["空间 AP", "3σ", "空间指标为 RP"]),
+])
+def test_metric_explanations_follow_saved_definition_and_do_not_assume_legacy_on_empty_start(
+        application, context, expected):
+    page = ready_position_page(MemoryService())
+    page.result = context
+    for mode, text in zip(("absolute_change", "repeatability_change", "repeatability"), expected):
+        assert text in page._metric_hint(mode)
+    if context and context.get("metric_definition") == "patent_v6_rms":
+        assert "3σ" not in page._metric_hint("repeatability")
+    page.close()
+
+
+def test_threshold_dialog_has_no_metric_definition_text(application, monkeypatch):
+    page = ready_position_page(MemoryService())
+    page.ui_scale = 1.0
+
+    def inspect(dialog):
+        tabs = dialog.findChild(QTabWidget)
+        for index in range(tabs.count()):
+            labels = [label.text() for label in tabs.widget(index).findChildren(QLabel)]
+            assert labels == ["X 方向阈值 / mm", "Y 方向阈值 / mm", "Z 方向阈值 / mm", "空间指标阈值 / mm"]
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", inspect)
+    page._show_settings()
     page.close()
 
 

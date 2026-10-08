@@ -109,21 +109,41 @@ def test_time_labels_show_full_local_timestamps_and_current_selected_baseline(pa
     assert page.baseline_time_label.text() == f"基准建立时间：{local_time(BASELINE_TIME)}"
     page.service.baseline.update({"id": "other", "created_at": "2026-09-27T10:00:00+00:00"})
     page._evaluation_completed(evaluated)
+    assert page.service.logs[0]["level"] == "INFO"
+    assert page.service.logs[0]["message"] == "批次 current 已评估并保存；综合阈值判定：超限。"
+    assert evaluated["warnings"]
+    assert [entry["message"] for entry in page.service.logs if entry["level"] == "WARN"] == evaluated["warnings"]
     for index in range(page.result_metric.count()):
         page.result_metric.setCurrentIndex(index)
         assert page.evaluation_time_label.text() == f"评价更新时间：{local_time(evaluated['created_at'])}"
         assert page.baseline_time_label.text() == f"基准建立时间：{local_time(page.service.baseline['created_at'])}"
 
 
-def test_trend_uses_elapsed_days_and_sorts_irregular_intervals_across_timezones(page, evaluated):
+@pytest.mark.parametrize("has_baseline", [True, False])
+@pytest.mark.parametrize("observed_time", [True, False])
+def test_trend_uses_elapsed_days_and_sorts_irregular_intervals_across_timezones(page, evaluated, has_baseline, observed_time):
     page.service.history = [
-        {**evaluated, "id": "late", "created_at": "2026-09-25T00:00:00+00:00"},
-        {**evaluated, "id": "early", "created_at": "2026-09-20T12:00:00+00:00"},
+        {**evaluated, "id": "late", "batch_id": "late", "created_at": "2026-09-25T00:00:00+00:00"},
+        {**evaluated, "id": "early", "batch_id": "early", "created_at": "2026-09-20T12:00:00+00:00"},
         evaluated,
     ]
+    if observed_time:
+        page.service.baseline["batch"].update({"observed_at": BASELINE_TIME, "time_source": "captured_at"})
+        page.service.baseline["created_at"] = "2026-09-27T00:00:00+00:00"
+        for record in page.service.history:
+            record.update({"observed_at": record["created_at"], "time_source": "captured_at",
+                           "baseline_observed_at": BASELINE_TIME, "baseline_time_source": "captured_at"})
+            record["created_at"] = "2026-09-28T00:00:00+00:00"
+    if not has_baseline:
+        page.service.baseline = None
+        for record in page.service.history:
+            record.update({"baseline_id": None, "baseline_created_at": None,
+                           "baseline_observed_at": None, "baseline_time_source": None})
     refresh_page(page)
     page._evaluation_completed(evaluated)
-    assert [record["days"] for record in page.trend_chart.history] == pytest.approx([0.5, 2, 5])
+    expected_days = [0.5, 2, 5] if has_baseline else [0, 1.5, 4.5]
+    assert [record["days"] for record in page.trend_chart.history] == pytest.approx(expected_days)
+    assert page.trend_chart.baseline_day == (0 if has_baseline else None)
     assert all(record["X"] == pytest.approx(np.sqrt(2)) for record in page.trend_chart.history)
 
 
@@ -139,24 +159,31 @@ def test_standalone_result_keeps_values_without_inventing_a_baseline_time(page, 
     assert page.trend_chart.baseline_day is None
 
 
-def test_debug_trend_uses_batch_days_and_latest_evaluation_per_batch(page, evaluated):
-    page.service.baseline["batch"]["debug_day_index"] = 0
+@pytest.mark.parametrize("baseline_debug_day", [0, 3, None])
+def test_debug_trend_uses_batch_days_and_latest_evaluation_per_batch(page, evaluated, baseline_debug_day):
+    start_day = 0 if baseline_debug_day == 0 else 3
+    if baseline_debug_day is None:
+        page.service.baseline = None
+    else:
+        page.service.baseline["batch"]["debug_day_index"] = baseline_debug_day
     records = []
-    for day in range(3):
+    for day in range(start_day, start_day + 3):
         records.append({
             **deepcopy(evaluated), "id": f"r{day}", "batch_id": f"B{day + 1:03d}",
-            "debug_day_index": day, "baseline_debug_day_index": 0,
+            "debug_day_index": day, "baseline_debug_day_index": baseline_debug_day,
+            "baseline_id": "b1" if baseline_debug_day is not None else None,
             "created_at": f"2026-09-28T00:00:0{day}+00:00",
         })
-    repeated = {**deepcopy(records[1]), "id": "repeat-B002", "created_at": "2026-09-29T00:00:00+00:00"}
+    repeated = {**deepcopy(records[1]), "id": "repeat", "created_at": "2026-09-29T00:00:00+00:00"}
     repeated["summary"]["rp_current"] = 0.123
     page.service.history = [repeated, records[2], records[0], records[1]]
     refresh_page(page)
     page._evaluation_completed(records[2])
     assert [record["days"] for record in page.trend_chart.history] == [0, 1, 2]
+    assert page.trend_chart.baseline_day == (0 if baseline_debug_day is not None else None)
     assert page.trend_chart.history[1]["distance"] == pytest.approx(0.123)
     assert page.trend_time_caption.text() == "调试天数"
-    assert "B003" in page.evaluation_time_label.toolTip()
+    assert records[2]["batch_id"] in page.evaluation_time_label.toolTip()
 
 
 def test_observed_time_is_separate_from_evaluation_time_and_explains_fallback(page, evaluated):

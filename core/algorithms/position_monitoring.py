@@ -3,7 +3,8 @@
 vision_pose 为 ^C T_M，hand_eye 为 ^E T_C。每点初始数据的第一条
 观测固定为参考，base_rotations 中的 Q 为该参考末端到基座的旋转。
 mean_base 是沿基座轴表达的参考点位置差，不是基座中的绝对坐标。
-空间 RP 使用 GB/T 12642 的 l_mean + 3*s_l；轴向 3σ 为补充口径。
+同方向空间 RP 使用 GB/T 12642 的 l_mean + 3*s_l；轴向 3σ 为补充口径。
+多方向主指标按专利 V6 使用同期质心 RMS 散布和跨期质心位移。
 """
 
 from collections import defaultdict
@@ -47,7 +48,7 @@ def _group_samples(samples, period: str):
     return groups, references
 
 
-def _statistics(positions: np.ndarray, rotation: np.ndarray | None) -> dict:
+def _statistics(positions: np.ndarray, rotation: np.ndarray | None, *, include_rms=False) -> dict:
     mean = positions.mean(axis=0)
     count = len(positions)
     result = {
@@ -58,14 +59,22 @@ def _statistics(positions: np.ndarray, rotation: np.ndarray | None) -> dict:
         "axis_3sigma_local": None,
         "axis_3sigma_base": None,
     }
+    if include_rms:
+        result.update(scatter_rms=None, axis_rms_local=None, axis_rms_base=None)
     if count < 2:
         return result
-    radii = np.linalg.norm(positions - mean, axis=1)
+    centered = positions - mean
+    radii = np.linalg.norm(centered, axis=1)
     result["rp"] = float(radii.mean() + 3 * radii.std(ddof=1))
     result["axis_3sigma_local"] = (3 * positions.std(axis=0, ddof=1)).tolist()
+    if include_rms:
+        result["scatter_rms"] = float(np.sqrt(np.mean(radii ** 2)))
+        result["axis_rms_local"] = np.sqrt(np.mean(centered ** 2, axis=0)).tolist()
     if rotation is not None:
         base_positions = positions @ rotation.T
         result["axis_3sigma_base"] = (3 * base_positions.std(axis=0, ddof=1)).tolist()
+        if include_rms:
+            result["axis_rms_base"] = np.sqrt(np.mean((centered @ rotation.T) ** 2, axis=0)).tolist()
     return result
 
 
@@ -315,9 +324,11 @@ def evaluate_multidirectional(
     base_rotations=None,
     target_pose_base=None,
 ) -> dict:
-    """评价同点不同接近方向各一次的工程散布，不作为国标同方向 RP。
+    """按专利 V6 评价同点不同接近方向各一次的工程散布。
 
-    散布沿用 mean(radius) + 3*std(radius, ddof=1)，轴向为 3σ。
+    当前散布为相对同期落点均值的 RMS（分母为方向数），分轴补充量为轴向 RMS。
+    绝对定位退化的相对评价为两期落点均值之差的模，不等同于绝对误差增量。
+    旧 mean(radius)+3*std(radius, ddof=1)、3σ 及绝对误差字段仅保留作诊断。
     有基准时，两期必须包含相同的点位/方向，且使用同一个点位参考。
     Q 对应基准（单期时为当前）每点第一条观测的末端朝向。
     target_pose_base 是固定靶标的 ^B T_M；提供它时由视觉恢复末端位置，
@@ -350,9 +361,9 @@ def evaluate_multidirectional(
         str(point): _rotation(value, f"测点 {point} 的 Q")
         for point, value in (base_rotations or {}).items()
     }
-    warnings = ["多方向工程散布：每方向一次，不是国标同方向重复定位试验"]
+    warnings = []
     if target is None:
-        warnings.append("缺少靶标基座外参 A；绝对定位误差及其退化不可用")
+        warnings.append("缺少靶标基座外参 A；额外绝对误差诊断不可用，不影响质心位移的空间指标")
     groups, points = [], []
     for point in sorted(current):
         reference = next(iter(references[point].values()))["vision_pose"]
@@ -383,7 +394,9 @@ def evaluate_multidirectional(
                     "position": position,
                     "error": error,
                 }
-            stats = _statistics(np.asarray([item["local"] for item in measured.values()]), rotation)
+            stats = _statistics(
+                np.asarray([item["local"] for item in measured.values()]), rotation, include_rms=True
+            )
             stats["mean_position_base"] = (
                 np.mean([item["position"] for item in measured.values()], axis=0).tolist()
                 if target is not None else None
@@ -393,7 +406,7 @@ def evaluate_multidirectional(
                 label = "初始" if period == "baseline" else "当前"
                 warnings.append(f"{point} {label}少于 2 个接近方向，不能计算多方向散布")
             if target is not None and any(item["error"] is None for item in measured.values()):
-                warnings.append(f"{point}/{period} 缺少理想位姿；对应绝对定位误差不可用")
+                warnings.append(f"{point}/{period} 缺少理想位姿；对应额外绝对误差诊断不可用")
 
         details = []
         for direction in sorted(current[point]):
@@ -425,9 +438,26 @@ def evaluate_multidirectional(
                 "drift_distance": float(np.linalg.norm(drift_local)) if drift_local is not None else None,
             })
         initial, measured = statistics["baseline"], statistics["current"]
+        centroid_shift_local = _difference(measured["mean_local"], initial["mean_local"] if initial else None)
+        centroid_shift_base = _difference(measured["mean_base"], initial["mean_base"] if initial else None)
         group = {
             "point_id": point, "direction_id": "多方向", "directions": details,
             "baseline": initial, "current": measured,
+            "scatter_rms_current": measured["scatter_rms"],
+            "scatter_rms_baseline": initial["scatter_rms"] if initial else None,
+            "scatter_rms_change": _difference(measured["scatter_rms"], initial["scatter_rms"] if initial else None),
+            "axis_rms_change_local": _difference(
+                measured["axis_rms_local"], initial["axis_rms_local"] if initial else None
+            ),
+            "axis_rms_change_base": _difference(
+                measured["axis_rms_base"], initial["axis_rms_base"] if initial else None
+            ),
+            "centroid_shift_local": centroid_shift_local,
+            "centroid_shift_base": centroid_shift_base,
+            "centroid_shift_distance": float(np.linalg.norm(centroid_shift_local))
+            if centroid_shift_local is not None else None,
+            "centroid_shift_abs_base": np.abs(centroid_shift_base).tolist()
+            if centroid_shift_base is not None else None,
             "rp_current": measured["rp"],
             "rp_baseline": initial["rp"] if initial is not None else None,
             "rp_change": _difference(measured["rp"], initial["rp"] if initial else None),
@@ -458,12 +488,18 @@ def evaluate_multidirectional(
             "drift_base", "drift_distance", "mean_abs_drift_base", "rp_baseline", "rp_current",
             "rp_change", "axis_3sigma_change_base", "absolute_ap", "absolute_ap_change",
             "absolute_axis", "absolute_axis_change",
+            "scatter_rms_current", "scatter_rms_baseline", "scatter_rms_change", "axis_rms_change_base",
+            "centroid_shift_base", "centroid_shift_distance", "centroid_shift_abs_base",
         )
     }
+    summary["axis_rms_base"] = _mean_by_point(groups, [
+        group["current"]["axis_rms_base"] for group in groups
+    ])
     summary["axis_3sigma_base"] = _mean_by_point(groups, [
         group["current"]["axis_3sigma_base"] for group in groups
     ])
     return {
         "sampling_protocol": "multidirectional", "is_standard_repeatability": False,
+        "metric_definition": "patent_v6_rms",
         "groups": groups, "points": points, "summary": summary, "warnings": warnings,
     }

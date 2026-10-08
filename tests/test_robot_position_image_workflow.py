@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import numpy as np
 import pytest
-from PyQt6.QtWidgets import QApplication, QFileDialog
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QTableWidget
 
 from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog
 from ui_helpers import ready_position_page, wait_for_page
@@ -133,6 +133,8 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
         page._evaluation_completed(result)
         assert page.result_metric.currentText() == "当前重复定位精度"
         assert "非国标同方向RP" in page.result_hint.toolTip()
+        assert "专利V6" in page.result_hint.toolTip()
+        assert page.axis_values["X"].text() == "0.2000"
         assert page.measured_table.horizontalHeaderItem(5).text() == "接近方向数"
         assert page.measured_table.item(0, 0).text() == "P001 / 多方向"
         assert page.measured_table.item(0, 5).text() == "2"
@@ -143,6 +145,11 @@ def test_multidirectional_display_and_history_match_actual_point_direction_pairs
         assert page.measured_table.item(0, 5).text() == "2 → 2"
         assert [record["days"] for record in page.trend_chart.history] == [1, 2]
         assert page.trend_title.text() == "定位精度趋势"
+        page.result_metric.setCurrentIndex(0)
+        assert page.axis_values["distance"].text() == "0.0000"
+        assert "质心" in page.result_hint.toolTip()
+        assert "不等于真实绝对误差增量" in page.result_hint.toolTip()
+        assert [record["distance"] for record in page.trend_chart.history] == [0.0, 0.0]
     finally:
         page.close()
 
@@ -166,9 +173,13 @@ def test_multidirectional_thresholds_are_separate_and_history_keeps_saved_limits
 
         service.save_settings({"multidirectional_thresholds": {"repeatability": {"X": 0.3}}})
         page._render_result()
-        assert page.axis_cards["X"].property("overLimit") is True
+        assert page.axis_cards["X"].property("overLimit") is False
         assert "0.3000" in page.axis_cards["X"].toolTip()
         assert service.settings["metric_thresholds"]["repeatability"]["X"] == 0.1
+        service.save_settings({"multidirectional_thresholds": {"repeatability": {"X": 0.1}}})
+        page._render_result()
+        assert page.axis_cards["X"].property("overLimit") is True
+        assert multidirectional["metric_thresholds"]["repeatability"]["X"] == 2.0
 
         service.current_batch = batch(service, [-0.2, 0.2], multidirectional=False)
         repeated = service.evaluate_current()
@@ -183,19 +194,15 @@ def test_multidirectional_thresholds_are_separate_and_history_keeps_saved_limits
         page.close()
 
 
-def test_one_direction_absolute_degradation_alarm_survives_point_average(application, service):
+def test_patent_centroid_drift_alarms_follow_point_metric(application, service):
     service.save_settings({
         "multidirectional_thresholds": {"absolute_change": {"X": 1.5, "distance": 1.5}},
     })
     result = compare(service, positions=[2.0, 0.0])
     assessment = assess_metric(result, "absolute_change")
-    assert result["summary"]["absolute_ap_change"] == 1.0
-    assert result["groups"][0]["absolute_axis_change"][0] == 1.0
-    assert assessment["status"] == "超限"
-    assert [(alarm["point_id"], alarm["direction_id"], alarm["axis"], alarm["value"])
-            for alarm in assessment["alarms"]] == [
-        ("P001", "D001", "X", 2.0), ("P001", "D001", "distance", 2.0),
-    ]
+    assert result["summary"]["centroid_shift_distance"] == 1.0
+    assert result["groups"][0]["centroid_shift_abs_base"][0] == 1.0
+    assert assessment["alarms"] == []
     page = ready_position_page(service)
     try:
         page._evaluation_completed(result)
@@ -204,6 +211,53 @@ def test_one_direction_absolute_degradation_alarm_survives_point_average(applica
         assert page.axis_cards["X"].property("overLimit") is False
         assert page.axis_cards["distance"].property("overLimit") is False
         assert page.axis_cards["Y"].property("overLimit") is False
-        assert "P001/D001 X：2.0000 > 1.5000 mm" in page.alarm_message.text()
+        assert "超限" not in page.alarm_status.text()
+        service.save_settings({
+            "multidirectional_thresholds": {"absolute_change": {"X": 0.5, "distance": 0.5}},
+        })
+        page._render_result()
+        assert page.axis_cards["X"].property("overLimit") is True
+        assert page.axis_cards["distance"].property("overLimit") is True
+        assert "P001/多方向 X：1.0000 > 0.5000 mm" in page.alarm_message.text()
+        assert "2 项超限" in page.alarm_status.text()
+        assert "质心漂移 初始参考末端系 Δp (mm)：[1.0000, 0.0000, 0.0000]" in page._result_details_text()
+    finally:
+        page.close()
+
+
+def test_legacy_multidirectional_history_keeps_its_values_and_definition(application, service, monkeypatch):
+    current = compare(service)
+    legacy = deepcopy(current)
+    legacy.pop("metric_definition")
+    before = deepcopy(legacy)
+    page = ready_position_page(service)
+    page.ui_scale = 1.0
+    observed = {}
+
+    def inspect_history(dialog):
+        observed["notes"] = "\n".join(label.text() for label in dialog.findChildren(QLabel))
+        table = dialog.findChild(QTableWidget)
+        observed["x"] = table.item(0, 1).text()
+        observed["count_header"] = table.horizontalHeaderItem(5).text()
+        return 0
+
+    monkeypatch.setattr(QDialog, "exec", inspect_history)
+    try:
+        page._evaluation_completed(current)
+        shown_result = page.result
+        assert page.axis_values["X"].text() == "0.2000"
+        page._open_result_details(legacy, historical=True)
+        assert "旧定义" in observed["notes"]
+        assert "XYZ为3σ" in observed["notes"]
+        assert observed["x"] == "0.8485"
+        assert observed["count_header"] == "接近方向数"
+        assert "旧定义" in page._result_details_text(legacy)
+        assert legacy == before
+        assert page.result is shown_result
+        assert page.axis_values["X"].text() == "0.2000"
+        assert "专利V6" in page.result_hint.toolTip()
+        page.result_metric.setCurrentIndex(0)
+        assert "绝对误差模长差" in page._metric_hint(result=legacy)
+        assert "质心" in page._metric_hint(result=current)
     finally:
         page.close()

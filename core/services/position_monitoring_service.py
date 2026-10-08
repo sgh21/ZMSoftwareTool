@@ -33,7 +33,18 @@ PARAMETER_METADATA = {"version", "source_path", "source_note", "created_at", "up
 def metric_values(result, mode, group=None):
     """统一卡片、逐点结果、历史曲线和阈值判定的四列取值。"""
     source = result["summary"] if group is None else group
-    if mode == "repeatability":
+    if result.get("metric_definition") == "patent_v6_rms":
+        if mode == "repeatability":
+            source = source if group is None else group["current"]
+            axes = source.get("axis_rms_base")
+            scalar = source.get("scatter_rms_current" if group is None else "scatter_rms")
+        elif mode == "repeatability_change":
+            axes, scalar = source.get("axis_rms_change_base"), source.get("scatter_rms_change")
+        elif mode == "absolute_change":
+            axes, scalar = source.get("centroid_shift_abs_base"), source.get("centroid_shift_distance")
+        else:
+            raise ValueError(f"未知评价指标：{mode}")
+    elif mode == "repeatability":
         source = source if group is None else group["current"]
         axes = source.get("axis_3sigma_base")
         scalar = source.get("rp_current" if group is None else "rp")
@@ -47,7 +58,7 @@ def metric_values(result, mode, group=None):
 
 
 def assess_metric(result, mode):
-    """按保存时的独立阈值逐组判定；退化负值表示改善，不取绝对值。"""
+    """按结果定义逐点或逐方向判定；有符号退化量不取绝对值。"""
     if mode not in METRIC_LABELS:
         raise ValueError(f"未知评价指标：{mode}")
     stored = result.get("metric_thresholds", {}).get(mode, {})
@@ -55,7 +66,7 @@ def assess_metric(result, mode):
     alarms = []
     values = []
     groups = result.get("groups", [])
-    if mode == "absolute_change":
+    if mode == "absolute_change" and result.get("metric_definition") != "patent_v6_rms":
         groups = [entry for group in groups for entry in group.get("directions", [group])]
     for group in groups:
         group_values = metric_values(result, mode, group)
@@ -615,7 +626,6 @@ class PositionMonitoringService:
         baseline = self._read_baseline(path)
         if not all(key in baseline for key in ("id", "batch", "parameters")):
             raise ValueError("所选文件不是定位监控基准")
-        baseline["path"] = str(Path(path).resolve())
         previous = (self.baseline, deepcopy(self.latest_result), self._latest_comparison_key, self.latest_comparison_error)
         self.baseline = baseline
         try:

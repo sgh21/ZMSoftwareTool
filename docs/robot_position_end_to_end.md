@@ -21,7 +21,7 @@ python -B -X utf8 experiments/20260928_position_end_to_end/run_workflow.py --dat
 
 若有生成时冻结的 `target_bias.json`，在 B003 命令追加 `--bias-reference <路径>`。该文件只传给事后独立核验，测量服务仍只使用图像和固定系统参数；缺少偏置表时，报告会明确标记偏置是从 actual 残差估计，不能称为独立验证了设定向量。
 
-独立核验直接使用 actual 的基座位置计算多方向散布，使用 actual−ideal 算绝对误差，并用已测末端位置重算软件指标，不调用生产统计函数构造期望值。`statistics_check.passed` 只表示计算一致；测量是否准确还需查看 `metric_comparison` 和 `position_measurement_errors`。
+独立核验直接使用 actual 的基座位置计算多方向散布，并用已测末端位置重算软件指标，不调用生产统计函数构造期望值。新结果按专利 V6 计算相对同期中心的 RMS、RMS 跨期变化与中心漂移模长，保存在 `patent_v6` 中；旧平均半径加 3 倍标准差、actual−ideal 绝对误差仍保留作历史诊断。对照时依据评估的 `metric_definition` 选择同一统计定义。`statistics_check.passed` 只表示计算一致；测量是否准确还需查看 `metric_comparison` 和 `position_measurement_errors`。
 
 最终报告为 [测试流程与结果](../data/reports/robot_position_final_20260928/测试流程与结果.md)（本地报告，不提交批量数据）。`verification_B002.json`、`verification_B003.json` 分别核验与 B001 的比较；`comparison_B002_B003.json` 只用于报告，按保存的测量位置重算同惯性条件下的差异，不改变软件基准、不生成额外评估历史。
 

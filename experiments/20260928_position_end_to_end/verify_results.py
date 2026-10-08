@@ -20,11 +20,19 @@ def scatter(positions):
     return np.r_[3 * values.std(axis=0, ddof=1), radii.mean() + 3 * radii.std(ddof=1)]
 
 
+def rms_scatter(positions):
+    """V6 为到样本质心的均方根距离，使用 N 作分母。"""
+    values = np.asarray(positions, dtype=float)
+    centered = values - values.mean(axis=0)
+    axis_squared = np.mean(centered ** 2, axis=0)
+    return np.r_[np.sqrt(axis_squared), np.sqrt(axis_squared.sum())]
+
+
 def metrics(initial, current, targets):
-    """输入为 (P,D) -> XYZ；空间列来自各方向模长，不由三轴汇总合成。"""
+    """输入为 (P,D) -> XYZ；旧 AP 逐方向取模，V6 中心位移先求均值再取模。"""
     if initial.keys() != current.keys() or current.keys() != targets.keys():
         raise ValueError("基线、复测和目标的 P/D 不一致")
-    groups = {}
+    groups, patent_groups = {}, {}
     for point in sorted({point for point, _ in targets}):
         keys = sorted(key for key in targets if key[0] == point)
         first = np.asarray([initial[key] for key in keys])
@@ -32,6 +40,8 @@ def metrics(initial, current, targets):
         commanded = np.asarray([targets[key] for key in keys])
         first_error, last_error = first - commanded, last - commanded
         first_scatter, last_scatter = scatter(first), scatter(last)
+        first_rms, last_rms = rms_scatter(first), rms_scatter(last)
+        centroid_shift = last.mean(axis=0) - first.mean(axis=0)
         ap_change = np.r_[
             (np.abs(last_error) - np.abs(first_error)).mean(axis=0),
             (np.linalg.norm(last_error, axis=1) - np.linalg.norm(first_error, axis=1)).mean(),
@@ -43,16 +53,37 @@ def metrics(initial, current, targets):
             "absolute_change": ap_change.tolist(),
             "baseline_ap": float(np.linalg.norm(first_error, axis=1).mean()),
             "current_ap": float(np.linalg.norm(last_error, axis=1).mean()),
-            "centroid_change_xyz_mm": (last.mean(axis=0) - first.mean(axis=0)).tolist(),
+            "centroid_change_xyz_mm": centroid_shift.tolist(),
+        }
+        patent_groups[point] = {
+            "count": len(keys), "baseline_scatter": first_rms.tolist(),
+            "repeatability": last_rms.tolist(),
+            "repeatability_change": (last_rms - first_rms).tolist(),
+            "absolute_change": np.r_[np.abs(centroid_shift), np.linalg.norm(centroid_shift)].tolist(),
+            "centroid_change_xyz_mm": centroid_shift.tolist(),
         }
     names = ("baseline_scatter", "repeatability", "repeatability_change", "absolute_change")
     summary = {name: np.mean([group[name] for group in groups.values()], axis=0).tolist()
                for name in names}
-    return {"groups": groups, "summary": summary}
+    patent_summary = {
+        name: np.mean([group[name] for group in patent_groups.values()], axis=0).tolist()
+        for name in (*names, "centroid_change_xyz_mm")
+    }
+    return {
+        "groups": groups, "summary": summary,
+        "patent_v6": {"groups": patent_groups, "summary": patent_summary},
+    }
 
 
 def production_values(result, group=None):
     source = result["summary"] if group is None else group
+    if result.get("metric_definition") == "patent_v6_rms":
+        axes = source["axis_rms_base"] if group is None else source["current"]["axis_rms_base"]
+        return {
+            "repeatability": [*axes, source["scatter_rms_current"]],
+            "repeatability_change": [*source["axis_rms_change_base"], source["scatter_rms_change"]],
+            "absolute_change": [*source["centroid_shift_abs_base"], source["centroid_shift_distance"]],
+        }
     axes = source["axis_3sigma_base"] if group is None else source["current"]["axis_3sigma_base"]
     return {
         "repeatability": [*axes, source["rp_current"]],
@@ -76,7 +107,7 @@ def error_statistics(vectors):
 def verify_dataset(dataset, baseline_observations, current_observations, evaluation=None, *, bias_reference=None):
     """只核验已完成的测量，不解算图片，不将仿真真值传给生产服务。"""
     dataset = Path(dataset)
-    truth, measured, targets, models, pose_errors = {}, {}, None, {}, {}
+    truth, measured, expected_positions, targets, models, pose_errors = {}, {}, {}, None, {}, {}
     plan = json.loads((dataset / "fixed_observation_plan.json").read_text(encoding="utf-8-sig"))
     directions = {
         (point["point_id"], f"D{int(direction['direction_id'][1:]):03d}"):
@@ -105,8 +136,12 @@ def verify_dataset(dataset, baseline_observations, current_observations, evaluat
         bias_source = "none"
         if record.get("target_bias", 0):
             if bias_reference is not None:
-                offsets_by_point = bias_reference["offsets_B_mm"]
-                bias_source = "saved generation target_bias.json (verification only)"
+                scale = record["target_bias"] / bias_reference.get("coefficient", record["target_bias"])
+                offsets_by_point = {
+                    point: (np.asarray(offset) * scale).tolist()
+                    for point, offset in bias_reference["offsets_B_mm"].items()
+                }
+                bias_source = "saved generation target_bias.json scaled by batch coefficient (verification only)"
             else:
                 # 精简交付未包含固定偏置表时，明确标记为从 actual 反推。
                 offsets_by_point = {
@@ -119,6 +154,9 @@ def verify_dataset(dataset, baseline_observations, current_observations, evaluat
                 bias_source = "estimated per-point mean residual from actual"
         expected = [np.asarray(offsets_by_point.get(key[0], [0, 0, 0]))
                     + 2 * record["inertia"] * directions[key] for key in sorted(frame_map)]
+        expected_positions[period] = {
+            key: targets[key] + offset for key, offset in zip(sorted(frame_map), expected)
+        }
         difference = np.asarray(offsets) - expected
         models[period] = {
             "batch": batch, "inertia": record["inertia"], "count": len(frame_map),
@@ -137,11 +175,15 @@ def verify_dataset(dataset, baseline_observations, current_observations, evaluat
         }
     exact = metrics(truth["baseline"], truth["current"], targets)
     observed = metrics(measured["baseline"], measured["current"], targets)
+    theoretical = metrics(expected_positions["baseline"], expected_positions["current"], targets)
+    definition = evaluation.get("metric_definition", "legacy_3sigma") if evaluation else "patent_v6_rms"
+    compared_truth = exact["patent_v6"] if definition == "patent_v6_rms" else exact
+    compared_observed = observed["patent_v6"] if definition == "patent_v6_rms" else observed
     actual_values = (production_values(evaluation) if evaluation else
-                     {name: observed["summary"][name] for name in
+                     {name: compared_observed["summary"][name] for name in
                       ("repeatability", "repeatability_change", "absolute_change")})
     differences = {
-        name: (np.asarray(actual_values[name]) - observed["summary"][name]).tolist()
+        name: (np.asarray(actual_values[name]) - compared_observed["summary"][name]).tolist()
         for name in actual_values
     }
     group_differences = {}
@@ -149,23 +191,25 @@ def verify_dataset(dataset, baseline_observations, current_observations, evaluat
         point = group["point_id"]
         values = production_values(evaluation, group)
         group_differences[point] = {
-            name: (np.asarray(values[name]) - observed["groups"][point][name]).tolist()
+            name: (np.asarray(values[name]) - compared_observed["groups"][point][name]).tolist()
             for name in values
         }
     all_differences = [value for values in group_differences.values() for value in values.values()]
     all_differences.extend(differences.values())
     maximum = float(np.abs(all_differences).max())
     ratio = models["current"]["inertia"] / models["baseline"]["inertia"]
-    ratios = np.asarray(exact["summary"]["repeatability"]) / exact["summary"]["baseline_scatter"]
+    ratios = (np.asarray(compared_truth["summary"]["repeatability"])
+              / compared_truth["summary"]["baseline_scatter"])
     comparison = {
-        name: {"measured": actual_values[name], "truth": exact["summary"][name],
-               "difference": (np.asarray(actual_values[name]) - exact["summary"][name]).tolist()}
+        name: {"measured": actual_values[name], "truth": compared_truth["summary"][name],
+               "difference": (np.asarray(actual_values[name]) - compared_truth["summary"][name]).tolist()}
         for name in actual_values
     }
     return {
         "dataset": str(dataset.resolve()), "method": "Independent statistics from Cartesian positions; no production evaluator imports",
-        "axes": ["X", "Y", "Z", "space"], "length_unit": "mm",
+        "axes": ["X", "Y", "Z", "space"], "length_unit": "mm", "metric_definition": definition,
         "simulation_model": models, "truth_metrics": exact,
+        "theoretical_metrics": theoretical,
         "measured_independent_metrics": observed,
         "statistics_check": {"maximum_difference_mm": maximum if evaluation else None,
                              "passed": maximum < 1e-8 if evaluation else None,

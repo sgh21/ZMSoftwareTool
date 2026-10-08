@@ -1,0 +1,43 @@
+{
+  "camera": {
+    "reference_model": "HIKROBOT MV-CS060-10GC (user supplied probable model)",
+    "resolution_px": [3072, 2048],
+    "pixel_pitch_um": 2.4,
+    "body_size_mm": [29, 29, 42],
+    "lens_reference": "HIKROBOT MVL-MF1228M-8MP (exterior reference; user's lens model unknown)",
+    "focal_length_mm": 12,
+    "lens_diameter_mm": 32,
+    "lens_length_mm": 39.4,
+    "target_pattern_area_fraction": 0.32,
+    "mount_z_rotation_deg": 180,
+    "mount_to_optical_center_xyz_m": [0.075, 0.0, 0.07],
+    "model_note": "Dimension-based exterior, ideal pinhole optics, no distortion or measured hardware calibration."
+  },
+  "table": {"size_m": [1.8, 1.1, 0.08], "top_z_m": 0.8, "hole_pitch_m": 0.05},
+  "robot_base_xyz_m": [0.53, 0.25, 0.825],
+  "robot_joint_angles_deg": [32.52943846242629, -115.24763981084935, -58.04338154111944, -96.70902687411069, 89.99999667840584, 122.52943681803895],
+  "charuco": {"squares_xy": [9, 7], "square_length_m": 0.020, "marker_length_m": 0.014},
+  "board_centers_m": [[-0.43, -0.12, 0.851]],
+  "board_plate_size_m": [0.200, 0.160, 0.005],
+  "board_backing_size_m": [0.206, 0.166, 0.012],
+  "board_fixture_size_m": [0.215, 0.175, 0.027],
+  "overview_resolution_px": [1920, 1440],
+  "overview_camera": {"xyz_m": [-0.95, -3.3, 2.05], "target_m": [0, 0, 1.1], "lens_mm": 55},
+  "robot_surface": {
+    "joint_dark_gray_linear_rgb": [0.022, 0.026, 0.03],
+    "joint_metallic": 0.08,
+    "joint_roughness": 0.64,
+    "link_metallic": 0.75,
+    "link_roughness": 0.3,
+    "cap_metallic": 0.05,
+    "cap_roughness": 0.42
+  },
+  "render_samples": 64,
+  "render_exposure_ev": -1.0,
+  "sources": {
+    "camera": "https://eq-vision.de/wp-content/uploads/2026/06/MV-CS060-10GC-datasheet.pdf",
+    "camera_source_note": "HIKROBOT original datasheet, mirrored by EQ Vision",
+    "lens": "https://www.hikrobotics.com/en2/source/vision/document/2023/12/7/MVL-MF1228M-8MP_datasheet_20221024.pdf",
+    "charuco": "https://docs.opencv.org/4.13.0/df/d4a/tutorial_charuco_detection.html"
+  }
+}

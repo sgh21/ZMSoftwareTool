@@ -2,3 +2,5 @@ PyQt6==6.11.0
 numpy>=1.26
 opencv-python>=4.9
 PyYAML>=6.0
+h5py>=3.12
+torch>=2.9,<3

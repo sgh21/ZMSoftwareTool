@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from core.algorithms.position_monitoring import (
+    evaluate_multidirectional,
     evaluate_position_monitoring,
     validate_transform,
 )
@@ -208,3 +209,125 @@ def test_invalid_rigid_transform_is_rejected(invalid):
 def test_empty_period_is_rejected():
     with pytest.raises(ValueError, match="没有观测数据"):
         evaluate_position_monitoring([], observations([transform()]), np.eye(4))
+
+
+def multidirectional_observations(positions, *, point="P1", hand_eye=None, rotation=None):
+    return [
+        observations([transform(position, rotation)], hand_eye, point=point, direction=f"D{index}")[0]
+        for index, position in enumerate(positions)
+    ]
+
+
+def test_complete_multidirectional_input_does_not_warn_about_its_sampling_protocol():
+    baseline = multidirectional_observations([[-0.2, 0, 0], [0.2, 0, 0]])
+    current = multidirectional_observations([[-0.4, 0, 0], [0.4, 0, 0]])
+    for sample in baseline + current:
+        sample["ideal_pose"] = np.eye(4)
+    result = evaluate_multidirectional(
+        current, np.eye(4), baseline_samples=baseline,
+        target_pose_base=transform((350, 200, 700), rz(-0.3)),
+    )
+    assert result["warnings"] == []
+    assert not result["is_standard_repeatability"]
+    assert result["summary"]["scatter_rms_current"] == pytest.approx(0.4)
+
+
+def test_patent_v6_balanced_inertia_radius_and_centroid_shift_are_separate_metrics():
+    directions = np.vstack([np.eye(3), -np.eye(3)])
+    center = np.array([100, 200, 300])
+    shift = np.array([0.3, -0.4, 0])
+    baseline = multidirectional_observations(center + 2 * 0.1 * directions)
+    current = multidirectional_observations(center + shift + 2 * 0.2 * directions)
+    result = evaluate_multidirectional(
+        current, np.eye(4), baseline_samples=baseline, base_rotations={"P1": np.eye(3)}
+    )
+    summary = result["summary"]
+    assert result["metric_definition"] == "patent_v6_rms"
+    assert summary["scatter_rms_baseline"] == pytest.approx(0.2)
+    assert summary["scatter_rms_current"] == pytest.approx(0.4)
+    assert summary["scatter_rms_change"] == pytest.approx(0.2)
+    assert summary["axis_rms_base"] == pytest.approx([0.4 / np.sqrt(3)] * 3)
+    assert summary["axis_rms_change_base"] == pytest.approx([0.2 / np.sqrt(3)] * 3)
+    assert summary["centroid_shift_base"] == pytest.approx(shift, abs=1e-10)
+    assert summary["centroid_shift_abs_base"] == pytest.approx(np.abs(shift), abs=1e-10)
+    assert summary["centroid_shift_distance"] == pytest.approx(0.5)
+    assert summary["axis_rms_base"] != summary["axis_3sigma_base"]
+
+
+def test_patent_v6_unbalanced_directions_use_rms_about_the_measured_centroid():
+    # 三个单向正交方向不平衡，样本重心不等于停止模型中心。
+    directions = np.eye(3)
+    current = multidirectional_observations(np.array([100, 200, 300]) + 2 * 0.1 * directions)
+    result = evaluate_multidirectional(current, np.eye(4), base_rotations={"P1": np.eye(3)})
+    expected = 0.2 * np.sqrt(1 - np.dot(directions.mean(axis=0), directions.mean(axis=0)))
+    assert result["summary"]["scatter_rms_current"] == pytest.approx(expected)
+    assert expected == pytest.approx(0.2 * np.sqrt(2 / 3))
+    assert result["summary"]["axis_rms_base"] == pytest.approx([0.2 * np.sqrt(2) / 3] * 3)
+
+
+def test_patent_v6_rms_uses_direction_count_not_sample_standard_deviation():
+    current = multidirectional_observations([[-1, 0, 0], [0, 0, 0], [1, 0, 0]])
+    result = evaluate_multidirectional(current, np.eye(4), base_rotations={"P1": np.eye(3)})
+    assert result["summary"]["scatter_rms_current"] == pytest.approx(np.sqrt(2 / 3))
+    assert result["summary"]["axis_rms_base"] == pytest.approx([np.sqrt(2 / 3), 0, 0], abs=1e-10)
+    # 原诊断仍为旧口径，不能把 RMS 填进 RP 或 3σ 字段。
+    assert result["summary"]["rp_current"] == pytest.approx(2 / 3 + np.sqrt(3))
+    assert result["summary"]["axis_3sigma_base"] == pytest.approx([3, 0, 0], abs=1e-10)
+
+
+def test_patent_v6_opposite_direction_shifts_cancel_before_taking_centroid_norm():
+    baseline = multidirectional_observations([[-0.4, 0, 0], [0.4, 0, 0]])
+    current = multidirectional_observations([[-0.2, 0, 0], [0.2, 0, 0]])
+    result = evaluate_multidirectional(
+        current, np.eye(4), baseline_samples=baseline, base_rotations={"P1": np.eye(3)}
+    )
+    assert result["summary"]["scatter_rms_change"] == pytest.approx(-0.2)
+    assert result["summary"]["centroid_shift_distance"] == pytest.approx(0, abs=1e-10)
+    assert result["summary"]["centroid_shift_abs_base"] == pytest.approx([0, 0, 0], abs=1e-10)
+    assert result["summary"]["drift_distance"] == pytest.approx(0.2)
+
+
+def test_patent_v6_rotates_axis_rms_and_preserves_unknown_base_axes():
+    hand_eye = transform((100, -50, 40), rz(0.4))
+    orientation = rz(np.pi / 2)
+    baseline = multidirectional_observations(
+        [[100, -0.1, 200], [100, 0.1, 200]], hand_eye=hand_eye, rotation=orientation
+    )
+    current = multidirectional_observations(
+        [[100, 0.8, 200], [100, 1.2, 200]], hand_eye=hand_eye, rotation=orientation
+    )
+    for rotations in (None, {"P1": orientation}):
+        result = evaluate_multidirectional(current, hand_eye, baseline_samples=baseline, base_rotations=rotations)
+        group = result["groups"][0]
+        assert result["summary"]["scatter_rms_current"] == pytest.approx(0.2)
+        assert result["summary"]["centroid_shift_distance"] == pytest.approx(1)
+        assert group["current"]["axis_rms_local"] == pytest.approx([0.2, 0, 0], abs=1e-10)
+        if rotations is None:
+            assert result["summary"]["axis_rms_base"] is None
+            assert result["summary"]["centroid_shift_abs_base"] is None
+            assert any("缺少参考末端朝向 Q" in warning for warning in result["warnings"])
+        else:
+            assert result["summary"]["axis_rms_base"] == pytest.approx([0, 0.2, 0], abs=1e-10)
+            assert result["summary"]["centroid_shift_abs_base"] == pytest.approx([0, 1, 0], abs=1e-10)
+
+
+def test_patent_v6_point_averaging_preserves_shift_magnitudes_and_missing_baseline():
+    baseline = multidirectional_observations([[-0.2, 0, 0], [0.2, 0, 0]])
+    baseline += multidirectional_observations([[0, -0.1, 0], [0, 0, 0], [0, 0.1, 0]], point="P2")
+    current = multidirectional_observations([[0.8, 0, 0], [1.2, 0, 0]])
+    current += multidirectional_observations([[-3, -0.1, 0], [-3, 0, 0], [-3, 0.1, 0]], point="P2")
+    rotations = {"P1": np.eye(3), "P2": np.eye(3)}
+    result = evaluate_multidirectional(current, np.eye(4), baseline_samples=baseline, base_rotations=rotations)
+    assert result["summary"]["centroid_shift_base"] == pytest.approx([-1, 0, 0], abs=1e-10)
+    assert result["summary"]["centroid_shift_distance"] == pytest.approx(2)
+    assert result["summary"]["centroid_shift_abs_base"] == pytest.approx([2, 0, 0], abs=1e-10)
+    assert result["summary"]["scatter_rms_current"] == pytest.approx((0.2 + 0.1 * np.sqrt(2 / 3)) / 2)
+    current_only = evaluate_multidirectional(current, np.eye(4), base_rotations=rotations)
+    for name in ("scatter_rms_baseline", "scatter_rms_change", "axis_rms_change_base",
+                 "centroid_shift_base", "centroid_shift_distance", "centroid_shift_abs_base"):
+        assert current_only["summary"][name] is None
+    one_direction = evaluate_multidirectional(current[:1], np.eye(4))
+    assert one_direction["summary"]["scatter_rms_current"] is None
+    assert one_direction["summary"]["axis_rms_base"] is None
+    assert any("少于 2 个接近方向" in warning for warning in one_direction["warnings"])
+    json.dumps(one_direction, allow_nan=False)

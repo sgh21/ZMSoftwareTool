@@ -46,9 +46,14 @@ METRIC_HINTS = {
     "repeatability": "各轴为 3σ 补充统计，空间指标为 RP；按同点、同方向重复到达计算。",
 }
 MULTIDIRECTIONAL_HINTS = {
-    "absolute_change": "相同点位、方向的位置误差大小变化；先按方向计算，再逐点等权汇总。正值增大，负值改善。",
-    "repeatability_change": "多方向到位散布的跨期变化；正值增大，负值改善，属于工程监控指标。",
-    "repeatability": "同点不同方向各一次到达：空间为平均到重心距离加3倍距离标准差，XYZ为3σ；非国标同方向RP。",
+    "absolute_change": "旧定义：相同点位、方向的绝对误差模长差；先按方向计算，再逐点等权汇总。正值增大，负值改善。",
+    "repeatability_change": "旧定义：空间 mean(l)+3std(l) 和各轴 3σ 的跨期变化；正值增大，负值改善。",
+    "repeatability": "旧定义：空间为平均到重心距离加3倍距离标准差，XYZ为3σ；非专利V6的RMS，非国标同方向RP。",
+}
+PATENT_V6_HINTS = {
+    "absolute_change": "专利V6：同点多方向到位质心相对基准的漂移，XYZ为分量绝对值，空间为漂移模；各点等权，不等于真实绝对误差增量。",
+    "repeatability_change": "专利V6：各轴及空间的质心RMS本期减基准；正值为散布增大，负值为减小，各点等权。",
+    "repeatability": "专利V6：同点各方向位置相对质心的RMS，平方均值分母为方向数D；各点等权，非国标同方向RP。",
 }
 
 
@@ -295,17 +300,24 @@ class RobotPositionPage(QWidget):
         return self.result_metric.currentData()
 
     def _metric_name(self):
-        return self._metric_labels()[self._metric_mode()]
+        return METRIC_LABELS[self._metric_mode()]
 
     def _multidirectional(self):
         context = self.result or self.service.current_batch or (self.service.baseline or {}).get("batch", {})
         return context.get("sampling_protocol") == "multidirectional"
 
-    def _metric_labels(self):
-        return METRIC_LABELS
-
-    def _metric_hint(self, mode=None):
-        return (MULTIDIRECTIONAL_HINTS if self._multidirectional() else METRIC_HINTS)[mode or self._metric_mode()]
+    def _metric_hint(self, mode=None, result=None):
+        context = self.result if result is None else result
+        if context is None:
+            context = self.service.current_batch or (self.service.baseline or {}).get("batch", {})
+            if not context.get("samples") and not context.get("sampling_protocol"):
+                return "导入观测后，按实际采样方式显示指标定义。"
+            hints = PATENT_V6_HINTS if context.get("sampling_protocol") == "multidirectional" else METRIC_HINTS
+        elif context.get("metric_definition") == "patent_v6_rms":
+            hints = PATENT_V6_HINTS
+        else:
+            hints = MULTIDIRECTIONAL_HINTS if context.get("sampling_protocol") == "multidirectional" else METRIC_HINTS
+        return hints[mode or self._metric_mode()]
 
     def _threshold_key(self):
         return "multidirectional_thresholds" if self._multidirectional() else "metric_thresholds"
@@ -339,7 +351,7 @@ class RobotPositionPage(QWidget):
         title_row.addStretch()
         self.show_before_baseline = QCheckBox("显示基准前历史")
         self.show_before_baseline.setChecked(self.service.settings.get("show_before_baseline", False))
-        self.show_before_baseline.setToolTip("历史观测统一相对当前基准重新比较，原保存结果保持不变。")
+        self.show_before_baseline.setToolTip("当前基准为第 0 天；勾选后显示基准前的负天数历史，原保存结果保持不变。")
         self.show_before_baseline.toggled.connect(self._toggle_baseline_history)
         title_row.addWidget(self.show_before_baseline)
         body.addLayout(title_row)
@@ -635,7 +647,7 @@ class RobotPositionPage(QWidget):
         layout.addWidget(
             self._button("关闭", dialog.reject), 0, Qt.AlignmentFlag.AlignRight
         )
-        fit_dialog(dialog, 820, 420)
+        fit_dialog(dialog, 820, min(420, 160 + 32 * table.rowCount()))
         dialog.exec()
 
     def _show_points(self) -> None:
@@ -674,7 +686,7 @@ class RobotPositionPage(QWidget):
 
         table.cellDoubleClicked.connect(select)
         layout.addWidget(self._button("关闭", dialog.reject))
-        fit_dialog(dialog, 960, 460)
+        fit_dialog(dialog, 960, min(460, 150 + 32 * table.rowCount()))
         dialog.exec()
 
     def _refresh_latest_result(self):
@@ -710,10 +722,10 @@ class RobotPositionPage(QWidget):
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
-        layout.addWidget(self._note("三项指标分别设置上限；逐测点、接近方向判定，留空不判定该项。"))
+        layout.addWidget(self._note("三项指标分别设置上限；留空不判定该项。"))
         tabs = QTabWidget()
         fields = {}
-        for mode, label in self._metric_labels().items():
+        for mode, label in METRIC_LABELS.items():
             tab = QWidget()
             form = QFormLayout(tab)
             form.setSpacing(12)
@@ -729,14 +741,12 @@ class RobotPositionPage(QWidget):
                 field.setAccessibleName(f"{label} · {name}")
                 fields[mode][key] = field
                 form.addRow(name, field)
-            form.addRow(self._note(self._metric_hint(mode)))
             tabs.addTab(tab, label)
         tabs.setCurrentIndex(self.result_metric.currentIndex())
         layout.addWidget(tabs)
-        layout.addWidget(self._note("退化量直接与上限比较，负值表示改善；历史结果保留评估时的阈值。"))
+        layout.addWidget(self._note("各指标与对应上限比较；历史结果保留评估时的阈值。"))
         error_label = self._note("")
         layout.addWidget(error_label)
-        layout.addStretch()
 
         def save():
             try:
@@ -759,7 +769,7 @@ class RobotPositionPage(QWidget):
         actions.addWidget(self._button("取消", dialog.reject))
         actions.addWidget(self._button("保存", save, True))
         layout.addLayout(actions)
-        fit_dialog(dialog, 760, 470)
+        fit_dialog(dialog, 760)
         dialog.exec()
 
     def _settings_saved(self, _result):
@@ -891,7 +901,7 @@ class RobotPositionPage(QWidget):
             state = "partial"
         self._set_status_light("conditions", state,
             "\n".join(f"{label}：已设置 {counts[mode]}/4 项阈值"
-                      for mode, label in self._metric_labels().items())
+                      for mode, label in METRIC_LABELS.items())
             + f"\n加工点位：{point_count} 个"
         )
 
@@ -1025,7 +1035,7 @@ class RobotPositionPage(QWidget):
         actions.addWidget(self._button("取消", dialog.reject))
         actions.addWidget(self._button("选择", select, True))
         layout.addLayout(actions)
-        fit_dialog(dialog, 700, 230)
+        fit_dialog(dialog, 700)
         dialog.exec()
 
     def _baseline_selected(self, baseline):
@@ -1047,7 +1057,7 @@ class RobotPositionPage(QWidget):
         self.history_batches = None
         self._render_result()
         self._refresh_observations()
-        message = f"评估完成：{result['batch_id']} · {result['status']}，结果已保存。"
+        message = f"批次 {result['batch_id']} 已评估并保存；综合阈值判定：{result['status']}。"
         if self.result["batch_id"] != result["batch_id"]:
             message += f"主卡仍显示最新已评估观测 {self.result['batch_id']}。"
         self.append_log(message)
@@ -1085,12 +1095,15 @@ class RobotPositionPage(QWidget):
             if any(group["current"].get("mean_base") is None for group in self.result["groups"]):
                 reasons.append("缺参考朝向 Qᵢ，基座三轴不可用")
         elif any(value is None for value in values):
-            reasons.append("缺固定靶标基座位姿或目标位姿" if self._multidirectional() else "缺初始绝对误差向量或参考朝向 Qᵢ")
+            if self.result.get("metric_definition") == "patent_v6_rms":
+                reasons.append("缺参考朝向 Qᵢ，基座三轴不可用；空间质心漂移仍可计算")
+            else:
+                reasons.append("缺固定靶标基座位姿或目标位姿" if self._multidirectional() else "缺初始绝对误差向量或参考朝向 Qᵢ")
         return reasons
 
     def _render_result(self):
         mode = self._metric_mode()
-        for index, (key, label) in enumerate(self._metric_labels().items()):
+        for index, (key, label) in enumerate(METRIC_LABELS.items()):
             self.result_metric.setItemText(index, label)
             self.result_metric.setItemData(index, self._metric_hint(key), Qt.ItemDataRole.ToolTipRole)
         self.measured_table.horizontalHeaderItem(5).setText("接近方向数" if self._multidirectional() else "到达次数")
@@ -1171,31 +1184,38 @@ class RobotPositionPage(QWidget):
         debug = context.get("debug_day_index") is not None
         self.trend_chart.integer_days = debug
         observed_time = bool(context.get("observed_at") or baseline_batch.get("observed_at"))
-        baseline_time = baseline_batch.get("observed_at") if observed_time else (self.service.baseline or {}).get("created_at")
+        baseline_time = baseline_batch.get("observed_at") or (self.service.baseline or {}).get("created_at")
         baseline_stamp = QDateTime.fromString(str(baseline_time), Qt.DateFormat.ISODateWithMs)
         timestamps = [QDateTime.fromString(str(row.get("observed_at") if observed_time else row.get("created_at")),
                                           Qt.DateFormat.ISODateWithMs) for row in history]
-        valid_times = [stamp for stamp in [baseline_stamp, *timestamps] if stamp.isValid()]
-        origin = min(valid_times, key=lambda stamp: stamp.toMSecsSinceEpoch()) if valid_times else QDateTime()
-        baseline_day = baseline_batch.get("debug_day_index") if debug else (
-            origin.msecsTo(baseline_stamp) / 86400000 if origin.isValid() and baseline_stamp.isValid() else None
+        valid_times = [stamp for stamp in timestamps if stamp.isValid()]
+        origin = baseline_stamp if baseline_stamp.isValid() else (
+            min(valid_times, key=lambda stamp: stamp.toMSecsSinceEpoch()) if valid_times else QDateTime()
+        )
+        baseline_index = baseline_batch.get("debug_day_index")
+        day_origin = baseline_index if baseline_index is not None else min(
+            (row["debug_day_index"] for row in history if row.get("debug_day_index") is not None), default=0
+        )
+        baseline_day = (0 if baseline_index is not None else None) if debug else (
+            0 if baseline_stamp.isValid() else None
         )
         self.trend_chart.baseline_day = baseline_day
         if debug:
             self.trend_time_caption.setText("调试天数")
-            self.trend_time_caption.setToolTip("固定采集时间线：B001 为第 0 天，B002 为第 1 天；虚线标记当前基准。")
+            self.trend_time_caption.setToolTip("当前基准为第 0 天，按保存的调试天数之差绘制；基准前为负天数。无基准时从最早可比观测起算。")
         elif not observed_time:
             self.trend_time_caption.setText("评估时间 / 天")
-            self.trend_time_caption.setToolTip("旧记录缺少采集时间，按最早可比记录的评估时间绘制；虚线标记当前基准。")
+            self.trend_time_caption.setToolTip("旧记录缺少采集时间，按评估时间差绘制；当前基准为第 0 天，基准前为负天数。无基准时从最早可比观测起算。")
         self.trend_chart.empty_message = "暂无可比历史评估记录"
         records = []
         debug_records = {}
         time_sources = set()
         for result, timestamp in zip(history, timestamps):
             if debug:
-                days = result.get("debug_day_index")
-                if days is None:
+                day_index = result.get("debug_day_index")
+                if day_index is None:
                     continue
+                days = day_index - day_origin
             else:
                 if result.get("debug_day_index") is not None:
                     continue
@@ -1228,7 +1248,10 @@ class RobotPositionPage(QWidget):
                 None: "旧记录未标明时间来源",
             }
             sources = "；".join(label for source, label in labels.items() if source in time_sources)
-            self.trend_time_caption.setToolTip(f"当前曲线时间来源：{sources or '尚无可绘制记录'}。1 天 = 24 小时。")
+            self.trend_time_caption.setToolTip(
+                f"当前曲线时间来源：{sources or '尚无可绘制记录'}。1 天 = 24 小时。"
+                "当前基准为第 0 天，基准前为负天数；无基准时从最早可比观测起算。"
+            )
         self.trend_chart.set_history(records)
         self.trend_chart.setToolTip("\n".join(self.service.history_comparison_warnings))
         axis = "空间" if self.trend_metric.currentData() == "distance" else "基座 XYZ"
@@ -1315,8 +1338,7 @@ class RobotPositionPage(QWidget):
                 f"批次 {result['batch_id']} · 原基准 {result.get('baseline_id') or '无'} · "
                 f"保存时判定：{state['status']}；此窗口保留当时的指标和阈值。"
             ))
-        else:
-            layout.addWidget(self._note(self._metric_hint()))
+        layout.addWidget(self._note(self._metric_hint(result=result)))
         thresholds = assess_metric(result, self._metric_mode())["thresholds"]
         names = ("X", "Y", "Z", "空间")
         values = metric_values(result, self._metric_mode())
@@ -1327,6 +1349,9 @@ class RobotPositionPage(QWidget):
             f"{name} {self._number(thresholds.get(key))}" for name, key in zip(names, ("X", "Y", "Z", "distance"))
         )))
         table = self._table(RESULT_COLUMNS)
+        table.horizontalHeaderItem(5).setText(
+            "接近方向数" if result.get("sampling_protocol") == "multidirectional" else "到达次数"
+        )
         self._fill_table(table, self._metric_rows(result))
         layout.addWidget(table, 1)
         notes = QPlainTextEdit()
@@ -1343,14 +1368,20 @@ class RobotPositionPage(QWidget):
 
     def _result_details_text(self, result=None):
         result = self.result if result is None else result
-        hints = MULTIDIRECTIONAL_HINTS if result.get("sampling_protocol") == "multidirectional" else METRIC_HINTS
-        lines = [hints[self._metric_mode()],
+        patent = result.get("metric_definition") == "patent_v6_rms"
+        lines = [self._metric_hint(result=result),
                  "单位 mm。以下诊断用 Δp 表达在各测点的固定初始参考末端系，不能混称基座 XYZ。"]
+        if patent:
+            lines.append("空间RMS² = X轴RMS² + Y轴RMS² + Z轴RMS²（逐点成立）。")
+            if result.get("debug_day_index") is not None:
+                lines.append("仿真2k是围绕模型中心的半径；方向均值不为零时，质心RMS不必等于2k。")
         for group in result["groups"]:
-            if group.get("drift_local") is None:
+            drift = group.get("centroid_shift_local" if patent else "drift_local")
+            if drift is None:
                 continue
-            components = ", ".join(self._number(value) for value in group["drift_local"])
-            lines.append(f"{group['point_id']}/{group['direction_id']} 初始参考末端系 Δp (mm)：[{components}]")
+            components = ", ".join(self._number(value) for value in drift)
+            name = "质心漂移 " if patent else ""
+            lines.append(f"{group['point_id']}/{group['direction_id']} {name}初始参考末端系 Δp (mm)：[{components}]")
         for point in result.get("points", []):
             if point.get("baseline_vap") is not None or point.get("current_vap") is not None:
                 lines.append(
@@ -1580,7 +1611,7 @@ class PositionTrendChart(QWidget):
         self.setAccessibleName("多次评估的定位精度趋势图")
 
     def set_history(self, records: list[dict]) -> None:
-        """days 为固定采集时间线上的天数；未计算的指标为 None。"""
+        """days 为相对当前基准的天数，无基准时从最早观测起算；未计算的指标为 None。"""
         self.history = sorted(records, key=lambda record: record["days"])
         self.update()
 
@@ -1635,7 +1666,7 @@ class PositionTrendChart(QWidget):
             last_day = first_day + 1
         if self.integer_days:
             interval = max(1, ceil((last_day - first_day) / 4))
-            ticks = list(range(int(first_day), int(last_day) + 1, interval))
+            ticks = sorted({0, *range(int(first_day), int(last_day) + 1, interval)})
         else:
             ticks = [first_day + (last_day - first_day) * step / 4 for step in range(5)]
         for day in ticks:
