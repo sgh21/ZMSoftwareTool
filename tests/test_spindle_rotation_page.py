@@ -779,6 +779,27 @@ def test_review_is_empty_and_cannot_save_when_all_samples_are_trained(model_serv
     assert model_service.runs == before
 
 
+def test_review_uses_latest_untrained_zip_when_newest_import_was_trained(
+        model_service, tmp_path, page_factory, monkeypatch):
+    model_service.import_packages([data_package(tmp_path, model_service, ("older",), "older.zip")])
+    model_service.import_packages([data_package(tmp_path, model_service, ("recent",), "recent.zip")])
+    model_service.set_label("recent", "healthy")
+    model_service.train()
+    page = page_factory(model_service)
+
+    def review(dialog):
+        choice = dialog.findChild(QComboBox, "spindle_review_package")
+        assert choice.currentData() == ["older"]
+        assert choice.count() == 2
+        assert all(not model_service.trained_run_ids().intersection(choice.itemData(index))
+                   for index in range(choice.count()))
+        assert all("recent.zip" not in choice.itemText(index) for index in range(choice.count()))
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", review)
+    page._show_review()
+
+
 @pytest.mark.parametrize("scale", [0.75, 1.0, 2.0])
 def test_form_dialogs_fit_content_at_supported_scales(service, tmp_path, page_factory, monkeypatch, scale):
     service.import_packages([data_package(tmp_path, service, ("daily",))])

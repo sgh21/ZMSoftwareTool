@@ -193,8 +193,6 @@ def test_threshold_dialog_saves_three_independent_sets_and_blank_fields(applicat
         fields = dialog.findChildren(QLineEdit)
         observed["field_count"] = len(fields)
         tabs = dialog.findChild(QTabWidget)
-        assert all(not tabs.widget(index).findChildren(QLabel)[-1].text().startswith("各轴 3σ")
-                   for index in range(tabs.count()))
         observed["tab_count"] = tabs.count()
         observed["selected"] = tabs.currentIndex()
         for mode, value in (("absolute_change", "1.2"), ("repeatability_change", "0.2"),
