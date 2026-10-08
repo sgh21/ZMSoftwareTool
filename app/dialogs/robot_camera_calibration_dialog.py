@@ -9,8 +9,9 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPlainTextEdit, QProgressBar, QVBoxLayout,
 )
 
-from app.pages.robot_position_page import ServiceTask
-from core.services.position_monitoring_service import read_document
+from app.dialogs import read_batch_records
+from app.resources import make_button, make_note
+from app.tasks import ServiceTask
 from debug.diagnostics.camera_calibration import calibrate_dataset
 
 
@@ -26,7 +27,7 @@ class RobotCameraCalibrationDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
-        layout.addWidget(page._note(
+        layout.addWidget(make_note(
             "使用所选批次图像标定相机内参，并结合机器人记录位姿标定手眼。"
             "生成的参数请在主页面手动加载。"
         ))
@@ -35,7 +36,7 @@ class RobotCameraCalibrationDialog(QDialog):
         self.data_root = QLineEdit(str(page.service.root / "data" / "robot_error"))
         self.data_root.setProperty("robotInput", True)
         self.data_root.setAccessibleName("标定数据目录")
-        self.browse_button = page._button("选择目录", self._browse)
+        self.browse_button = make_button("选择目录", self._browse)
         source_row.addWidget(self.data_root, 1)
         source_row.addWidget(self.browse_button)
         form.addRow("标定数据目录", source_row)
@@ -72,9 +73,9 @@ class RobotCameraCalibrationDialog(QDialog):
         layout.addWidget(self.report_path)
         actions = QHBoxLayout()
         actions.addStretch()
-        self.run_button = page._button("开始标定 / 导出", self._run, True)
+        self.run_button = make_button("开始标定 / 导出", self._run, True)
         self.run_button.setEnabled(False)
-        self.close_button = page._button("关闭", self.reject)
+        self.close_button = make_button("关闭", self.reject)
         actions.addWidget(self.run_button)
         actions.addWidget(self.close_button)
         layout.addLayout(actions)
@@ -119,14 +120,7 @@ class RobotCameraCalibrationDialog(QDialog):
             return
         dataset = Path(self.data_root.text().strip())
         try:
-            parameters = read_document(dataset / "parameters.json")
-            runs = parameters.get("runs", [])
-            parsed = {str(run["batch_id"]): dataset / run.get(
-                "record", f"{run['batch_id']}/record.json",
-            ) for run in runs}
-            parsed.update({path.parent.name: path for path in sorted(dataset.glob("B[0-9][0-9][0-9]/record.json"))})
-            if not parsed:
-                raise ValueError("目录缺少批次 record.json 或 runs 信息")
+            parsed = read_batch_records(dataset)
         except (OSError, ValueError, KeyError, TypeError) as error:
             self._source_changed()
             self.source_status.setText(f"无法读取标定数据：{error}")

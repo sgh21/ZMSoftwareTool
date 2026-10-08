@@ -22,6 +22,8 @@ import pandas as pd
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT))
 
+from core.services.position_persistence import read_json  # noqa: E402
+
 
 def load_helpers(research):
     path = research / "src/build_reconstruction_dataset.py"
@@ -29,10 +31,6 @@ def load_helpers(research):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def read_json(path):
-    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def prepare_august_run(run, destination, helpers):

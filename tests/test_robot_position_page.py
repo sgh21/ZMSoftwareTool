@@ -8,7 +8,7 @@ import pytest
 from PyQt6.QtCore import QEventLoop, QPoint, QRect, QThread, QTimer, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
-    QApplication, QBoxLayout, QDialog, QLabel, QLineEdit, QPushButton, QStyle, QStyleOptionComboBox,
+    QBoxLayout, QDialog, QLabel, QLineEdit, QPushButton, QStyle, QStyleOptionComboBox,
     QTableWidget, QTabWidget,
 )
 
@@ -16,11 +16,6 @@ from ui_helpers import ready_position_page, wait_for_page
 from app.resources import UiScale, load_stylesheet
 from core.algorithms.position_monitoring import evaluate_position_monitoring
 from core.services.position_monitoring_service import PositionMonitoringService
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication([])
 
 
 class MemoryService:

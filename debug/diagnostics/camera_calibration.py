@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 
 import cv2
@@ -21,7 +20,7 @@ from core.algorithms.board_pose import (
 )
 from core.algorithms.position_monitoring import validate_transform
 from core.services.position_image_input import image_identity, simulation_parameters
-from core.services.position_monitoring_service import write_document
+from core.services.position_persistence import read_json, write_document
 
 
 def _detect_image(path, board):
@@ -105,11 +104,11 @@ def calibrate_dataset(
 
     notify(0, "读取标定板与配对机器人位姿")
     parameter_path = dataset / "parameters.json"
-    document = json.loads(parameter_path.read_text(encoding="utf-8-sig"))
+    document = read_json(parameter_path)
     if document.get("length_unit") != "mm":
         raise ValueError("标定数据 length_unit 必须为 mm")
     record_path = dataset / batch_id / "record.json"
-    record = json.loads(record_path.read_text(encoding="utf-8-sig"))
+    record = read_json(record_path)
     frames = record["frames"]
     if record["batch"] != batch_id or not frames:
         raise ValueError("标定批次不匹配或没有配对样本")

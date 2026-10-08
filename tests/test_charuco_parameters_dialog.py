@@ -4,16 +4,11 @@ from copy import deepcopy
 
 import numpy as np
 import pytest
-from PyQt6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QScrollArea
+from PyQt6.QtWidgets import QComboBox, QDialog, QLabel, QScrollArea
 
 from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog, TARGET_FIELDS
 from core.algorithms.pose_fields import rotation_from_rpy_degrees
 from core.services.position_monitoring_service import PositionMonitoringService
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture

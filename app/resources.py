@@ -7,12 +7,38 @@ from pathlib import Path
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import QAbstractButton, QLabel, QLayout, QTabBar, QWidget
+from PyQt6.QtWidgets import QAbstractButton, QLabel, QLayout, QPushButton, QTabBar, QWidget
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESOURCE_ROOT = PROJECT_ROOT / "resources"
 DISPLAY = json.loads((PROJECT_ROOT / "config/display.json").read_text(encoding="utf-8"))
+
+
+def make_note(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setProperty("robotNote", True)
+    label.setWordWrap(True)
+    return label
+
+
+def make_button(text: str, callback, primary: bool = False) -> QPushButton:
+    button = QPushButton(text)
+    button.setProperty("robotAction", True)
+    button.setProperty("primary", primary)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.clicked.connect(callback)
+    return button
+
+
+def set_status_light(light, state, details, status):
+    if light.property("state") != state:
+        light.setProperty("state", state)
+        light.style().unpolish(light)
+        light.style().polish(light)
+        light.update()
+    light.setToolTip(f"{status}\n{details}")
+    light.setAccessibleDescription(f"{status}；{details}")
 
 
 def load_stylesheet(scale: float = 1.0) -> str:

@@ -3,7 +3,7 @@
 from math import ceil, isfinite
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QRunnable, QDateTime, QPointF, QRectF, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtCore import QDateTime, QPointF, QRectF, Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -32,7 +32,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.resources import DISPLAY, fit_dialog
+from app.resources import DISPLAY, fit_dialog, make_button, make_note, set_status_light
+from app.tasks import ServiceTask
 from core.services.position_monitoring_service import (
     METRIC_LABELS, PositionMonitoringService, assess_metric, metric_values,
 )
@@ -55,27 +56,6 @@ PATENT_V6_HINTS = {
     "repeatability_change": "专利V6：各轴及空间的质心RMS本期减基准；正值为散布增大，负值为减小，各点等权。",
     "repeatability": "专利V6：同点各方向位置相对质心的RMS，平方均值分母为方向数D；各点等权，非国标同方向RP。",
 }
-
-
-class TaskSignals(QObject):
-    completed = pyqtSignal(object)
-    failed = pyqtSignal(str)
-    progress = pyqtSignal(int, str)
-
-
-class ServiceTask(QRunnable):
-    """在工作线程调用服务，所有界面更新经信号回到主线程。"""
-
-    def __init__(self, operation):
-        super().__init__()
-        self.operation = operation
-        self.signals = TaskSignals()
-
-    def run(self):
-        try:
-            self.signals.completed.emit(self.operation(self.signals.progress.emit))
-        except Exception as error:
-            self.signals.failed.emit(str(error))
 
 
 class RobotPositionPage(QWidget):
@@ -192,22 +172,6 @@ class RobotPositionPage(QWidget):
         timestamp = self._display_time(entry["timestamp"])
         self.process_log.appendPlainText(f"{timestamp} [{entry['level']}] {entry['message']}")
 
-    @staticmethod
-    def _note(text: str) -> QLabel:
-        label = QLabel(text)
-        label.setProperty("robotNote", True)
-        label.setWordWrap(True)
-        return label
-
-    @staticmethod
-    def _button(text: str, callback, primary: bool = False) -> QPushButton:
-        button = QPushButton(text)
-        button.setProperty("robotAction", True)
-        button.setProperty("primary", primary)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.clicked.connect(callback)
-        return button
-
     def _results_view(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("RobotResults")
@@ -241,8 +205,8 @@ class RobotPositionPage(QWidget):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(12)
         timestamps = QHBoxLayout()
-        self.evaluation_time_label = self._note("评价更新时间：—")
-        self.baseline_time_label = self._note("基准建立时间：—")
+        self.evaluation_time_label = make_note("评价更新时间：—")
+        self.baseline_time_label = make_note("基准建立时间：—")
         timestamps.addWidget(self.evaluation_time_label, 1)
         timestamps.addWidget(self.baseline_time_label, 1)
         body.addLayout(timestamps)
@@ -331,10 +295,10 @@ class RobotPositionPage(QWidget):
         self.measured_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         body.addWidget(self.measured_table, 1)
         footer = QHBoxLayout()
-        self.result_hint = self._note("等待评估")
+        self.result_hint = make_note("等待评估")
         footer.addWidget(self.result_hint, 1)
-        footer.addWidget(self._button("历史记录", self._show_history, True))
-        footer.addWidget(self._button("展开明细", self._show_result_details, True))
+        footer.addWidget(make_button("历史记录", self._show_history, True))
+        footer.addWidget(make_button("展开明细", self._show_result_details, True))
         body.addLayout(footer)
         return page
 
@@ -361,7 +325,7 @@ class RobotPositionPage(QWidget):
         self.trend_metric.addItem("XYZ 三轴", "xyz")
         self.trend_metric.addItem("空间指标", "distance")
         legend = QHBoxLayout()
-        self.trend_axis_title = self._note("基座 XYZ / mm")
+        self.trend_axis_title = make_note("基座 XYZ / mm")
         self.trend_axis_title.setWordWrap(False)
         legend.addWidget(self.trend_axis_title, 0, Qt.AlignmentFlag.AlignVCenter)
         legend.addStretch()
@@ -377,7 +341,7 @@ class RobotPositionPage(QWidget):
         self.trend_chart = PositionTrendChart()
         body.addWidget(self.trend_chart, 1)
         self.trend_metric.currentIndexChanged.connect(self._change_trend_metric)
-        self.trend_time_caption = self._note("评估时间 / 天")
+        self.trend_time_caption = make_note("评估时间 / 天")
         self.trend_time_caption.setToolTip("相对于基准建立时间的经过天数，1 天 = 24 小时")
         self.trend_time_caption.setAlignment(Qt.AlignmentFlag.AlignRight)
         body.addWidget(self.trend_time_caption)
@@ -410,7 +374,7 @@ class RobotPositionPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(8)
-        self.prediction_title = self._note("")
+        self.prediction_title = make_note("")
         layout.addWidget(self.prediction_title)
         self.point_table = self._table(PREDICTION_COLUMNS)
         self.point_table.setMinimumHeight(114)
@@ -419,12 +383,12 @@ class RobotPositionPage(QWidget):
         )
         layout.addWidget(self.point_table, 1)
         footer = QHBoxLayout()
-        message = self._note("预测模型尚未启用")
+        message = make_note("预测模型尚未启用")
         message.setWordWrap(False)
         footer.addWidget(message)
         footer.addStretch()
-        footer.addWidget(self._button("历史记录", self._show_history, True))
-        footer.addWidget(self._button("展开明细", self._show_points, True))
+        footer.addWidget(make_button("历史记录", self._show_history, True))
+        footer.addWidget(make_button("展开明细", self._show_points, True))
         layout.addLayout(footer)
         return page
 
@@ -443,7 +407,7 @@ class RobotPositionPage(QWidget):
         self.observation_sample.setProperty("robotInput", True)
         self.observation_sample.setAccessibleName("观测样本")
         row.addWidget(self.observation_sample, 1)
-        row.addWidget(self._button("观测结果", self._show_observation_results))
+        row.addWidget(make_button("观测结果", self._show_observation_results))
         body.addLayout(row)
         image_area = QFrame()
         image_area.setObjectName("ObservationImage")
@@ -465,12 +429,12 @@ class RobotPositionPage(QWidget):
         body.setContentsMargins(0, 14, 0, 0)
         self.alarm_status = QLabel("报警状态：尚未评估")
         body.addWidget(self.alarm_status)
-        self.alarm_message = self._note("按当前所选指标显示判定及超限项。")
+        self.alarm_message = make_note("按当前所选指标显示判定及超限项。")
         body.addWidget(self.alarm_message)
         body.addStretch()
         actions = QHBoxLayout()
-        actions.addWidget(self._button("报警记录", self._show_alarms, True))
-        actions.addWidget(self._button("维护记录", self._show_maintenance, True))
+        actions.addWidget(make_button("报警记录", self._show_alarms, True))
+        actions.addWidget(make_button("维护记录", self._show_maintenance, True))
         actions.addStretch()
         body.addLayout(actions)
         return page
@@ -487,34 +451,34 @@ class RobotPositionPage(QWidget):
         heading = QHBoxLayout()
         heading.addWidget(title)
         heading.addStretch()
-        heading.addWidget(self._button("调试", self._show_debug))
+        heading.addWidget(make_button("调试", self._show_debug))
         body.addLayout(heading)
 
         self.status_lights = {}
         hand_eye = self._settings_section(body, 4, "机器人手眼参数", "parameter")
         actions = QHBoxLayout()
         actions.addWidget(
-            self._button("加载参数", self._load_parameters)
+            make_button("加载参数", self._load_parameters)
         )
         actions.addWidget(
-            self._button("参数设置", self._show_parameters)
+            make_button("参数设置", self._show_parameters)
         )
         hand_eye.addLayout(actions)
 
         baseline = self._settings_section(body, 5, "测量基准", "baseline")
         actions = QHBoxLayout()
-        create_button = self._button("建立基准", self._create_baseline)
+        create_button = make_button("建立基准", self._create_baseline)
         create_button.setToolTip("使用当前载入的观测建立基准")
         actions.addWidget(create_button)
         actions.addWidget(
-            self._button("选择基准", self._select_baseline)
+            make_button("选择基准", self._select_baseline)
         )
         baseline.addLayout(actions)
 
         conditions = self._settings_section(body, 7, "判定与点位设置", "conditions")
         actions = QHBoxLayout()
-        actions.addWidget(self._button("阈值设置", self._show_settings))
-        actions.addWidget(self._button("点位管理", self._show_point_editor))
+        actions.addWidget(make_button("阈值设置", self._show_settings))
+        actions.addWidget(make_button("点位管理", self._show_point_editor))
         conditions.addLayout(actions)
 
         log_area = QFrame()
@@ -541,7 +505,7 @@ class RobotPositionPage(QWidget):
         self.task_progress.setValue(0)
         self.task_progress.setAccessibleName("当前任务进度")
         log_layout.addWidget(self.task_progress)
-        self.task_progress_note = self._note("尚未开始处理")
+        self.task_progress_note = make_note("尚未开始处理")
         log_layout.addWidget(self.task_progress_note)
         body.addWidget(log_area, 1)
         body.addWidget(self._action_bar())
@@ -555,12 +519,12 @@ class RobotPositionPage(QWidget):
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(4)
         acquisition_hint = "相机接口尚未接入，未开始采集。后续按与基准相同的程序、固定位姿拍摄靶标。"
-        acquisition = self._button(
+        acquisition = make_button(
             "采集靶标", lambda: self.append_log(f"采集靶标：{acquisition_hint}", "WARN"), True,
         )
         acquisition.setToolTip(acquisition_hint)
         actions.addWidget(acquisition, 1)
-        import_button = self._button("导入观测", self._import_observations, True)
+        import_button = make_button("导入观测", self._import_observations, True)
         import_button.clicked.disconnect()
         menu = QMenu(import_button)
         menu.addAction("选择采集图片", self._import_observations)
@@ -568,9 +532,9 @@ class RobotPositionPage(QWidget):
         menu.addAction("加载观测结果或记录文件", self._import_observation_file)
         import_button.setMenu(menu)
         actions.addWidget(import_button, 1)
-        actions.addWidget(self._button("清空日志", self.process_log.clear, True), 1)
+        actions.addWidget(make_button("清空日志", self.process_log.clear, True), 1)
         actions.addWidget(
-            self._button("评估精度", self._evaluate, True),
+            make_button("评估精度", self._evaluate, True),
             1,
         )
         return bar
@@ -637,15 +601,15 @@ class RobotPositionPage(QWidget):
         dialog.setWindowTitle(title)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(18, 18, 18, 18)
-        layout.addWidget(self._note(hint))
+        layout.addWidget(make_note(hint))
         table = self._table(columns)
         self._fill_table(table, rows)
         layout.addWidget(table, 1)
         layout.addWidget(
-            self._note(f"共 {len(rows)} 条记录" if rows else "暂无记录")
+            make_note(f"共 {len(rows)} 条记录" if rows else "暂无记录")
         )
         layout.addWidget(
-            self._button("关闭", dialog.reject), 0, Qt.AlignmentFlag.AlignRight
+            make_button("关闭", dialog.reject), 0, Qt.AlignmentFlag.AlignRight
         )
         fit_dialog(dialog, 820, min(420, 160 + 32 * table.rowCount()))
         dialog.exec()
@@ -665,7 +629,7 @@ class RobotPositionPage(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{self._metric_name()} · 检测历史")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note("双击查看当时保存的原结果及阈值；当前主卡仍显示最新观测与所选基准的比较。"))
+        layout.addWidget(make_note("双击查看当时保存的原结果及阈值；当前主卡仍显示最新观测与所选基准的比较。"))
         table = self._table(["测量批次", "评估时间", "基准版本", "手眼版本", "结论"])
         self._fill_table(table, [[*[str(row.get(key) or "—") for key in
                                   ("batch_id", "created_at", "baseline_id", "parameter_version")],
@@ -685,7 +649,7 @@ class RobotPositionPage(QWidget):
             self._run_task("载入历史图片", lambda _progress: self.service.load_evaluation_samples(record), loaded)
 
         table.cellDoubleClicked.connect(select)
-        layout.addWidget(self._button("关闭", dialog.reject))
+        layout.addWidget(make_button("关闭", dialog.reject))
         fit_dialog(dialog, 960, min(460, 150 + 32 * table.rowCount()))
         dialog.exec()
 
@@ -722,7 +686,7 @@ class RobotPositionPage(QWidget):
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
-        layout.addWidget(self._note("三项指标分别设置上限；留空不判定该项。"))
+        layout.addWidget(make_note("三项指标分别设置上限；留空不判定该项。"))
         tabs = QTabWidget()
         fields = {}
         for mode, label in METRIC_LABELS.items():
@@ -744,8 +708,8 @@ class RobotPositionPage(QWidget):
             tabs.addTab(tab, label)
         tabs.setCurrentIndex(self.result_metric.currentIndex())
         layout.addWidget(tabs)
-        layout.addWidget(self._note("各指标与对应上限比较；历史结果保留评估时的阈值。"))
-        error_label = self._note("")
+        layout.addWidget(make_note("各指标与对应上限比较；历史结果保留评估时的阈值。"))
+        error_label = make_note("")
         layout.addWidget(error_label)
 
         def save():
@@ -766,8 +730,8 @@ class RobotPositionPage(QWidget):
 
         actions = QHBoxLayout()
         actions.addStretch()
-        actions.addWidget(self._button("取消", dialog.reject))
-        actions.addWidget(self._button("保存", save, True))
+        actions.addWidget(make_button("取消", dialog.reject))
+        actions.addWidget(make_button("保存", save, True))
         layout.addLayout(actions)
         fit_dialog(dialog, 760)
         dialog.exec()
@@ -906,15 +870,8 @@ class RobotPositionPage(QWidget):
         )
 
     def _set_status_light(self, key, state, details):
-        light = self.status_lights[key]
-        if light.property("state") != state:
-            light.setProperty("state", state)
-            light.style().unpolish(light)
-            light.style().polish(light)
-            light.update()
         status = {"missing": "未配置", "partial": "配置不全或不匹配", "ready": "已就绪"}[state]
-        light.setToolTip(f"{status}\n{details}")
-        light.setAccessibleDescription(f"{status}；{details}")
+        set_status_light(self.status_lights[key], state, details, status)
 
     def _load_parameters(self):
         path, _ = QFileDialog.getOpenFileName(self, "加载视觉与手眼参数", "", "参数文件 (*.json *.yaml *.yml)")
@@ -1015,7 +972,7 @@ class RobotPositionPage(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("选择测量基准")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note("选择已创建的基准，重新比较最新已评估观测和可比历史。"))
+        layout.addWidget(make_note("选择已创建的基准，重新比较最新已评估观测和可比历史。"))
         choice = QComboBox()
         choice.setProperty("robotInput", True)
         for entry in entries:
@@ -1032,8 +989,8 @@ class RobotPositionPage(QWidget):
 
         actions = QHBoxLayout()
         actions.addStretch()
-        actions.addWidget(self._button("取消", dialog.reject))
-        actions.addWidget(self._button("选择", select, True))
+        actions.addWidget(make_button("取消", dialog.reject))
+        actions.addWidget(make_button("选择", select, True))
         layout.addLayout(actions)
         fit_dialog(dialog, 700)
         dialog.exec()
@@ -1124,7 +1081,6 @@ class RobotPositionPage(QWidget):
                     label.style().unpolish(label)
                     label.style().polish(label)
                     label.update()
-            threshold = thresholds.get(key)
             threshold_hint = "阈值未设置" if threshold is None else f"阈值：{self._number(threshold)} mm"
             card.setToolTip(f"当前阈值 · {threshold_hint}；卡片按汇总值判色"
                             + ("\n存在逐点超限，请查看报警与维护" if key in alarm_axes else ""))
@@ -1299,7 +1255,7 @@ class RobotPositionPage(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("观测结果 · 视觉六维位姿")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(self._note(
+        layout.addWidget(make_note(
             f"批次：{batch['batch_id']} · {len(batch['samples'])} 张图像。"
             "位姿表示标定板相对于相机的位置与旋转；RPY 使用固定轴 XYZ 顺序。"
         ))
@@ -1316,8 +1272,8 @@ class RobotPositionPage(QWidget):
         self._fill_table(table, rows)
         layout.addWidget(table, 1)
         if batch.get("saved_path"):
-            layout.addWidget(self._note(f"观测文件：{batch['saved_path']}"))
-        layout.addWidget(self._button("关闭", dialog.reject))
+            layout.addWidget(make_note(f"观测文件：{batch['saved_path']}"))
+        layout.addWidget(make_button("关闭", dialog.reject))
         fit_dialog(dialog, 1180, 590)
         dialog.exec()
 
@@ -1334,18 +1290,18 @@ class RobotPositionPage(QWidget):
         layout = QVBoxLayout(dialog)
         if historical:
             state = assess_metric(result, self._metric_mode())
-            layout.addWidget(self._note(
+            layout.addWidget(make_note(
                 f"批次 {result['batch_id']} · 原基准 {result.get('baseline_id') or '无'} · "
                 f"保存时判定：{state['status']}；此窗口保留当时的指标和阈值。"
             ))
-        layout.addWidget(self._note(self._metric_hint(result=result)))
+        layout.addWidget(make_note(self._metric_hint(result=result)))
         thresholds = assess_metric(result, self._metric_mode())["thresholds"]
         names = ("X", "Y", "Z", "空间")
         values = metric_values(result, self._metric_mode())
-        layout.addWidget(self._note("汇总值 / mm：" + "；".join(
+        layout.addWidget(make_note("汇总值 / mm：" + "；".join(
             f"{name} {self._number(value)}" for name, value in zip(names, values)
         )))
-        layout.addWidget(self._note(("保存时阈值" if historical else "当前阈值") + " / mm：" + "；".join(
+        layout.addWidget(make_note(("保存时阈值" if historical else "当前阈值") + " / mm：" + "；".join(
             f"{name} {self._number(thresholds.get(key))}" for name, key in zip(names, ("X", "Y", "Z", "distance"))
         )))
         table = self._table(RESULT_COLUMNS)
@@ -1360,8 +1316,8 @@ class RobotPositionPage(QWidget):
         layout.addWidget(notes)
         actions = QHBoxLayout()
         actions.addStretch()
-        actions.addWidget(self._button("导出结果", lambda: self._export_result(result), True))
-        actions.addWidget(self._button("关闭", dialog.reject))
+        actions.addWidget(make_button("导出结果", lambda: self._export_result(result), True))
+        actions.addWidget(make_button("关闭", dialog.reject))
         layout.addLayout(actions)
         fit_dialog(dialog, 980, 580)
         dialog.exec()
@@ -1467,7 +1423,7 @@ class PointEditor(QDialog):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(10)
         layout.addWidget(
-            page._note("双击修改编号和理论坐标，可先留空坐标。应用后保存配置。")
+            make_note("双击修改编号和理论坐标，可先留空坐标。应用后保存配置。")
         )
         actions = QHBoxLayout()
         for title, callback in (
@@ -1477,7 +1433,7 @@ class PointEditor(QDialog):
             ("下移", lambda: self._move_point(1)),
             ("顺序编号", self._renumber),
         ):
-            actions.addWidget(page._button(title, callback))
+            actions.addWidget(make_button(title, callback))
         actions.addStretch()
         layout.addLayout(actions)
         self.table = page._table(["编号", "理论 X / mm", "理论 Y / mm", "理论 Z / mm"])
@@ -1498,15 +1454,15 @@ class PointEditor(QDialog):
             ],
         )
         layout.addWidget(self.table, 1)
-        self.error_label = page._note("")
+        self.error_label = make_note("")
         self.error_label.setProperty("validationError", True)
         layout.addWidget(self.error_label)
         footer = QHBoxLayout()
         footer.addWidget(
-            page._note("加工点位用于预测，与拍摄靶标的观测点位分别管理。"), 1
+            make_note("加工点位用于预测，与拍摄靶标的观测点位分别管理。"), 1
         )
-        footer.addWidget(page._button("取消", self.reject))
-        footer.addWidget(page._button("应用", self._apply, True))
+        footer.addWidget(make_button("取消", self.reject))
+        footer.addWidget(make_button("应用", self._apply, True))
         layout.addLayout(footer)
 
     def _add_point(self) -> None:

@@ -6,16 +6,16 @@ from datetime import datetime
 import numpy as np
 import pytest
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication
 
 from app.pages.robot_position_page import PointEditor
 from ui_helpers import ready_position_page, refresh_page
-from app.resources import DISPLAY, load_stylesheet
+from app.resources import DISPLAY
 from core.algorithms.position_monitoring import evaluate_position_monitoring
 from core.services.position_monitoring_service import METRIC_AXES, METRIC_LABELS
 
 
 BASELINE_TIME = "2026-09-20T00:00:00+00:00"
+pytestmark = pytest.mark.usefixtures("styled_application")
 
 
 class MemoryService:
@@ -57,15 +57,6 @@ class MemoryService:
 
     def save_settings(self, settings, progress=None):
         self.settings.update(deepcopy(settings))
-
-
-@pytest.fixture(scope="module")
-def application():
-    app = QApplication.instance() or QApplication([])
-    previous_style = app.styleSheet()
-    app.setStyleSheet(load_stylesheet())
-    yield app
-    app.setStyleSheet(previous_style)
 
 
 @pytest.fixture

@@ -8,15 +8,10 @@ import pytest
 from PyQt6.QtGui import QImage
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QPushButton
+from PyQt6.QtWidgets import QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QPushButton
 
 from ui_helpers import ready_position_page, refresh_page, wait_for_page
 from core.services.position_monitoring_service import PositionMonitoringService, read_document, write_document
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication([])
 
 
 def import_batch(service, root, batch_id, radius, *, simulation=True, captured_at=None):

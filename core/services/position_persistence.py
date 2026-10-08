@@ -19,18 +19,19 @@ def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
+def parse_timestamp(value):
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return stamp if stamp.tzinfo else stamp.astimezone()
+
+
 def observation_time(batch, fallback_time=None, fallback_source="evaluated_at"):
     """保留真实时间；调试相对日是显式元数据，不伪造日期。"""
     samples = batch["samples"]
     captured = batch.get("captured_at") or batch.get("captured_at_utc")
-    def parse(value):
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return stamp if stamp.tzinfo else stamp.astimezone()
-
     if captured is None and samples and all(sample.get("captured_at") for sample in samples):
-        captured = max((sample["captured_at"] for sample in samples), key=parse)
+        captured = max((sample["captured_at"] for sample in samples), key=parse_timestamp)
     imported = batch.get("imported_at")
-    parsed = parse(captured or imported or fallback_time)
+    parsed = parse_timestamp(captured or imported or fallback_time)
     batch["observed_at"] = parsed.isoformat()
     batch["time_source"] = "captured_at" if captured else "imported_at" if imported else fallback_source
     if batch.get("comparison_status") == "simulation" or batch.get("source_type") == "simulation":

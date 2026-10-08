@@ -20,7 +20,7 @@ from core.algorithms.position_monitoring import (
     validate_transform,
 )
 from core.services.position_image_input import IMAGE_SUFFIXES, image_batch, simulation_parameters
-from core.services.position_persistence import PositionStore, observation_time, write_document
+from core.services.position_persistence import PositionStore, observation_time, parse_timestamp, write_document
 
 
 METRIC_LABELS = {
@@ -33,28 +33,23 @@ PARAMETER_METADATA = {"version", "source_path", "source_note", "created_at", "up
 def metric_values(result, mode, group=None):
     """统一卡片、逐点结果、历史曲线和阈值判定的四列取值。"""
     source = result["summary"] if group is None else group
-    if result.get("metric_definition") == "patent_v6_rms":
-        if mode == "repeatability":
-            source = source if group is None else group["current"]
-            axes = source.get("axis_rms_base")
-            scalar = source.get("scatter_rms_current" if group is None else "scatter_rms")
-        elif mode == "repeatability_change":
-            axes, scalar = source.get("axis_rms_change_base"), source.get("scatter_rms_change")
-        elif mode == "absolute_change":
-            axes, scalar = source.get("centroid_shift_abs_base"), source.get("centroid_shift_distance")
-        else:
-            raise ValueError(f"未知评价指标：{mode}")
-    elif mode == "repeatability":
+    rms = result.get("metric_definition") == "patent_v6_rms"
+    if mode == "repeatability":
         source = source if group is None else group["current"]
-        axes = source.get("axis_3sigma_base")
-        scalar = source.get("rp_current" if group is None else "rp")
+        axes_key = "axis_rms_base" if rms else "axis_3sigma_base"
+        scalar_key = "scatter_rms" if rms else "rp"
+        if group is None:
+            scalar_key += "_current"
     elif mode == "repeatability_change":
-        axes, scalar = source.get("axis_3sigma_change_base"), source.get("rp_change")
+        axes_key = "axis_rms_change_base" if rms else "axis_3sigma_change_base"
+        scalar_key = "scatter_rms_change" if rms else "rp_change"
     elif mode == "absolute_change":
-        axes, scalar = source.get("absolute_axis_change"), source.get("absolute_ap_change")
+        axes_key = "centroid_shift_abs_base" if rms else "absolute_axis_change"
+        scalar_key = "centroid_shift_distance" if rms else "absolute_ap_change"
     else:
         raise ValueError(f"未知评价指标：{mode}")
-    return [*(axes if axes is not None else [None, None, None]), scalar]
+    axes = source.get(axes_key)
+    return [*(axes if axes is not None else [None, None, None]), source.get(scalar_key)]
 
 
 def assess_metric(result, mode):
@@ -113,11 +108,6 @@ def _stamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
-def _instant(value):
-    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return stamp if stamp.tzinfo else stamp.astimezone()
-
-
 def _newer_observation(candidate, previous):
     """调试同一程序按模拟日，实测按采集/导入时间；重评时间仅用于同次观测。"""
     if previous is None:
@@ -126,8 +116,14 @@ def _newer_observation(candidate, previous):
     days = [item.get("debug_day_index") for item in (candidate, previous)]
     if same_program and all(day is not None for day in days) and days[0] != days[1]:
         return days[0] > days[1]
-    return (_instant(candidate["observed_at"]), _instant(candidate["created_at"])) >= (
-        _instant(previous["observed_at"]), _instant(previous["created_at"]))
+    return (parse_timestamp(candidate["observed_at"]), parse_timestamp(candidate["created_at"])) >= (
+        parse_timestamp(previous["observed_at"]), parse_timestamp(previous["created_at"]))
+
+
+def _pose_mm(value, name, factor):
+    pose = validate_transform(value, name).copy()
+    pose[:3, 3] *= factor
+    return pose.tolist()
 
 
 def _rotation(value, name):
@@ -224,7 +220,7 @@ class PositionMonitoringService:
             self.latest_batch = self._read_evaluated_batch(record)
             legacy = self.storage / "history" / f"{record['id']}.json"
             day = record.get("debug_day_index")
-            date = _instant(record["observed_at"]).astimezone().date().isoformat()
+            date = parse_timestamp(record["observed_at"]).astimezone().date().isoformat()
             path = legacy if legacy.exists() else (
                 self.storage / "debug" / f"day_{day:04d}.json" if day is not None
                 else self.storage / "daily" / f"{date}.json")
@@ -284,9 +280,8 @@ class PositionMonitoringService:
             document = simulation_parameters(document)
         # 旧 master 的手眼输出 T_tool_cam 明确使用 m；只在此导入边界换算。
         if "T_tool_cam" in document:
-            legacy = validate_transform(document["T_tool_cam"], "旧手眼参数").copy()
-            legacy[:3, 3] *= 1000
-            document = {**self.parameters, "hand_eye": legacy.tolist(), "length_unit": "mm"}
+            document = {**self.parameters,
+                        "hand_eye": _pose_mm(document["T_tool_cam"], "旧手眼参数", 1000), "length_unit": "mm"}
             document["source_note"] = "旧 master T_tool_cam 导入，平移由 m 转为 mm"
         elif ("camera_matrix" in document and "hand_eye" in document
               and any(key in document for key in ("board_grid", "charuco", "board_type"))):
@@ -310,10 +305,8 @@ class PositionMonitoringService:
         if parameters.get("transform_convention", "E_T_C") != "E_T_C":
             raise ValueError("手眼变换必须声明为 E_T_C（相机到被监测末端）")
         if parameters.get("hand_eye") is not None:
-            hand_eye = validate_transform(parameters["hand_eye"], "手眼参数").copy()
-            if "hand_eye" in document and document.get("length_unit") == "m":
-                hand_eye[:3, 3] *= 1000
-            parameters["hand_eye"] = hand_eye.tolist()
+            factor = 1000 if "hand_eye" in document and document.get("length_unit") == "m" else 1
+            parameters["hand_eye"] = _pose_mm(parameters["hand_eye"], "手眼参数", factor)
         if parameters.get("camera_matrix") is not None:
             camera = np.asarray(parameters["camera_matrix"], dtype=float)
             if (camera.shape != (3, 3) or not np.isfinite(camera).all()
@@ -337,10 +330,8 @@ class PositionMonitoringService:
         if parameters.get("board_type") == "charuco":
             make_charuco_board(parameters.get("charuco", {}), size)
         if parameters.get("target_pose_base") is not None:
-            target = validate_transform(parameters["target_pose_base"], "固定靶标基座位姿").copy()
-            if "target_pose_base" in document and document.get("length_unit") == "m":
-                target[:3, 3] *= 1000
-            parameters["target_pose_base"] = target.tolist()
+            factor = 1000 if "target_pose_base" in document and document.get("length_unit") == "m" else 1
+            parameters["target_pose_base"] = _pose_mm(parameters["target_pose_base"], "固定靶标基座位姿", factor)
         if parameters.get("reference_rotation") is not None:
             parameters["reference_rotation"] = _rotation(parameters["reference_rotation"], "棋盘参考旋转")
         limit = parameters.get("max_reprojection_error_px")
@@ -441,9 +432,7 @@ class PositionMonitoringService:
                     image_path = source.parent / image_path
                 sample["image_path"] = str(image_path.resolve())
             if "vision_pose" in sample:
-                pose = validate_transform(sample["vision_pose"], "视觉位姿").copy()
-                pose[:3, 3] *= factor
-                sample["vision_pose"] = pose.tolist()
+                sample["vision_pose"] = _pose_mm(sample["vision_pose"], "视觉位姿", factor)
             else:
                 if not image_path or not image_path.is_file():
                     raise ValueError(f"样本 {identity} 缺少视觉位姿或有效图像")
@@ -493,9 +482,7 @@ class PositionMonitoringService:
             sample["vision_xyz_mm"] = vision[:3, 3].tolist()
             sample["vision_rpy_deg"] = rotation_to_rpy_degrees(vision[:3, :3]).tolist()
             if "ideal_pose" in sample:
-                ideal = validate_transform(sample["ideal_pose"], "指令目标位姿").copy()
-                ideal[:3, 3] *= factor
-                sample["ideal_pose"] = ideal.tolist()
+                sample["ideal_pose"] = _pose_mm(sample["ideal_pose"], "指令目标位姿", factor)
             if self.parameters.get("target_pose_base") is not None and self.parameters.get("hand_eye") is not None:
                 end_pose = (np.asarray(self.parameters["target_pose_base"]) @ np.linalg.inv(vision)
                             @ np.linalg.inv(np.asarray(self.parameters["hand_eye"])))
@@ -504,9 +491,7 @@ class PositionMonitoringService:
                 if "ideal_pose" in sample:
                     sample["error_base_mm"] = (end_pose[:3, 3] - np.asarray(sample["ideal_pose"])[:3, 3]).tolist()
             if "robot_pose" in sample:
-                robot = validate_transform(sample["robot_pose"], "机器人记录位姿").copy()
-                robot[:3, 3] *= factor
-                sample["robot_pose"] = robot.tolist()
+                sample["robot_pose"] = _pose_mm(sample["robot_pose"], "机器人记录位姿", factor)
             resolved.append(sample)
             if progress:
                 progress(round(75 * (index + 1) / len(samples)), f"已解算/读取 {index + 1}/{len(samples)}")
@@ -823,7 +808,8 @@ class PositionMonitoringService:
         if day is not None and baseline_day is not None:
             elapsed = day - baseline_day
         elif day is None and baseline_day is None and result.get("baseline_observed_at"):
-            elapsed = (_instant(result["observed_at"]) - _instant(result["baseline_observed_at"])).total_seconds() / 86400
+            elapsed = (parse_timestamp(result["observed_at"])
+                       - parse_timestamp(result["baseline_observed_at"])).total_seconds() / 86400
         else:
             elapsed = None
         result["comparison_days"] = elapsed
@@ -920,7 +906,7 @@ class PositionMonitoringService:
                 progress(10 + round(90 * (index + 1) / len(records)), f"已处理批次 {index + 1}/{len(records)}")
         comparisons.sort(key=lambda item: (
             item["debug_day_index"] if item["debug_day_index"] is not None else 0,
-            _instant(item["observed_at"])))
+            parse_timestamp(item["observed_at"])))
         self._history_cache = {"key": key, "results": comparisons, "warnings": list(self.history_comparison_warnings)}
         if progress:
             progress(100, "历史比较完成")

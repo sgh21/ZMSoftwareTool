@@ -36,3 +36,6 @@ dist/
 # Experiment outputs
 /experiments/**/outputs/
 /experiments/**/checkpoints/
+
+# Local simulation assets
+/debug/ur10_charuco_scene/assets/

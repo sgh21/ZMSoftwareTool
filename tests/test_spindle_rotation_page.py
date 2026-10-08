@@ -25,11 +25,7 @@ from test_spindle_algorithms import make_run
 from test_spindle_monitoring_service import h5_package
 
 
-@pytest.fixture(scope="module")
-def application():
-    application = QApplication.instance() or QApplication([])
-    application.setStyleSheet(load_stylesheet())
-    return application
+pytestmark = pytest.mark.usefixtures("styled_application")
 
 
 @pytest.fixture
@@ -197,7 +193,6 @@ def test_empty_start_has_no_fabricated_model_score_or_curves(service, page_facto
     assert service.runs == {}
     assert service.state["results"] == []
     assert page.result is None
-    assert not page.conclusion.isVisible()
     assert all(value.text() == "—" for value in page.result_values.values())
     assert all(plot.series == [] for plot in page.plots.values())
     assert page.initial_button.isEnabled()
@@ -472,48 +467,45 @@ def test_missing_result_clears_previous_fault_color(model_service, tmp_path, pag
     page = page_factory(service)
     page.run_select.setCurrentIndex(page.run_select.findData("late"))
     assert page.result["assessment"]["status"] == "fault"
-    assert page.conclusion.styleSheet()
     assert page.result_values["network"].styleSheet()
     page.model_select.setCurrentIndex(page.model_select.findData(service.models[0]["version"]))
     assert page.result is None
-    assert page.conclusion.styleSheet() == ""
     assert all(value.text() == "—" for value in page.result_values.values())
     assert all(value.styleSheet() == "" for value in page.result_values.values())
 
 
-@pytest.mark.parametrize(("warning", "fault", "status"), [(1.5, 3, "warning"), (.5, 1.5, "fault")])
+@pytest.mark.parametrize(("warning", "fault"), [(1.5, 3), (.5, 1.5)])
 def test_alarm_turns_score_numbers_red_and_clears_when_normal_or_pending_review(
-        model_service, page_factory, warning, fault, status):
+        model_service, page_factory, warning, fault):
     service = model_service
     service.set_thresholds(warning, fault)
     page = page_factory(service)
     assert page.result_values["analysis"].text() == "1"
     assert service.analysis_metrics(page.result)[0] == pytest.approx(1)
     assert "正常参考均值" in page.result_values["analysis"].toolTip()
-    assert page.conclusion.text() == {"warning": "预警 / 建议复测", "fault": "故障 / 建议检修"}[status]
     for key in ("analysis", "network"):
         assert page.result_values[key].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
     assert page.result_values["temperature"].styleSheet() == page.result_values["current"].styleSheet() == ""
     service.settings["thresholds_model_version"] = "previous-model"
     page._refresh()
-    assert page.conclusion.text() == "新模型阈值待复核"
+    assert "新模型阈值待复核" in page.status_lights["thresholds"].toolTip()
     assert all(value.styleSheet() == "" for value in page.result_values.values())
     service.set_thresholds(3, 4)
     page._refresh()
-    assert page.conclusion.text() == "阈值内"
+    assert page.status_lights["thresholds"].property("state") == "ready"
     assert all(value.styleSheet() == "" for value in page.result_values.values())
 
 
 def test_condition_details_distinguish_recorded_and_missing_air_pressure(service, tmp_path, page_factory):
     service.import_packages([data_package(tmp_path, service, ("daily",))])
     page = page_factory(service)
-    assert "7000 rpm · 空转 · 刀具重装 · 密封气压 0.2 MPa" in page.result_detail.text()
-    assert "预警 未设置 / 故障 未设置" in page.result_detail.text()
-    assert "None" not in page.result_detail.text()
+    assert "7000 rpm · 空转 · 刀具重装 · 密封气压 0.2 MPa" in page.current_run_button.toolTip()
+    assert "预警 未设置 / 故障 未设置" in page.current_run_button.toolTip()
+    assert "None" not in page.current_run_button.toolTip()
     service.runs["daily"]["condition"] = {"tool_remounted": False, "seal_pressure_mpa": None}
     page._selection_changed()
-    assert "未标记重装 · 密封气压未记录" in page.result_detail.text()
-    assert "0.2 MPa" not in page.result_detail.text()
+    assert "未标记重装 · 密封气压未记录" in page.current_run_button.toolTip()
+    assert "0.2 MPa" not in page.current_run_button.toolTip()
 
 
 def test_sample_dialog_can_reopen_without_losing_controls_or_selection(model_service, page_factory):
@@ -523,7 +515,6 @@ def test_sample_dialog_can_reopen_without_losing_controls_or_selection(model_ser
             dialog = QApplication.activeModalWidget()
             assert page.run_select.isVisible()
             assert page.model_select.isVisible()
-            assert not any(widget.isVisible() for widget in (page.initial_status, page.conclusion, page.result_detail))
             table = dialog.findChild(QTableWidget)
             table.cellClicked.emit(0, 0)
             assert page.run_select.currentData() == table.item(0, 0).data(Qt.ItemDataRole.UserRole)
@@ -578,9 +569,8 @@ def test_model_names_and_pointer_follow_actual_current_model(model_service, page
     assert "当前模型" not in page.model_select.itemText(page.model_select.findData(other["version"]))
     assert not page.model_select.itemData(page.model_select.findData(other["version"]), Qt.ItemDataRole.UserRole + 1)
     assert page.model_select.itemText(0) == f"最新评价 → {page._model_name(current['version'])}"
-    assert page.initial_status.text().startswith(f"当前模型 → {page._model_name(current['version'])}")
+    assert f"当前模型：{page._model_name(current['version'])}" in page.status_lights["model"].toolTip()
     assert page.result["model_version"] == current["version"]
-    assert not page.conclusion.isVisible()
 
 
 def test_legacy_energy_is_recomputed_in_worker_without_rewriting_saved_evaluation(
@@ -836,14 +826,14 @@ def test_current_threshold_change_applies_to_other_runs_without_rewriting_histor
     original = deepcopy(service.state['results'])
     service.set_thresholds(0.5, 1.5)
     page._refresh('daily')
-    assert page.conclusion.text() == '故障 / 建议检修'
+    assert page.result_values['network'].styleSheet()
     assert page.result['assessment']['status'] == 'unconfigured'
     page.run_select.setCurrentIndex(page.run_select.findData('initial1'))
-    assert page.conclusion.text() == '故障 / 建议检修'
-    assert '当前阈值：预警 0.5 倍 / 故障 1.5 倍' in page.result_detail.text()
+    assert page.result_values['network'].styleSheet()
+    assert '当前阈值：预警 0.5 倍 / 故障 1.5 倍' in page.current_run_button.toolTip()
     page.model_select.setCurrentIndex(page.model_select.findData(service.current_model['version']))
-    assert page.conclusion.text() == '未设置阈值'
-    assert '当时阈值：预警 未设置 / 故障 未设置' in page.result_detail.text()
+    assert page.result_values['network'].styleSheet() == ''
+    assert '当时阈值：预警 未设置 / 故障 未设置' in page.current_run_button.toolTip()
     assert service.state['results'] == original
 
 
@@ -852,15 +842,17 @@ def test_threshold_confirmation_clears_review_for_all_current_views_but_not_hist
     service.set_thresholds(0.5, 1.5)
     service.train()
     page = page_factory(service)
-    assert page.conclusion.text() == '新模型阈值待复核'
+    assert '新模型阈值待复核' in page.status_lights['thresholds'].toolTip()
+    assert page.result_values['network'].styleSheet() == ''
     historical = deepcopy(service.state['results'])
     service.set_thresholds(1, 5)
     page._refresh()
     for run_id in service.runs:
         page.run_select.setCurrentIndex(page.run_select.findData(run_id))
-        assert page.conclusion.text() == '预警 / 建议复测'
+        assert page.result_values['network'].styleSheet()
     page.model_select.setCurrentIndex(page.model_select.findData(service.current_model['version']))
-    assert page.conclusion.text() == '新模型阈值待复核'
+    assert page.result['assessment']['status'] == 'review_required'
+    assert page.result_values['network'].styleSheet() == ''
     assert service.state['results'] == historical
 
 

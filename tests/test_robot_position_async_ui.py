@@ -7,16 +7,11 @@ import numpy as np
 import pytest
 from PyQt6.QtCore import QThread, QTimer
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QComboBox, QDialog, QPushButton
+from PyQt6.QtWidgets import QComboBox, QDialog, QPushButton
 
 import app.pages.robot_position_page as page_module
 from core.services.position_monitoring_service import PositionMonitoringService, write_document
 from ui_helpers import ready_position_page, wait_for_page
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication([])
 
 
 def import_batch(service, batch_id, radius):
@@ -171,6 +166,8 @@ def test_duplicate_baseline_notifies_without_switching_or_writing_another_evalua
 def test_failed_history_preference_restores_checkbox_and_controls(application, setup_service, monkeypatch):
     service, _first, last = setup_service
     page = ready_position_page(service)
+    history = deepcopy(page.trend_chart.history)
+    assert [row["days"] for row in history] == [0]
 
     def fail_save(_settings, progress=None):
         raise OSError("设置文件无法写入")
@@ -185,6 +182,6 @@ def test_failed_history_preference_restores_checkbox_and_controls(application, s
         assert page.task_progress.value() == 0
         assert "设置文件无法写入" in page.task_progress_note.text()
         assert service.baseline["id"] == last["id"]
-        assert [row["days"] for row in page.trend_chart.history] == [2]
+        assert page.trend_chart.history == history
     finally:
         page.close()

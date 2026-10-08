@@ -9,9 +9,10 @@ from PyQt6.QtWidgets import (
     QProgressBar, QTabWidget, QVBoxLayout,
 )
 
-from app.pages.robot_position_page import ServiceTask
-from app.resources import fit_dialog
-from core.services.position_monitoring_service import METRIC_LABELS, read_document
+from app.dialogs import read_batch_records
+from app.resources import fit_dialog, make_button, make_note
+from app.tasks import ServiceTask
+from core.services.position_monitoring_service import METRIC_LABELS
 from core.services.position_simulation_debug import run_simulation_check
 
 
@@ -27,7 +28,7 @@ class RobotPositionSimulationDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
-        layout.addWidget(page._note(
+        layout.addWidget(make_note(
             "从仿真图像重新测量，再与末端真值对照。仿真结果用于检查算法，不能代替实机精度试验。"
         ))
         form = QFormLayout()
@@ -35,7 +36,7 @@ class RobotPositionSimulationDialog(QDialog):
         self.data_root = QLineEdit(str(page.service.root / "debug"))
         self.data_root.setProperty("robotInput", True)
         self.data_root.setAccessibleName("仿真数据目录")
-        self.browse_button = page._button("选择目录", self._browse)
+        self.browse_button = make_button("选择目录", self._browse)
         source_row.addWidget(self.data_root, 1)
         source_row.addWidget(self.browse_button)
         form.addRow("仿真数据目录", source_row)
@@ -81,10 +82,10 @@ class RobotPositionSimulationDialog(QDialog):
         self.report_path.setProperty("robotNote", True)
         layout.addWidget(self.report_path)
         actions = QHBoxLayout()
-        self.calibration_button = page._button("相机与手眼标定", self._open_calibration)
-        self.run_button = page._button("开始仿真核验", self._run, True)
+        self.calibration_button = make_button("相机与手眼标定", self._open_calibration)
+        self.run_button = make_button("开始仿真核验", self._run, True)
         self.run_button.setEnabled(False)
-        self.close_button = page._button("关闭", self.reject)
+        self.close_button = make_button("关闭", self.reject)
         actions.addWidget(self.calibration_button)
         actions.addStretch()
         actions.addWidget(self.run_button)
@@ -122,15 +123,7 @@ class RobotPositionSimulationDialog(QDialog):
             return
         dataset = Path(self.data_root.text().strip())
         try:
-            parameters = read_document(dataset / "parameters.json")
-            runs = parameters.get("runs", [])
-            parsed = {}
-            for run in runs:
-                batch_id = str(run["batch_id"])
-                parsed[batch_id] = dataset / run.get("record", f"{batch_id}/record.json")
-            parsed.update({path.parent.name: path for path in sorted(dataset.glob("B[0-9][0-9][0-9]/record.json"))})
-            if not parsed:
-                raise ValueError("目录缺少批次 record.json 或 runs 信息")
+            parsed = read_batch_records(dataset)
         except (OSError, ValueError, KeyError, TypeError) as error:
             self._source_changed()
             self.source_status.setText(f"无法读取仿真数据：{error}")

@@ -4,16 +4,11 @@ from copy import deepcopy
 
 import numpy as np
 import pytest
-from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QTableWidget
+from PyQt6.QtWidgets import QDialog, QFileDialog, QLabel, QTableWidget
 
 from app.dialogs.robot_position_parameters_dialog import RobotPositionParametersDialog
 from ui_helpers import ready_position_page, wait_for_page
 from core.services.position_monitoring_service import PositionMonitoringService, assess_metric, write_document
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture

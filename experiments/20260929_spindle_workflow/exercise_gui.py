@@ -529,7 +529,7 @@ class GuiExercise:
         self.stage("second_training", self.train)
         second = self.service.current_model
         self.check(second["version"] != first["version"] and self.service.thresholds_review_required, "New model did not require threshold review")
-        self.check("复核" in self.page.conclusion.text(), "Current GUI did not show new-model threshold review")
+        self.check("新模型阈值待复核" in self.page.status_lights["thresholds"].toolTip(), "Current GUI did not show new-model threshold review")
         self.check(self.service.state["results"][:len(before_retrain)] == before_retrain, "Retraining modified old history")
         self.check(labels == {key: run["label_history"] for key, run in self.service.runs.items()}, "Retraining modified human labels")
         used = set(second["training_run_ids"] + second["calibration_run_ids"])
@@ -537,15 +537,16 @@ class GuiExercise:
                                                            if run["captured_date"] == "2026-08-23"), "August verification leaked into training")
         self.stage("confirm_thresholds_for_new_model", lambda: self.thresholds(2, 4))
         self.stage("switch_run_uses_current_thresholds", lambda: self.choose(july[1]["run_id"]))
-        self.check("复核" not in self.page.conclusion.text() and not self.service.thresholds_review_required,
+        self.check(self.page.status_lights["thresholds"].property("state") == "ready" and not self.service.thresholds_review_required,
                    "Switching samples kept obsolete threshold-review status")
         self.stage("six_signal_channels", self.channels)
         score = self.page.result["score"]
-        for warning, fault, status, text in ((score * 2, score * 3, "normal", "阈值内"),
-                                              (score * .5, score * 2, "warning", "预警"),
-                                              (score * .25, score * .5, "fault", "故障")):
+        for warning, fault, status in ((score * 2, score * 3, "normal"),
+                                       (score * .5, score * 2, "warning"),
+                                       (score * .25, score * .5, "fault")):
             self.stage("threshold_branch_" + status, lambda warning=warning, fault=fault: self.thresholds(warning, fault))
-            self.check(self.page.result["assessment"]["status"] == status and text in self.page.conclusion.text(),
+            self.check(self.page.result["assessment"]["status"] == status
+                       and bool(self.page.result_values["network"].styleSheet()) == (status != "normal"),
                        "GUI threshold branch mismatch: " + status)
         self.stage("restore_demo_thresholds", lambda: self.thresholds(2, 4))
         self.stage("exact_history_double_click", lambda: self.history(original))

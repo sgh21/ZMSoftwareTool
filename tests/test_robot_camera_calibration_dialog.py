@@ -5,18 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtGui import QCloseEvent
-from PyQt6.QtWidgets import QApplication
 
 import app.dialogs.robot_camera_calibration_dialog as dialog_module
 from app.dialogs.robot_camera_calibration_dialog import RobotCameraCalibrationDialog
 from app.dialogs.robot_position_simulation_dialog import RobotPositionSimulationDialog
 from ui_helpers import ready_position_page
 from core.services.position_monitoring_service import PositionMonitoringService, write_document
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture

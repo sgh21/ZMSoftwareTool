@@ -44,7 +44,7 @@ SoftwareTools_PyQt/
 │   ├── pages/               # 机器人定位页、主轴回转页及各自小弹窗
 │   └── dialogs/             # 参数设置、选择和确认弹窗
 ├── resources/               # 随软件发布的静态资源
-│   ├── icons/               # 按 branding/navigation/precision/window/common/robot 分类
+│   ├── icons/               # 按 branding/navigation/precision/window/common 分类
 │   └── styles/              # QSS 样式与主题
 ├── config/                  # display.json：窗口尺寸、标题和状态颜色
 ├── data/                    # 输入数据与计算输出
@@ -53,7 +53,7 @@ SoftwareTools_PyQt/
 │   └── reports/             # 导出的报告和图表
 ├── storage/                 # 本地持久化内容
 │   └── position_monitoring/ # 参数、图像、基准、观测、每日评估及日志
-├── diagnostics/             # 独立相机/手眼标定调试
+├── debug/                   # 标定、使用数据重置和 UR10 仿真工具
 ├── docs/                    # 需求、页面设计、接口与使用说明
 ├── tests/                   # 算法、服务和界面正式测试
 └── experiments/             # 保留的流程复现、独立核验和数据打包工具
@@ -70,7 +70,7 @@ SoftwareTools_PyQt/
 - **界面层**：负责展示、用户输入和任务状态；耗时计算接入后台任务，避免阻塞界面。
 - **配置与资源**：业务参数和路径放在 `config/`，图标、样式和 Designer 文件放在 `resources/`。
 
-机器人定位的纯算法位于 `core/algorithms/position_monitoring.py` 和 `board_pose.py`；服务入口为 `core/services/position_monitoring_service.py`；页面调用服务，棋盘/ChArUco PnP 与评估在后台执行。仿真核验窗口位于 `app/dialogs/robot_position_simulation_dialog.py`，其中“相机与手眼标定”使用 `diagnostics/camera_calibration.py` 处理配对图像和机器人位姿。完整流程的复现与独立核验脚本保存在 `experiments/20260928_position_end_to_end/`。
+机器人定位的纯算法位于 `core/algorithms/position_monitoring.py` 和 `board_pose.py`；服务入口为 `core/services/position_monitoring_service.py`；页面调用服务，棋盘/ChArUco PnP 与评估在后台执行。仿真核验窗口位于 `app/dialogs/robot_position_simulation_dialog.py`，其中“相机与手眼标定”使用 `debug/diagnostics/camera_calibration.py` 处理配对图像和机器人位姿。完整流程的复现与独立核验脚本保存在 `experiments/20260928_position_end_to_end/`。
 
 机器人默认参数、基准、观测、阈值、加工点位配置和评估历史保存在 `storage/position_monitoring/`。参数采用 `parameters/current.json` 和一份 `previous.json` 备份；支持图片、批次目录及已解算观测文件，导入图片后自动保存六维观测结果。每点不同方向各一次采用多方向工程散布，旧同方向重复协议继续兼容，详见 [使用说明](docs/robot_position_monitoring.md)。点位预测、相机在线采集及设备运动接口尚未接入；主轴数据通过每日ZIP导入，界面不控制机器人或主轴运动。
 
@@ -122,7 +122,7 @@ git push ZMS codex/robot-position-monitoring
 
 ```powershell
 python -B -m pytest -q -p no:cacheprovider tests
-python -B -m ruff check --no-cache main.py app core diagnostics tests experiments
+python -B -m ruff check --no-cache main.py app core debug tests experiments
 git diff --check
 ```
 

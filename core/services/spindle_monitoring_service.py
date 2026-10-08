@@ -111,10 +111,10 @@ class SpindleMonitoringService:
         return [run for run in self.list_runs() if run["training_eligible"]
                 and run["manual_label"] == "healthy"]
 
-    def _read_run(self, record):
+    def _read_run(self, record, root=None):
+        root = self.root if root is None else root
         telemetry = record.get("telemetry_file")
-        data = algorithm.read_run(self.root / record["data_file"],
-                                  self.root / telemetry if telemetry else None)
+        data = algorithm.read_run(root / record["data_file"], root / telemetry if telemetry else None)
         if data["target_speed_rpm"] != record["speed_rpm"]:
             raise ValueError("H5 转速与数据包声明不一致")
         data["run_id"] = record["run_id"]
@@ -379,10 +379,7 @@ class SpindleMonitoringService:
                                 destination.parent.mkdir(parents=True, exist_ok=True)
                                 with archive.open(member) as source, destination.open("wb") as output:
                                     shutil.copyfileobj(source, output)
-                            telemetry = entry.get("telemetry_file")
-                            data = algorithm.read_run(staging / entry["data_file"], staging / telemetry if telemetry else None)
-                            if data["target_speed_rpm"] != entry["speed_rpm"]:
-                                raise ValueError("H5 转速与数据包声明不一致")
+                            self._read_run(entry, staging)
                         shutil.move(str(staging), str(self.root / package_folder))
                     now = _now()
                     for entry in new_runs:
@@ -458,11 +455,10 @@ class SpindleMonitoringService:
         if not runs:
             return []
         previous = deepcopy(runs)
-        now = _now()
+        update = {"manual_label": label, "label_note": str(note),
+                  "training_eligible": bool(include_in_training and label == "healthy"),
+                  "label_updated_at": _now()}
         for run in runs:
-            eligible = bool(include_in_training and label == "healthy")
-            update = {"manual_label": label, "label_note": str(note),
-                      "training_eligible": eligible, "label_updated_at": now}
             run.update(update)
             run["label_history"].append(deepcopy(update))
         try:

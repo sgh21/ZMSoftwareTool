@@ -16,10 +16,5 @@
     "seed": 20260929,
     "device": "auto",
     "validation_fraction": 0.2
-  },
-  "score": {
-    "metric": "normalized_mse_acc1_acc2",
-    "aggregation": "p95",
-    "reference": "validation_median"
   }
 }

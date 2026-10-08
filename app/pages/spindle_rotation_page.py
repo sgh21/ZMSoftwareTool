@@ -5,36 +5,19 @@ from concurrent.futures import ThreadPoolExecutor
 from math import ceil, floor, isfinite
 import numpy as np
 
-from PyQt6.QtCore import QObject, QDateTime, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QDateTime, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QActionGroup, QColor, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+    QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QSpinBox,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
-from app.resources import DISPLAY, fit_dialog
+from app.resources import DISPLAY, fit_dialog, make_button, make_note, set_status_light
+from app.tasks import ServiceTask
 from core.services.spindle_monitoring_service import SpindleMonitoringService, assess_score
-
-
-class TaskSignals(QObject):
-    completed = pyqtSignal(object)
-    failed = pyqtSignal(str)
-    progress = pyqtSignal(int, str)
-
-
-class SpindleTask:
-    def __init__(self, operation):
-        self.operation = operation
-        self.signals = TaskSignals()
-
-    def run(self):
-        try:
-            self.signals.completed.emit(self.operation(self.signals.progress.emit))
-        except Exception as error:
-            self.signals.failed.emit(str(error))
 
 
 LABELS = {"unconfirmed": "未判定", "healthy": "正常", "abnormal": "异常"}
@@ -98,19 +81,8 @@ class SpindleRotationPage(QScrollArea):
         self.columns.addWidget(self._settings_view(), 7)
         self._refresh()
 
-    @staticmethod
-    def _note(text):
-        label = QLabel(text)
-        label.setProperty("robotNote", True)
-        label.setWordWrap(True)
-        return label
-
     def _button(self, text, callback, primary=False, track=True):
-        button = QPushButton(text)
-        button.setProperty("robotAction", True)
-        button.setProperty("primary", primary)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.clicked.connect(callback)
+        button = make_button(text, callback, primary)
         if track:
             self.actions.append(button)
         return button
@@ -145,14 +117,11 @@ class SpindleRotationPage(QScrollArea):
         self.training_check = QCheckBox("纳入下次训练")
         self.label_note = QLineEdit()
         self.label_note.setProperty("robotInput", True)
-        self.label_note.setPlaceholderText("判定备注（可选）")
+        self.label_note.setPlaceholderText("填写判定原因或补充说明（选填）")
         self.label_button = self._button("保存人工判定", self._save_label, True)
-        self.result_detail = self._note("")
-        self.initial_status = self._note("")
-        self.conclusion = self._note("尚未评估")
         for widget in (self.run_select, self.model_select, self.signal_select,
                        self.label_select, self.training_check, self.label_note,
-                       self.label_button, self.result_detail, self.initial_status, self.conclusion):
+                       self.label_button):
             widget.setParent(self.detail_holder)
 
     def _results_view(self):
@@ -192,7 +161,7 @@ class SpindleRotationPage(QScrollArea):
             value.setProperty("spindleValue", True)
             value.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.result_values[key] = value
-            note = self._note(hint)
+            note = make_note(hint)
             note.setAlignment(Qt.AlignmentFlag.AlignCenter)
             for widget in (label, value, note):
                 content.addWidget(widget)
@@ -329,7 +298,7 @@ class SpindleRotationPage(QScrollArea):
         self.progress.setValue(0)
         self.progress.setAccessibleName("当前任务进度")
         log_layout.addWidget(self.progress)
-        self.task_progress_note = self._note("尚未开始处理")
+        self.task_progress_note = make_note("尚未开始处理")
         log_layout.addWidget(self.task_progress_note)
         body.addWidget(log_area, 1)
         actions = QFrame()
@@ -358,7 +327,7 @@ class SpindleRotationPage(QScrollArea):
         form.addRow("速度采样率", QLabel(f"{config['preprocessing']['sample_rate_hz']:g} Hz"))
         form.addRow("速度单位", QLabel(config["preprocessing"]["unit"]))
         body.addLayout(form)
-        body.addWidget(self._note("主轴动作由原设备软件控制；此页导入已采集的数据包。工况与处理参数随数据和评价保留。"))
+        body.addWidget(make_note("主轴动作由原设备软件控制；此页导入已采集的数据包。工况与处理参数随数据和评价保留。"))
         body.addWidget(self._button("关闭", dialog.reject, track=False), 0, Qt.AlignmentFlag.AlignRight)
         fit_dialog(dialog, 570)
         dialog.exec()
@@ -462,7 +431,7 @@ class SpindleRotationPage(QScrollArea):
         package_select.setObjectName("spindle_review_package")
         package_select.setPlaceholderText("暂无可判定的样本")
         package_select.setToolTip("选择尚未参与建模的 ZIP / 采集。")
-        form.addRow("", package_select)
+        form.addRow("选择样本", package_select)
         original_button_text = self.label_button.text()
         trained = self.service.trained_run_ids()
         seen = set()
@@ -482,6 +451,7 @@ class SpindleRotationPage(QScrollArea):
             index = package_select.count() - 1
             scope = f"整批 {len(group)} 条样本" if run["purpose"] == "initial" else "本次采集（1 条）"
             package_select.setItemData(index, f"{source}\n{scope}\n导入：{_local_time(run['imported_at'])}", Qt.ItemDataRole.ToolTipRole)
+        package_select.setCurrentIndex(0)
 
         def select_package():
             self.review_run_ids = package_select.currentData() or []
@@ -505,11 +475,11 @@ class SpindleRotationPage(QScrollArea):
 
         package_select.currentIndexChanged.connect(select_package)
         select_package()
-        form.addRow("判定", self.label_select)
-        form.addRow("训练用途", self.training_check)
-        form.addRow("备注", self.label_note)
+        form.addRow("判定结果", self.label_select)
+        form.addRow("参与训练", self.training_check)
+        form.addRow("判定备注", self.label_note)
         body.addLayout(form)
-        body.addWidget(self._note("只有判定正常且勾选入训的数据才能训练。批量导入的数据统一按整批判定；未判定和异常不入训。"))
+        body.addWidget(make_note("仅判定为正常且勾选“纳入下次训练”的样本可参与训练；批量导入按整批判定。"))
         row = QHBoxLayout()
         row.addStretch()
         row.addWidget(self.label_button)
@@ -572,22 +542,13 @@ class SpindleRotationPage(QScrollArea):
             self.model_select.setItemData(self.model_select.count() - 1, item["version"], Qt.ItemDataRole.ToolTipRole)
         self.model_select.setCurrentIndex(max(0, self.model_select.findData(model_version)))
         self.model_select.blockSignals(False)
-        self.initial_status.setText("批量数据整批判定为正常后才能训练" if not model else
-                                   f"当前模型 → {current_name}\n新增数据请日常导入；仅正常数据可入训")
         self.train_button.setText("重新训练" if model else "训练网络")
         self._selection_changed()
         self._set_busy(self.task is not None)
 
     def _set_status_light(self, key, state, details):
-        light = self.status_lights[key]
-        if light.property("state") != state:
-            light.setProperty("state", state)
-            light.style().unpolish(light)
-            light.style().polish(light)
-            light.update()
         status = {"missing": "未就绪", "partial": "待处理", "ready": "已就绪"}[state]
-        light.setToolTip(f"{status}\n{details}")
-        light.setAccessibleDescription(f"{status}；{details}")
+        set_status_light(self.status_lights[key], state, details, status)
 
     def _refresh_status_lights(self):
         count = len(self.service.runs)
@@ -666,6 +627,7 @@ class SpindleRotationPage(QScrollArea):
         analysis_note += (f"\n正常参考均值：{analysis_reference:.5g} mm/s。"
                           if analysis_reference is not None else "\n尚无正常参考，请先确认正常样本并建立模型。")
         self.result_values["analysis"].setToolTip(analysis_note)
+        result_detail = ""
         if result:
             self.source_badge.setText("历史回放" if result["source_type"] == "historical_replay" else "检测数据")
             assessment = result["assessment"]
@@ -675,9 +637,6 @@ class SpindleRotationPage(QScrollArea):
                 assessment = assess_score(result["score"], thresholds)
                 if result["score"] is not None and self.service.thresholds_review_required:
                     assessment = {"status": "review_required", "message": "新模型阈值待复核"}
-            self.conclusion.setText(assessment["message"])
-            color = "#ba3030" if assessment["status"] == "fault" else "#956300" if assessment["status"] == "warning" else "#263c52"
-            self.conclusion.setStyleSheet(f"color:{color};")
             if assessment["status"] in ("warning", "fault"):
                 for key in ("analysis", "network"):
                     self.result_values[key].setStyleSheet(f"color:{DISPLAY['colors']['error']};")
@@ -691,22 +650,19 @@ class SpindleRotationPage(QScrollArea):
             warning = "未设置" if thresholds["warning"] is None else f"{thresholds['warning']:g} 倍"
             fault = "未设置" if thresholds["fault"] is None else f"{thresholds['fault']:g} 倍"
             threshold_title = "当前阈值" if current_thresholds else "当时阈值"
-            self.result_detail.setText(
+            result_detail = (
                 f"{run['speed_rpm']:g} rpm · {operation} · {remounted} · {pressure_text}\n"
                 f"采集：{_local_time(result['captured_at'])} · {role}\n"
                 f"评估：{_local_time(result['evaluated_at'])} · 模型：{self._model_name(result['model_version'])}\n"
                 f"{result['window_count']} 个 1 秒窗口 · {threshold_title}：预警 {warning} / 故障 {fault}"
             )
         else:
-            self.conclusion.setStyleSheet("")
             self.source_badge.setText("暂无数据" if not self.service.runs else "暂无评价")
-            self.conclusion.setText("尚未评估" if not self.service.current_model else "所选数据暂无对应评价")
-            self.result_detail.clear()
         run = self.service.runs.get(self.run_select.currentData())
         if run:
             short_name = run["run_name"].split("rpm_", 1)[-1]
             self.current_run_button.setText(f"{_local_time(run['captured_at'])} · {short_name}")
-            self.current_run_button.setToolTip(self.result_detail.text() or self.run_select.currentText())
+            self.current_run_button.setToolTip(result_detail or self.run_select.currentText())
         else:
             self.current_run_button.setText("选择采集记录")
             self.current_run_button.setToolTip("在样本与模型中选择采集批次与模型版本")
@@ -728,9 +684,7 @@ class SpindleRotationPage(QScrollArea):
                 plot.set_data([], "", "")
             return
         r = self.result
-        channel = self.signal_select.currentIndex()
         if channel < 3:
-            self.vibration_channel = channel
             series = [(r["waveform"]["time_s"], r["waveform"]["values"][channel], "本次")]
             if r["reconstruction"]:
                 series.append((r["reconstruction"]["time_s"], r["reconstruction"]["reconstructed"][channel], "重建"))
@@ -776,7 +730,7 @@ class SpindleRotationPage(QScrollArea):
             self.plots["distribution"].set_data([], "", "尚未建立模型")
 
     def _load_order_energy(self, run_id):
-        task = SpindleTask(lambda progress: (run_id, self.service.order_band_energy(run_id)))
+        task = ServiceTask(lambda progress: (run_id, self.service.order_band_energy(run_id)))
         self.energy_task = task
         self.energy_run_id = run_id
         task.signals.completed.connect(self._order_energy_done)
@@ -817,7 +771,7 @@ class SpindleRotationPage(QScrollArea):
         if self.task is not None:
             return
         self._log(title)
-        task = SpindleTask(operation)
+        task = ServiceTask(operation)
         self.task = task
         self.task_completed = completed
         self.task_status_key = status_key
@@ -910,7 +864,7 @@ class SpindleRotationPage(QScrollArea):
         epochs.setRange(1, 1000)
         epochs.setValue(self.service.config["training"]["epochs"])
         form.addRow("训练轮数", epochs)
-        form.addRow(self._note(f"使用 {len(self.service.training_candidates())} 次可建模采集；训练与校准按采集隔离。\n每次随机初始化，完成后自动重算历史。"))
+        form.addRow(make_note(f"使用 {len(self.service.training_candidates())} 次可建模采集；训练与校准按采集隔离。\n每次随机初始化，完成后自动重算历史。"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -937,7 +891,7 @@ class SpindleRotationPage(QScrollArea):
             field.setPlaceholderText("留空表示未设置")
             form.addRow(title, field)
             fields[key] = field
-        form.addRow(self._note("评分为各1秒窗口误差倍率的P95。倍率参照模型的健康校准数据；故障阈值须高于预警阈值。"))
+        form.addRow(make_note("评分为各1秒窗口误差倍率的P95。倍率参照模型的健康校准数据；故障阈值须高于预警阈值。"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         def save():
             try:
@@ -990,7 +944,7 @@ class SpindleRotationPage(QScrollArea):
             dialog.accept()
         table.cellActivated.connect(show)
         layout.addWidget(table)
-        layout.addWidget(self._note("双击或回车查看当时结果。人工标签保持独立；重算不覆盖旧评价。"))
+        layout.addWidget(make_note("双击或回车查看当时结果。人工标签保持独立；重算不覆盖旧评价。"))
         layout.addWidget(self._button("关闭", dialog.reject, track=False), 0, Qt.AlignmentFlag.AlignRight)
         fit_dialog(dialog, 1100, min(560, 150 + 32 * table.rowCount()))
         dialog.exec()

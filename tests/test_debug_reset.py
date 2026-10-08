@@ -9,7 +9,7 @@ from time import monotonic
 import numpy as np
 import pytest
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QDialog
+from PyQt6.QtWidgets import QDialog
 
 import app.pages.robot_position_page as robot_page
 import app.pages.spindle_rotation_page as spindle_page
@@ -95,11 +95,6 @@ def test_unreadable_state_does_not_partially_clear_other_service(root):
     with pytest.raises(ValueError):
         reset_usage_data(root)
     assert read_json(root / "storage/position_monitoring/state.json") == {"keep": True}
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture
