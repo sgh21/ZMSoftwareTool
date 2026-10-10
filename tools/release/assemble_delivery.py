@@ -112,6 +112,7 @@ def assemble_windows(root, output, report_directory=None):
 
 构建记录：{build['platform']} / {build['architecture']}，提交 `{build['source_commit']}`。
 构建时工作区另有修改：{build.get('working_tree_modified', '未记录')}。精确依赖见“依赖版本”。
+{build.get('working_tree_note', '')}
 源码测试：{source_test_summary(verification / 'source-tests.xml')}。
 
 最终程序验证状态：{report['status']}。

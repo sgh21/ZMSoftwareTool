@@ -147,6 +147,8 @@ class WindowsVerification:
         return self.app.window(handle=native.handle)
 
     def screenshot(self, name):
+        # 等待 Windows 关闭弹窗的淡出动画，避免把已关闭窗口的残影写入验收截图。
+        time.sleep(0.5)
         self.window.capture_as_image().save(self.output / f"{name}.png")
         (self.output / f"{name}_ui.json").write_text(json.dumps([
             {"text": item.window_text(), "type": item.element_info.control_type,

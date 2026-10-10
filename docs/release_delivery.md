@@ -11,6 +11,12 @@
 
 本机没有麒麟、WSL Linux 发行版或干净 Windows 虚拟机。Linux 构建通过仓库 GitHub Actions 执行。每份交付中的测试报告以实际文件为依据，区分源码测试、最终程序检查与未执行项目。
 
+2026-10-10 最终构建的业务源码为 `b23eef4`：Windows 源码测试 661 项通过、1 项 CUDA 专用测试跳过，最终 EXE 的 8 组检查全部通过，包括三页导入评估、机器人 JSON/PNG 与导出、CPU 一轮训练保存推理、依赖加载和重启恢复。Linux 424 项源码测试通过，最终程序在 Xvfb 下显示主窗口并初始化独立用户数据；包内 355 个 ELF 的最高要求为 GLIBC 2.28，未发现缺失依赖。Linux 完整业务与麒麟实机检查仍未执行。[Linux 构建证据](https://github.com/sgh21/ZMSoftwareTool/actions/runs/38046077538)
+
+两平台软件均通过发布内容审计，测试数据独立打包。构建时 Windows 工作区仅有外部验收脚本的截图等待修改，未进入软件；记录中保留 `working_tree_modified=true` 及具体说明。
+
+Windows 交付归档已解压到带中文和空格的新目录，逐文件核对软件内容与已验收目录一致；从其他工作目录、空白数据目录启动，三页状态、资源及依赖加载正常，退出码为 0。额外的启动报告和截图一并收入交付证据。
+
 PyInstaller 必须分别在 Windows / Linux 构建；Linux 的 glibc 不随程序打包，构建使用较旧运行库环境，实际兼容性仍须现场核对。依据：[PyInstaller 平台说明](https://www.pyinstaller.org/en/stable/)及[Linux 兼容限制](https://pyinstaller.org/en/stable/usage.html)。麒麟公开桌面 V10 资料列出的 glibc 为 2.31，实际安装版本以 `ldd --version` 为准：[麒麟产品资料](https://kylinos.cn/upload/product/20230509/0dff0c074eee307520f38eb792a2d168.pdf)。
 
 ## 软件与数据
