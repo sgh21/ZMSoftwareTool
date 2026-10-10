@@ -22,7 +22,7 @@ PY
     cat /etc/os-release
     getconf GNU_LIBC_VERSION
     "$python_bin" --version
-    git rev-parse HEAD
+    git -c safe.directory="$project_root" rev-parse HEAD
     printf 'Target: Kylin V10 Desktop x86_64; target-machine validation is NOT performed here.\n'
 } > "$report_dir/build-environment.txt"
 if command -v rpm >/dev/null; then
