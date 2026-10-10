@@ -57,4 +57,8 @@ python -B -m pytest -q -p no:cacheprovider tests/test_release_test_data.py
 
 该名单按完整模块名匹配，不允许任何实际 `tests/` 子目录、未列出的 `torch.testing._internal` 模块或 pytest；正式回归验证这些边界。最终软件行为仍由重建后的 EXE 验证，源码导入试验不替代最终产物验收。
 
+最终 EXE 的 CPU 训练继续发现 `torch._inductor.test_operators` 被误删：PyTorch 2.9 的优化器经 `torch._dynamo` 导入 `trace_rules`，后者无条件导入此模块。文件只注册 `realize` 算子及其自动微分实现，没有测试用例。因此将该完整模块名及同名 `.py` 加入运行允许名单，并移除 spec 的单项排除；相邻 `test_case`、其他 `test_*` 和实际测试包仍排除。两平台必须重建，旧包启动通过不能覆盖此训练问题。
+
+随后使用 Python 3.12.13 与构建用 CPU Torch 2.9.0，在首次导入 SciPy/Torch 前替换磁盘模块查找器，按完整审计规则和 spec 排除名单模拟模块缺失。SciPy 频谱计算及 AdamW 初始化、前向、反向与参数更新通过，`pandas`、`sklearn` 和 `torch.testing._internal.distributed` 保持不可用；未再发现必需模块。此试验通过标准输入运行，无临时脚本，记录在 `dist/verification/dependency-pruning-check.json`；仍需最终程序实测训练。
+
 Linux 实际 ELF 检查还发现 PyTorch wheel 自带 `torch/bin/HashStoreTest`、`FileStoreTest`、`TCPStoreTest`、`protoc*` 和 `torch/lib/libtorchbind_test.so`、`libjitbackend_test.so`。构建 hook 在分析二进制依赖前按这些确切名称剔除，spec 与最终审计共用同一规则。`torch_shm_manager`、正常 CPU/Python 运行库及 NumPy 的 `_multiarray_tests` 扩展不按名称子串误删；后者可能被运行帮助模块导入。

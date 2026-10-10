@@ -19,6 +19,7 @@ RUNTIME_MODULES = {
     "scipy._lib.array_api_extra.testing",
     "torch.testing", "torch.testing._utils", "torch.testing._comparison", "torch.testing._creation",
     "torch.testing._internal", "torch.testing._internal.logging_tensor",
+    "torch._inductor.test_operators",
 }
 
 

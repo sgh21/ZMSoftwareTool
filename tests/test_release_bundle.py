@@ -43,7 +43,8 @@ def test_runtime_debug_and_test_compatibility_helpers_are_kept(tmp_path):
                "torch.distributed.debug", "numpy._pytesttester", "scipy._lib._testutils", *sorted(RUNTIME_MODULES)]
     bundle = make_bundle(tmp_path, modules)
     for name in ("torch/testing/__init__.py", "torch/testing/_internal/__init__.py",
-                 "torch/testing/_internal/logging_tensor.py", "torch/testing/_comparison.py"):
+                 "torch/testing/_internal/logging_tensor.py", "torch/testing/_comparison.py",
+                 "torch/_inductor/test_operators.py"):
         source = bundle / "_internal" / name
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("runtime source fixture", encoding="utf-8")
@@ -54,6 +55,8 @@ def test_runtime_debug_and_test_compatibility_helpers_are_kept(tmp_path):
 
 @pytest.mark.parametrize("name", ["numpy.testing.tests.test_utils", "numpy.testing._private.new_helper",
                                   "torch.testing._internal.common_utils", "torch.testing._internal.opinfo",
+                                  "torch._inductor.test_case", "torch._inductor.test_other_operators",
+                                  "torch._dynamo.test_case",
                                   "scipy._lib.array_api_extra.testing.tests", "jinja2.tests.test_extra"])
 def test_helper_allowlist_does_not_include_suites_or_unlisted_internal_modules(name):
     assert forbidden_module(name)

@@ -121,6 +121,15 @@ class WindowsVerification:
         wait_until(lambda: any(text in value for value in self.texts()),
                    f"界面未出现 {text}", timeout)
 
+    def wait_task(self, condition, description, timeout=90):
+        def ready():
+            failure = next((text for text in self.texts() if text.startswith("处理失败：")), None)
+            if failure:
+                raise RuntimeError(failure)
+            return condition()
+
+        wait_until(ready, description, timeout)
+
     def file_dialog(self, title, path):
         # Qt 的原生文件对话框在 UIA 中不可见，按本进程的 Win32 控件定位。
         dialog = self.native.window(title=title, class_name="#32770")
@@ -278,7 +287,7 @@ class WindowsVerification:
         for index, relative in enumerate(spec["packages"], 1):
             self.click("日常导入")
             self.file_dialog("导入一天检测数据", self.data / relative)
-            wait_until(lambda: len(self.spindle_results()) >= index, "主轴导入未保存评价")
+            self.wait_task(lambda: len(self.spindle_results()) >= index, "主轴导入未保存评价")
             wait_until(lambda: self.button("日常导入").is_enabled(), "主轴导入未完成")
         results = sorted(self.spindle_results(), key=lambda row: row["run_name"])
         for row, rms in zip(results, spec["expected"]["rms_acc1_mm_s"]):
@@ -308,7 +317,7 @@ class WindowsVerification:
         assert epochs.iface_range_value.CurrentValue == 1
         self.click("开始训练", train_dialog)
         model_folder = self.user_data / "storage/spindle_monitoring/models"
-        wait_until(lambda: bool(list(model_folder.rglob("*.pt"))), "未保存训练模型", timeout=300)
+        self.wait_task(lambda: bool(list(model_folder.rglob("*.pt"))), "未保存训练模型", timeout=300)
         wait_until(lambda: self.button("日常导入").is_enabled(), "训练后历史重算未完成", timeout=300)
         results = [row for row in self.spindle_results() if row.get("model_version")]
         assert results and all(row.get("score") is not None for row in results)
@@ -421,7 +430,7 @@ def main():
             verification.check("窝深CSV/Excel导入、评估、边界与缺测", verification.feed)
             verification.check("Python运行库随包加载、无Conda DLL依赖", verification.dependencies)
             verification.check("正常关闭、重启与已存数据恢复", lambda: verification.restart(Path(cwd)))
-        except Exception:
+        except (Exception, KeyboardInterrupt):
             verification.report["fatal_error"] = traceback.format_exc()
         finally:
             verification.stop()
@@ -429,7 +438,7 @@ def main():
                 verification.report["bundle_files"] == bundle_files(exe.parent)
             )
             verification.report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
-            passed = (not verification.report.get("fatal_error") and verification.report["checks"]
+            passed = (not verification.report.get("fatal_error") and len(verification.report["checks"]) == 8
                       and all(row["status"] == "passed" for row in verification.report["checks"])
                       and not verification.report.get("shutdown_forced")
                       and verification.report.get("shutdown_exit_code") == 0

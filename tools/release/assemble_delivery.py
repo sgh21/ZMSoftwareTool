@@ -133,6 +133,7 @@ def assemble_windows(root, output, report_directory=None):
 
 目标系统：Windows 11，x86_64（Intel/AMD 64位）。当前实际验证环境：{report['platform']} / {report['machine']}。
 这是便携目录版，无需安装 Python、Conda 或开发工具；需要图形桌面和可用中文字体。
+本包未做代码签名；首次启动若遇系统信誉提示，按单位的软件安装策略处理。
 完整解压后双击 SoftwareTools/SoftwareTools.exe，不要单独移动 EXE 或删除 _internal。
 仅当系统明确提示缺少MSVC运行库时，从微软官方安装适用于x64的Visual C++ v14 Redistributable；
 不要从第三方DLL站点下载文件覆盖软件依赖。[微软官方下载说明](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
@@ -142,7 +143,8 @@ def assemble_windows(root, output, report_directory=None):
 测试数据.zip 独立放置，按内附使用说明导入；不要把样例或验收模型混入生产记录。
 当前窝深导入历史只保留本次会话，理论和报警设置跨启动保存。
 本包在现有Windows主机隔离环境验证，未完成干净虚拟机/目标机验收，详见“测试报告.md”。
-软件通过文件导入数据；机器人运动、主轴控制和实际拍照由设备集控负责。
+已实现：机器人观测/基准/精度评估，主轴信号分析与CPU模型训练推理，窝深CSV/XLSX统计和报警。
+未接入：相机在线采集、机器人/主轴控制、加工点位预测接口；设备动作仍由设备集控负责。
 
 可复现构建入口：仓库 tools/release/build_windows.ps1；交付组装：tools/release/assemble_delivery.py。
 """
@@ -212,6 +214,8 @@ tar.gz 保留Linux执行权限和符号链接，勿在Windows中解成文件再�
 如显示 not found，按麒麟当前软件源安装对应系统库后再验收，不能据此直接宣称支持所有V10版本。
 
 测试数据.zip 独立解压，按内附说明导入；窝深导入历史只保留本次会话，设置跨启动保存。
+软件已实现机器人观测评估、主轴分析与CPU训练推理、窝深导入统计；这些业务尚未在麒麟实机验收。
+相机在线采集、机器人/主轴控制和加工点位预测接口尚未接入，设备动作仍由设备集控负责。
 尚未验证项目详见“测试报告.md”；复现构建入口为仓库 tools/release/build_kylin.sh，目标机步骤见“验收步骤.txt”。
 """
     return write_delivery(output / "麒麟V10版.zip", files, {

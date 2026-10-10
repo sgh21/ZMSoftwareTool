@@ -12,7 +12,7 @@ EXCLUDES = [
     "pywinauto", "comtypes", "IPython", "notebook", "jupyter", "matplotlib", "pylab", "mpl_toolkits", "py",
     "pandas", "sklearn", "tkinter", "PyQt5", "PySide2", "PySide6",
     "torch.utils.benchmark", "torch.utils.tensorboard",
-    "torch._dynamo.test_case", "torch._inductor.test_case", "torch._inductor.test_operators",
+    "torch._dynamo.test_case", "torch._inductor.test_case",
     "numpy.tests", "scipy.tests", "h5py.tests", "sympy.testing",
 ]
 datas = []
