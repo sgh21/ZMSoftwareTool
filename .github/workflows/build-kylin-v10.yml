@@ -32,6 +32,7 @@ jobs:
       LD_LIBRARY_PATH: /opt/softwaretools-python/lib
       PYTHONDONTWRITEBYTECODE: '1'
       QT_QPA_PLATFORM: offscreen
+      SHARED_PYTHON_CACHE_KEY: manylinux_2_28-2026.10.10-1-x86_64-cpython-3.12.15-shared-system-openssl-v1
     steps:
       - uses: actions/checkout@v4
       - name: Install Qt X11 and external startup-check dependencies
@@ -47,9 +48,27 @@ jobs:
             xorg-x11-server-Xvfb xorg-x11-utils xorg-x11-xauth \
             bzip2-devel libffi-devel xz-devel zlib-devel openssl-devel \
             readline-devel sqlite-devel ncurses-devel libuuid-devel
+      - name: Restore shared CPython build
+        id: shared-python-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/softwaretools-python
+          key: ${{ env.SHARED_PYTHON_CACHE_KEY }}
       - name: Build shared CPython required by PyInstaller
+        if: steps.shared-python-cache.outputs.cache-hit != 'true'
         shell: bash
         run: bash tools/release/build_shared_python.sh
+      - name: Cache shared CPython before application checks
+        if: steps.shared-python-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/softwaretools-python
+          key: ${{ env.SHARED_PYTHON_CACHE_KEY }}
+      - name: Record shared CPython build configuration
+        shell: bash
+        run: |
+          mkdir -p dist/linux-build-report
+          cp /opt/softwaretools-python/build-configuration.txt dist/linux-build-report/cpython-build-configuration.txt
       - name: Build and check actual Linux executable
         shell: bash
         run: bash tools/release/build_kylin.sh

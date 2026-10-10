@@ -8,18 +8,24 @@ from PyInstaller.utils.hooks import copy_metadata
 ROOT = Path(SPECPATH).resolve().parents[1]
 EXCLUDES = [
     "tests", "debug", "experiments", "diagnostics", "tools", "pytest", "_pytest",
-    "pywinauto", "comtypes", "IPython", "notebook", "jupyter", "matplotlib",
+    "pywinauto", "comtypes", "IPython", "notebook", "jupyter", "matplotlib", "pylab", "mpl_toolkits", "py",
     "pandas", "sklearn", "tkinter", "PyQt5", "PySide2", "PySide6",
     "torch.testing", "torch.utils.benchmark", "torch.utils.tensorboard",
     "torch._dynamo.test_case", "torch._inductor.test_case", "torch._inductor.test_operators",
     "numpy.tests", "scipy.tests", "h5py.tests", "sympy.testing",
 ]
 datas = []
-for folder, extensions in (("config", {".json"}), ("resources", {".json", ".qss", ".svg", ".png", ".ico"})):
+for folder, extensions in (("config", {".json"}), ("resources", {".json", ".qss", ".svg", ".png", ".ico", ".txt"})):
     for path in sorted((ROOT / folder).rglob("*")):
         if path.is_file() and path.suffix.lower() in extensions and "examples" not in path.parts:
             datas.append((str(path), str(path.parent.relative_to(ROOT))))
-for package in ("PyQt6", "numpy", "scipy", "opencv-python", "opencv-python-headless", "h5py", "torch", "openpyxl"):
+for package in (
+    "PyQt6", "PyQt6-Qt6", "PyQt6-sip", "numpy", "scipy", "opencv-python", "opencv-python-headless",
+    "PyYAML", "h5py", "torch", "openpyxl", "et_xmlfile", "filelock", "fsspec", "Jinja2", "MarkupSafe",
+    "networkx", "sympy", "mpmath", "typing_extensions", "setuptools", "packaging", "pillow", "attrs",
+    "certifi", "charset-normalizer", "idna", "lxml", "markdown-it-py", "mdurl", "psutil", "Pygments",
+    "pywin32", "requests", "rich", "threadpoolctl", "urllib3", "wheel", "colorama",
+):
     try:
         datas += copy_metadata(package)
     except PackageNotFoundError:

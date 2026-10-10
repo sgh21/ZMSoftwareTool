@@ -7,7 +7,7 @@ from pathlib import Path
 DEVELOPMENT_ROOTS = {
     "tests", "test", "debug", "experiments", "diagnostics", "tools", "pytest", "_pytest",
     "pywinauto", "comtypes", "notebook", "ipython", "jupyter", "jupyter_client", "jupyter_core",
-    "ipykernel", "pyinstaller",
+    "ipykernel", "pyinstaller", "py", "pylab", "mpl_toolkits",
 }
 CACHE_PARTS = {".git", ".vscode", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 TEST_PARTS = {"tests", "test", "testing"}

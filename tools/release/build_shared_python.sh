@@ -20,6 +20,7 @@ printf 'Source: %s\nConfigure: --prefix=%s --enable-shared --with-openssl=/usr -
     2>&1 | tee "$report_dir/cpython-configure.log"
 make -j"$(nproc)" 2>&1 | tee "$report_dir/cpython-compile.log"
 LD_LIBRARY_PATH="$PWD" make install 2>&1 | tee "$report_dir/cpython-install.log"
+cp "$report_dir/cpython-build-configuration.txt" "$python_prefix/build-configuration.txt"
 LD_LIBRARY_PATH="$python_prefix/lib" "$python_prefix/bin/python3.12" - <<'PY'
 import ssl
 import sys
