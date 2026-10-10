@@ -19,6 +19,7 @@ from core.algorithms.position_monitoring import (
     evaluate_position_monitoring,
     validate_transform,
 )
+from core.runtime_paths import bundle_root, data_root
 from core.services.position_image_input import IMAGE_SUFFIXES, image_batch, simulation_parameters
 from core.services.position_persistence import PositionStore, observation_time, parse_timestamp, write_document
 
@@ -159,12 +160,12 @@ def _baseline_content(batch, parameters):
 
 class PositionMonitoringService:
     def __init__(self, root=None, *, defer_restore=False):
-        self.root = Path(root or Path(__file__).resolve().parents[2]).resolve()
+        self.root = Path(root if root is not None else data_root()).resolve()
         self.storage = self.root / "storage" / "position_monitoring"
         self._store = PositionStore(self.storage)
         self.parameter_path = self.storage / "parameters" / "current.json"
         self.previous_parameter_path = self.storage / "parameters" / "previous.json"
-        defaults = Path(__file__).resolve().parents[2] / "config" / "robot_position.json"
+        defaults = bundle_root() / "config" / "robot_position.json"
         configured = self.root / "config" / "robot_position.json"
         self.parameters = read_document(configured if configured.exists() else defaults)
         self.settings = {
@@ -286,7 +287,7 @@ class PositionMonitoringService:
         elif ("camera_matrix" in document and "hand_eye" in document
               and any(key in document for key in ("board_grid", "charuco", "board_type"))):
             # 完整配置替换测量条件；未声明的新字段不能继承上一次仿真配置。
-            defaults = read_document(Path(__file__).resolve().parents[2] / "config" / "robot_position.json")
+            defaults = read_document(bundle_root() / "config" / "robot_position.json")
             defaults.update({
                 "board_type": "checkerboard", "charuco": {}, "target_pose_base": None,
                 "image_size_px": None, "end_frame": None, "target_id": "configured_target",

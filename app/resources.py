@@ -2,15 +2,16 @@
 
 import json
 import re
-from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QAbstractButton, QLabel, QLayout, QPushButton, QTabBar, QWidget
 
+from core.runtime_paths import bundle_root
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+PROJECT_ROOT = bundle_root()
 RESOURCE_ROOT = PROJECT_ROOT / "resources"
 DISPLAY = json.loads((PROJECT_ROOT / "config/display.json").read_text(encoding="utf-8"))
 

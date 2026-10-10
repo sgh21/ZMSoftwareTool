@@ -1,6 +1,6 @@
 # 相机与手眼标定调试
 
-入口：机器人定位页的“调试” → “相机与手眼标定”。标定后端位于 `debug/diagnostics/camera_calibration.py`，独立于生产服务；调用已有 ChArUco、PnP 和手眼函数，不改写这些核心函数。
+入口：机器人定位页的“调试” → “相机与手眼标定”。标定后端位于 `core/services/camera_calibration.py`，桌面与 `debug/diagnostics/camera_calibration.py` 命令行入口共用；调用已有 ChArUco、PnP 和手眼函数，不改写这些核心函数。
 
 ## 使用步骤
 

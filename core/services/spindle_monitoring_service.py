@@ -14,10 +14,8 @@ from uuid import uuid4
 from zipfile import ZipFile
 
 from core.algorithms import spindle_monitoring as algorithm
+from core.runtime_paths import bundle_root, data_root
 from core.services.position_persistence import read_json, write_document
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _now():
@@ -103,11 +101,11 @@ def _validated_metric_settings(metrics):
 class SpindleMonitoringService:
     def __init__(self, root=None, config=None):
         if config is None:
-            config = read_json(PROJECT_ROOT / "config" / "spindle_monitoring.json")
+            config = read_json(bundle_root() / "config" / "spindle_monitoring.json")
         elif isinstance(config, (str, Path)):
             config = read_json(config)
         self.config = deepcopy(config)
-        self.root = Path(root) if root is not None else PROJECT_ROOT / self.config["storage_root"]
+        self.root = Path(root) if root is not None else data_root() / self.config["storage_root"]
         self.root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / "state.json"

@@ -9,7 +9,7 @@ import pytest
 
 from core.algorithms.board_pose import make_charuco_board
 from core.services.position_monitoring_service import PositionMonitoringService
-from debug.diagnostics import camera_calibration as calibration
+from core.services import camera_calibration as calibration
 
 
 def _transform(rotvec, translation):

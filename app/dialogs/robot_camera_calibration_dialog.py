@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 from app.dialogs import read_batch_records
 from app.resources import make_button, make_note
 from app.tasks import ServiceTask
-from debug.diagnostics.camera_calibration import calibrate_dataset
+from core.services.camera_calibration import calibrate_dataset
 
 
 class RobotCameraCalibrationDialog(QDialog):

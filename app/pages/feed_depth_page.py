@@ -12,8 +12,9 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QToolTip, QVBoxLayout, QWidget,
 )
 
-from app.resources import DISPLAY, PROJECT_ROOT, fit_dialog, make_button, make_note
+from app.resources import DISPLAY, fit_dialog, make_button, make_note
 from app.tasks import ServiceTask
+from core.runtime_paths import data_root
 from core.services.feed_depth_service import (
     evaluate_feed_depth, load_feed_depth_data, load_feed_depth_settings, save_feed_depth_settings,
     validate_feed_depth_settings,
@@ -32,8 +33,8 @@ def _number(value, format_spec=".3f"):
 class FeedDepthPage(QScrollArea):
     def __init__(self, simulation_root=None, settings_path=None):
         super().__init__()
-        self.simulation_root = Path(simulation_root) if simulation_root is not None else PROJECT_ROOT / "data/feed_depth_simulation"
-        self.settings_path = Path(settings_path) if settings_path is not None else PROJECT_ROOT / "storage/feed_depth/settings.json"
+        self.simulation_root = Path(simulation_root) if simulation_root is not None else data_root() / "data/feed_depth_simulation"
+        self.settings_path = Path(settings_path) if settings_path is not None else data_root() / "storage/feed_depth/settings.json"
         settings = load_feed_depth_settings(self.settings_path)
         self.simulation = None
         self.measurements = None

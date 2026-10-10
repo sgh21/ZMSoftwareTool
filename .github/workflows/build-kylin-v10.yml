@@ -1,0 +1,60 @@
+name: Linux build for Kylin V10 x86_64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/release-windows-kylin-v10]
+    paths:
+      - 'main.py'
+      - 'app/**'
+      - 'core/**'
+      - 'config/**'
+      - 'resources/**'
+      - 'tests/**'
+      - 'tools/release/**'
+      - '.github/workflows/build-kylin-v10.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kylin-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64:2026.10.10-1
+    env:
+      PYTHON: /opt/python/cp312-cp312/bin/python
+      PYTHONDONTWRITEBYTECODE: '1'
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt X11 and external startup-check dependencies
+        shell: bash
+        run: |
+          dnf install -y epel-release
+          dnf install -y \
+            libX11 libXext libXrender libXfixes libXi libXcursor libXrandr \
+            libSM libICE libxcb libxkbcommon libxkbcommon-x11 \
+            xcb-util xcb-util-image xcb-util-keysyms xcb-util-renderutil \
+            xcb-util-wm xcb-util-cursor mesa-libGL mesa-libEGL \
+            fontconfig freetype dejavu-sans-fonts dbus-libs \
+            xorg-x11-server-Xvfb xorg-x11-utils xorg-x11-xauth
+      - name: Build and check actual Linux executable
+        shell: bash
+        run: bash tools/release/build_kylin.sh
+      - name: Upload software archive and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoftwareTools-linux-x86_64-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          path: |
+            dist/SoftwareTools-linux-x86_64.tar.gz
+            dist/linux-build-report/
