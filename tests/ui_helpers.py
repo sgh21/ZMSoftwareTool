@@ -2,7 +2,10 @@
 
 from time import monotonic
 
+from PyQt6.QtCore import QEvent
+from PyQt6.QtGui import QHelpEvent
 from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QToolTip
 
 from app.pages.robot_position_page import RobotPositionPage
 
@@ -27,3 +30,16 @@ def refresh_page(page):
     page._run_task("刷新测试视图", lambda _progress: None,
                    lambda _result: page._refresh_latest_result(), refresh=True, log=False)
     wait_for_page(page)
+
+
+def assert_disabled_tooltip(button):
+    """通过 Qt 的悬浮事件确认禁用控件仍显示下一步提示。"""
+    assert not button.isEnabled()
+    button.window().activateWindow()
+    assert QTest.qWaitForWindowActive(button.window())
+    point = button.rect().center()
+    QApplication.sendEvent(button, QHelpEvent(QEvent.Type.ToolTip, point, button.mapToGlobal(point)))
+    QTest.qWait(250)  # 等待 Windows 原生提示框淡入。
+    assert QToolTip.isVisible() and QToolTip.text() == button.toolTip()
+    QToolTip.hideText()
+    QTest.qWait(350)  # Qt 延迟关闭提示框，等其关闭后再销毁测试窗口。

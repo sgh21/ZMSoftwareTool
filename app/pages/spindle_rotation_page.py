@@ -343,7 +343,7 @@ class SpindleRotationPage(QScrollArea):
         self.initial_button.setToolTip("选择一个 ZIP 导入整批采集，并确认正常、异常或未判定；正常样本可参与训练。")
         self.daily_button = self._button("日常导入", lambda: self._choose_packages("daily"), True)
         self.daily_button.setToolTip("导入后自动分析；已有模型时自动评估并保存结果，无需再点击重新评估。")
-        self.evaluate_button = self._button("分析信号", self._evaluate, True)
+        self.evaluate_button = self._button("评估精度", self._evaluate, True)
         for button in (self.initial_button, self.daily_button,
                        self._button("清空日志", self.process_log.clear, True), self.evaluate_button):
             row.addWidget(button, 1)
@@ -603,9 +603,6 @@ class SpindleRotationPage(QScrollArea):
         self.model_select.setCurrentIndex(max(0, self.model_select.findData(model_version)))
         self.model_select.blockSignals(False)
         self.train_button.setText("重新训练" if model else "训练网络")
-        self.evaluate_button.setText("重新评估" if model else "分析信号")
-        self.evaluate_button.setToolTip("使用当前模型和阈值重新评估所选采集，并追加评价记录；日常导入已自动评估。"
-                                        if model else "分析所选采集的真实信号；建立正常参考后才显示相容度。")
         self._selection_changed()
         self._set_busy(self.task is not None)
 
@@ -921,6 +918,15 @@ class SpindleRotationPage(QScrollArea):
         self.initial_button.setEnabled(not busy and self.service.current_model is None)
         self.train_button.setEnabled(not busy and len(self.service.training_candidates()) >= 5)
         self.evaluate_button.setEnabled(not busy and has_run)
+        if busy:
+            hint = "正在处理任务，请等待完成后再评估。"
+        elif not has_run:
+            hint = "请先通过“批量导入”或“日常导入”载入采集数据，再评估精度。"
+        elif self.service.current_model:
+            hint = "使用当前模型和阈值重新评估所选采集，并追加评价记录；日常导入已自动评估。"
+        else:
+            hint = "分析所选采集的真实信号；建立正常参考后才显示相容度。"
+        self.evaluate_button.setToolTip(hint)
         self.label_button.setEnabled(not busy and has_run)
         self.review_button.setEnabled(not busy and has_run)
         self.current_run_button.setEnabled(not busy)

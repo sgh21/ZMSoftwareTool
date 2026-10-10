@@ -262,7 +262,10 @@ def test_current_repeatability_can_be_evaluated_without_baseline(application, tm
     }), encoding="utf-8")
     service.load_observations(source)
     page = ready_position_page(service)
+    assert page.evaluate_button.isEnabled()
     page._evaluate()
+    assert not page.evaluate_button.isEnabled()
+    assert "等待" in page.evaluate_button.toolTip()
     event_loop = QEventLoop()
     timer = QTimer()
     timer.timeout.connect(lambda: event_loop.quit() if page.task is None else None)
@@ -278,9 +281,12 @@ def test_current_repeatability_can_be_evaluated_without_baseline(application, tm
     assert page.measured_table.item(0, 5).text() == "3"
     for index in (0, 1):
         page.result_metric.setCurrentIndex(index)
+        assert not page.evaluate_button.isEnabled()
+        assert "基准" in page.evaluate_button.toolTip()
         assert all(label.text() == "—" for label in page.axis_values.values())
         assert "基准" in page.result_hint.text()
     page.result_metric.setCurrentIndex(2)
+    assert page.evaluate_button.isEnabled()
     assert page.axis_values["distance"].text() == "0.2399"
     page.close()
 
@@ -363,8 +369,23 @@ def test_background_completion_returns_to_ui_thread(application):
     event_loop.exec()
     assert observations == [(True, True)]
     assert page.task is None
-    assert all(button.isEnabled() for button in page.findChildren(QPushButton))
+    assert all(button.isEnabled() for button in page.findChildren(QPushButton) if button is not page.evaluate_button)
+    assert not page.evaluate_button.isEnabled()
+    assert "导入观测" in page.evaluate_button.toolTip()
     page.close()
+
+
+def test_empty_robot_evaluation_is_disabled_and_hover_explains_next_step(application):
+    from ui_helpers import assert_disabled_tooltip
+
+    page = ready_position_page(MemoryService())
+    page.show()
+    application.processEvents()
+    assert page.evaluate_button.text() == "评估精度"
+    assert "导入观测" in page.evaluate_button.toolTip()
+    assert_disabled_tooltip(page.evaluate_button)
+    page.evaluate_button.click()
+    assert page.task is None
 
 
 def test_narrow_page_stacks_panels_without_horizontal_clipping(application):

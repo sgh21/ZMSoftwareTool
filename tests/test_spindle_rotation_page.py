@@ -204,6 +204,8 @@ def model_service(service, tmp_path, monkeypatch):
 
 
 def test_empty_start_has_no_fabricated_model_score_or_curves(service, page_factory):
+    from ui_helpers import assert_disabled_tooltip
+
     page = page_factory(service)
     assert service.current_model is None
     assert service.runs == {}
@@ -214,6 +216,9 @@ def test_empty_start_has_no_fabricated_model_score_or_curves(service, page_facto
     assert page.initial_button.isEnabled()
     assert not page.train_button.isEnabled()
     assert not page.evaluate_button.isEnabled()
+    assert page.evaluate_button.text() == "评估精度"
+    assert "导入" in page.evaluate_button.toolTip()
+    assert_disabled_tooltip(page.evaluate_button)
     assert not page.label_button.isEnabled()
     assert "示意" not in page.source_badge.text()
     assert all(light.property("state") == "missing" for light in page.status_lights.values())

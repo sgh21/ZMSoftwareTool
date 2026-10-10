@@ -543,11 +543,23 @@ class RobotPositionPage(QWidget):
         import_button.setMenu(menu)
         actions.addWidget(import_button, 1)
         actions.addWidget(make_button("清空日志", self.process_log.clear, True), 1)
-        actions.addWidget(
-            make_button("评估精度", self._evaluate, True),
-            1,
-        )
+        self.evaluate_button = make_button("评估精度", self._evaluate, True)
+        actions.addWidget(self.evaluate_button, 1)
         return bar
+
+    def _update_evaluate_button(self):
+        if self.task is not None:
+            reason = "正在处理任务，请等待完成后再评估。"
+        elif not (self.service.current_batch or {}).get("samples"):
+            reason = "请先通过“导入观测”载入本次观测，再评估精度。"
+        elif self.service.parameters.get("hand_eye") is None:
+            reason = "请先加载机器人手眼参数，再评估精度。"
+        elif self._metric_mode() != "repeatability" and self.service.baseline is None:
+            reason = "请先建立或选择测量基准；无基准时可选择“当前重复定位精度”。"
+        else:
+            reason = ""
+        self.evaluate_button.setEnabled(not reason)
+        self.evaluate_button.setToolTip(reason or "使用当前载入的观测评估所选精度指标，并保存结果。")
 
     def _settings_section(
         self, parent: QVBoxLayout, number: int, title: str, status_key: str
@@ -803,6 +815,7 @@ class RobotPositionPage(QWidget):
             return {"value": value, "view": view}
 
         self.task = ServiceTask(work)
+        self._update_evaluate_button()
         self.task.signals.completed.connect(self._task_completed)
         self.task.signals.failed.connect(self._task_failed)
         self.task.signals.progress.connect(self._task_progress)
@@ -851,6 +864,7 @@ class RobotPositionPage(QWidget):
         for control, enabled in self._busy_controls:
             control.setEnabled(enabled)
         self._busy_controls = []
+        self._update_evaluate_button()
 
     def _refresh_settings(self):
         parameters = self.service.parameters
@@ -1088,6 +1102,7 @@ class RobotPositionPage(QWidget):
         return reasons
 
     def _render_result(self):
+        self._update_evaluate_button()
         mode = self._metric_mode()
         for index, (key, label) in enumerate(METRIC_LABELS.items()):
             self.result_metric.setItemText(index, label)

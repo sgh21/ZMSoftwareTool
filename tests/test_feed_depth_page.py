@@ -215,7 +215,7 @@ def test_exit_simulation_restores_settings_and_keeps_csv(page, application, tmp_
     assert page.choose_button.toolTip() == page.selected_file
     assert page.selected_batch_index == -1
     assert page.theory_button.isEnabled()
-    assert not page.import_button.isEnabled() and not page.calculate_button.isEnabled()
+    assert page.import_button.isEnabled() and not page.calculate_button.isEnabled()
     assert page.calculate_button.text() == "评估精度"
     assert page.progress.value() == 0
     assert csv_path.read_bytes() == csv_content
@@ -361,7 +361,125 @@ def test_generation_failure_restores_controls(page, monkeypatch):
     assert all(control.isEnabled() for control in (
         page.choose_button, page.debug_button, page.theory_button,
     ))
-    assert not page.import_button.isEnabled() and not page.calculate_button.isEnabled()
+    assert page.import_button.isEnabled() and not page.calculate_button.isEnabled()
+
+
+def test_empty_page_import_is_available_and_disabled_evaluation_shows_hint(page):
+    from ui_helpers import assert_disabled_tooltip
+
+    assert page.import_button.isEnabled()
+    assert page.calculate_button.text() == "评估精度"
+    assert "导入数据" in page.calculate_button.toolTip()
+    assert_disabled_tooltip(page.calculate_button)
+
+
+def test_import_evaluate_and_failed_replacement_keep_original_data(page, application, monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QFileDialog
+
+    path = tmp_path / "measured.csv"
+    path.write_text("hole_id,actual_depth_mm,theoretical_depth_mm\n001,1.4,1.5\n002,1.6,1.5\n", encoding="utf-8")
+    original = path.read_bytes()
+    selected = [str(path)]
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (selected[0], ""))
+    page.import_button.click()
+    assert not page.import_button.isEnabled()
+    assert "等待" in page.import_button.toolTip()
+    wait_for_page(page)
+    assert page.progress.value() == 100
+    assert page.import_button.isEnabled() and page.calculate_button.isEnabled()
+    assert page.result_values["count"].text() == "2"
+    assert page.result_values["mean"].text() == "1.500"
+    assert page.source_badge.text() == "导入数据"
+    assert page.trend_charts["bias"].points == []  # 未提供时间与工况，不造历史趋势。
+    page.calculate_button.click()
+    assert not page.calculate_button.isEnabled()
+    wait_for_page(page)
+    previous = deepcopy(page.evaluation)
+    bad = tmp_path / "bad.csv"
+    bad.write_text("hole_id,actual_depth_mm\n001,nan\n", encoding="utf-8")
+    selected[0] = str(bad)
+    page.import_button.click()
+    wait_for_page(page, success=False)
+    assert page.evaluation == previous
+    assert page.import_button.isEnabled() and page.calculate_button.isEnabled()
+    assert "缺少字段" in page.process_log.toPlainText()
+    assert path.read_bytes() == original
+    selected[0] = ""
+    page.choose_button.click()
+    assert page.evaluation == previous
+
+
+def test_import_worker_keeps_ui_responsive_and_releases_controls_on_failure(page, application, monkeypatch, tmp_path):
+    path = tmp_path / "input.csv"
+    page.selected_file = str(path)
+    released = Event()
+    worker = []
+    main_thread = get_ident()
+
+    def read(*args):
+        worker.append(get_ident() != main_thread)
+        assert released.wait(3)
+        raise ValueError("文件格式有误")
+
+    monkeypatch.setattr(page_module, "load_feed_depth_data", read)
+    try:
+        page.import_button.click()
+        heartbeat = []
+        QTimer.singleShot(0, lambda: heartbeat.append(True))
+        QTest.qWait(30)
+        assert heartbeat and worker == [True]
+        assert not page.import_button.isEnabled()
+    finally:
+        released.set()
+        wait_for_page(page, success=False)
+    assert page.import_button.isEnabled() and not page.calculate_button.isEnabled()
+
+
+def test_trends_only_compare_matching_groups_with_known_time_and_condition(application):
+    chart = FeedDepthTrendChart("bias_mm", "等待可比历史批次")
+    chart.resize(600, 200)
+    common = {"count": 2, "bias_mm": .01, "row_id": "R1", "theoretical_depth_mm": 1.5,
+              "condition_id": "C1", "is_simulated": False, "measured_at": "2026-10-10"}
+    chart.set_history([common, {**common, "row_id": "R2"}, {**common, "condition_id": ""},
+                       {**common, "measured_at": ""}, {**common, "is_simulated": True},
+                       {**common, "measured_at": "2026-10-09"}])
+    chart.selected_index = 0
+    chart.show()
+    application.processEvents()
+    assert [index for index, _point in chart.points] == [5, 0]
+
+
+def test_multiple_imports_group_details_and_restore_after_simulation(page, application, tmp_path):
+    header = "hole_id,actual_depth_mm,theoretical_depth_mm,row_id,measured_at,condition_id\n"
+    first = tmp_path / "batch1.csv"
+    first.write_text(header + "001,1.4,1.5,R1,2026-10-09,C1\n002,,1.5,R1,2026-10-09,C1\n"
+                     "001,2.1,2.0,R2,2026-10-09,C1\n", encoding="utf-8")
+    page.selected_file = str(first)
+    page.import_button.click()
+    wait_for_page(page)
+    assert len(page.evaluation["history"]) == 2
+    page._show_batch(0)
+    rows = read_table_dialog(application, page._show_hole_details)
+    assert [row[1][0] for row in rows] == ["001", "002"]
+    assert rows[1][3][0] == "—" and rows[1][5][0] == "导入数据 · 缺测"
+
+    second = tmp_path / "batch2.csv"
+    second.write_text(header + "001,1.6,1.5,R1,2026-10-10,C1\n", encoding="utf-8")
+    page.selected_file = str(second)
+    page.import_button.click()
+    wait_for_page(page)
+    application.processEvents()
+    assert len(page.evaluation["history"]) == 3
+    assert [index for index, _point in page.trend_charts["bias"].points] == [0, 2]
+    original = deepcopy(page.measurements)
+    page._toggle_simulation()
+    wait_for_page(page)
+    assert page.simulation is not None
+    page._toggle_simulation()
+    wait_for_page(page)
+    assert page.simulation is None and page.measurements == original
+    assert len(page.evaluation["history"]) == 3
+    assert page.source_badge.text() == "导入数据"
 
 
 def test_standard_deviation_chart_excludes_single_hole_batches(application):
@@ -369,9 +487,9 @@ def test_standard_deviation_chart_excludes_single_hole_batches(application):
     chart.resize(600, 200)
     chart.show()
     chart.set_history([
-        {"measured_at": "2026-07-11T09:00:00+08:00", "count": 30, "stddev_mm": 0.006},
-        {"measured_at": "2026-07-12T09:00:00+08:00", "count": 1, "stddev_mm": 0.0},
-        {"measured_at": "2026-07-13T09:00:00+08:00", "count": 30, "stddev_mm": 0.008},
+        {"measured_at": "2026-07-11T09:00:00+08:00", "condition_id": "C1", "count": 30, "stddev_mm": 0.006},
+        {"measured_at": "2026-07-12T09:00:00+08:00", "condition_id": "C1", "count": 1, "stddev_mm": 0.0},
+        {"measured_at": "2026-07-13T09:00:00+08:00", "condition_id": "C1", "count": 30, "stddev_mm": 0.008},
     ])
     application.processEvents()
     assert [index for index, _point in chart.points] == [0, 2]
@@ -433,9 +551,9 @@ def test_repeated_simulation_and_file_selection_preserve_exported_inputs(page, a
     selected.write_text("unchanged", encoding="utf-8")
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(selected), ""))
     page.choose_button.click()
-    assert page.simulation is None and page.evaluation is None
+    assert page.simulation is not None and page.evaluation is not None
     assert page.selected_file == str(selected)
-    assert not page.import_button.isEnabled() and not page.calculate_button.isEnabled()
+    assert page.import_button.isEnabled() and page.calculate_button.isEnabled()
     assert first.read_bytes() == second.read_bytes() == contents
     assert selected.read_text(encoding="utf-8") == "unchanged"
 

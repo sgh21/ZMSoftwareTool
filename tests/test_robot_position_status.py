@@ -251,7 +251,7 @@ def test_one_point_alarm_does_not_mark_passing_summary_red(page, evaluated, appl
     page.result_metric.setCurrentIndex(0)
     application.processEvents()
     assert all(card.property("overLimit") is False for card in page.axis_cards.values())
-    assert page.axis_values["X"].palette().color(QPalette.ColorRole.WindowText) == QColor(DISPLAY["colors"]["action"])
+    assert page.axis_values["X"].palette().color(QPalette.ColorRole.WindowText) == QColor(DISPLAY["colors"]["text"])
     page.result_metric.setCurrentIndex(2)
     assert page.axis_cards["X"].property("overLimit") is False
     page.service.latest_result = None

@@ -273,10 +273,10 @@ QLabel[axis="Y"] { color: @axis_y@; font-weight: 600; }
 QLabel[axis="Z"] { color: @axis_z@; font-weight: 600; }
 QLabel[axis="distance"] { color: @distance@; font-weight: 600; }
 
-QFrame[axisMetric="true"][axis="X"] QLabel { color: @action@; }
-QFrame[axisMetric="true"][axis="Y"] QLabel { color: @axis_y@; }
-QFrame[axisMetric="true"][axis="Z"] QLabel { color: @axis_z@; }
-QFrame[axisMetric="true"][axis="distance"] QLabel { color: @distance@; }
+QFrame[axisMetric="true"][axis="X"] QLabel { color: @text@; }
+QFrame[axisMetric="true"][axis="Y"] QLabel { color: @text@; }
+QFrame[axisMetric="true"][axis="Z"] QLabel { color: @text@; }
+QFrame[axisMetric="true"][axis="distance"] QLabel { color: @text@; }
 QFrame[axisMetric="true"][overLimit="true"] QLabel { color: @error@; }
 QLabel[spindleValue="true"][overLimit="true"] { color: @error@; }
 
