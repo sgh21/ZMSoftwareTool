@@ -11,8 +11,28 @@ DEVELOPMENT_ROOTS = {
 }
 CACHE_PARTS = {".git", ".vscode", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 TEST_PARTS = {"tests", "test", "testing"}
-# Jinja2 的 `is defined` 等模板判断实际由此模块实现，不是它的测试集。
-RUNTIME_MODULES = {"jinja2.tests"}
+# 精确保留正常运行导入链需要的帮助模块；不按 testing 包前缀整包放行。
+RUNTIME_MODULES = {
+    "jinja2.tests",
+    "numpy.testing", "numpy.testing._private", "numpy.testing.overrides",
+    "numpy.testing._private.extbuild", "numpy.testing._private.utils",
+    "scipy._lib.array_api_extra.testing",
+    "torch.testing", "torch.testing._utils", "torch.testing._comparison", "torch.testing._creation",
+    "torch.testing._internal", "torch.testing._internal.logging_tensor",
+}
+
+
+def runtime_helper_file(relative):
+    parts = [part.lower() for part in Path(str(relative).replace("\\", "/")).parts]
+    if parts and parts[0] == "_internal":
+        parts = parts[1:]
+    if parts[-1] == "__init__.py":
+        parts.pop()
+    elif parts[-1].endswith(".py"):
+        parts[-1] = parts[-1][:-3]
+    else:
+        return False
+    return ".".join(parts) in RUNTIME_MODULES
 
 
 def forbidden_module(name):
@@ -26,6 +46,8 @@ def forbidden_module(name):
 
 
 def forbidden_file(relative):
+    if runtime_helper_file(relative):
+        return False
     parts = [part.lower() for part in relative.parts]
     if parts and parts[0] == "_internal":
         parts = parts[1:]

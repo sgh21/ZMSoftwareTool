@@ -1,11 +1,14 @@
 """Keep PyTorch runtime/source inspection; omit its test suites and C++ SDK."""
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+from tools.release.audit_bundle import RUNTIME_MODULES
 
 module_collection_mode = "pyz+py"
 warn_on_missing_hiddenimports = False
 
 
 def runtime_module(name):
+    if name in RUNTIME_MODULES:
+        return True
     parts = name.split(".")
     return (not set(parts) & {"tests", "test", "testing", "benchmark", "tensorboard"}
             and not parts[-1].startswith("test_"))

@@ -335,7 +335,8 @@ class FeedDepthPage(QScrollArea):
         )
 
     def _import_data(self):
-        if not self.selected_file or self.selected_file == (self.measurements or {}).get("source_path"):
+        source_path = (self.measurements or {}).get("source_path")
+        if not self.selected_file or (source_path and Path(self.selected_file) == Path(source_path)):
             if not self._choose_file():
                 return
         path, settings = self.selected_file, self._current_settings()

@@ -35,6 +35,11 @@ def clean_environment(data_dir):
     return env
 
 
+def bundle_files(folder):
+    return {path.relative_to(folder).as_posix(): {"bytes": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns}
+            for path in sorted(folder.rglob("*")) if path.is_file()}
+
+
 class WindowsVerification:
     def __init__(self, exe, data, output):
         self.exe = exe
@@ -47,6 +52,7 @@ class WindowsVerification:
             "started_at_utc": datetime.now(timezone.utc).isoformat(),
             "executable": str(exe), "executable_bytes": exe.stat().st_size,
             "executable_mtime_ns": exe.stat().st_mtime_ns,
+            "bundle_files": bundle_files(exe.parent),
             "platform": platform.platform(), "machine": platform.machine(),
             "environment_scope": "现有 Windows 主机，隔离工作目录、业务存储和 PATH；不是干净虚拟机",
             "test_data": "人工构造的软件验证样例，不是实际设备测量",
@@ -67,7 +73,19 @@ class WindowsVerification:
         self.app = Application(backend="uia").connect(process=self.process.pid, timeout=90)
         self.native = Application(backend="win32").connect(process=self.process.pid)
         self.window = self.app.window(title="精度监控系统")
-        self.window.wait("visible", timeout=90)
+
+        def started():
+            if self.process.poll() is not None:
+                raise RuntimeError(f"软件在创建主窗口前退出：{self.process.returncode}，见 process.log")
+            error = self.native.window(title="Unhandled exception in script")
+            if error.exists(timeout=0.1):
+                error.capture_as_image().save(self.output / "startup_failure.png")
+                raise RuntimeError("打包程序启动异常：" + "\n".join(item.window_text() for item in error.descendants()))
+            return self.window.exists(timeout=0.2) and self.window.is_visible()
+
+        wait_until(started, "主窗口启动超时", timeout=90)
+        self.main_handle = self.window.wrapper_object().handle
+        self.window = self.app.window(handle=self.main_handle)
         wait_until(lambda: self.button("加载参数").is_enabled(), "启动初始化未完成")
         if not (self.output / "01_startup.png").exists():
             self.screenshot("01_startup")
@@ -76,7 +94,7 @@ class WindowsVerification:
         if self.process is None:
             return
         try:
-            self.native.window(title="精度监控系统").close()
+            self.native.window(handle=self.main_handle).close()
             self.process.wait(timeout=15)
             self.report["shutdown_exit_code"] = self.process.returncode
         except Exception:
@@ -107,8 +125,11 @@ class WindowsVerification:
         # Qt 的原生文件对话框在 UIA 中不可见，按本进程的 Win32 控件定位。
         dialog = self.native.window(title=title, class_name="#32770")
         dialog.wait("visible", timeout=30)
-        dialog.child_window(control_id=1148, class_name="Edit").set_edit_text(str(path))
-        dialog.child_window(control_id=1, class_name="Button").click()
+        # Windows 的打开/保存对话框使用不同控件 ID；两者都只有文件名 Edit 可见。
+        fields = [field for field in dialog.descendants(class_name="Edit") if field.is_visible()]
+        assert len(fields) == 1, [(field.window_text(), field.control_id()) for field in fields]
+        fields[0].set_edit_text(str(path))
+        dialog.child_window(control_id=1, class_name="Button").click_input()
         dialog.wait_not("visible", timeout=30)
 
     def dialog(self, title_re):
@@ -138,6 +159,13 @@ class WindowsVerification:
                 self.screenshot(f"failed_{len(self.report['checks'])}")
             except Exception:
                 pass
+            # 清掉失败步骤遗留的本进程弹窗，避免后续检查被同一个模态窗口阻塞。
+            for window in self.native.windows():
+                if window.is_visible() and window.handle != self.main_handle:
+                    try:
+                        window.close()
+                    except Exception:
+                        pass
         result["seconds"] = round(time.monotonic() - started, 2)
         self.report["checks"].append(result)
         self.save_report()
@@ -148,14 +176,24 @@ class WindowsVerification:
         (self.output / "report.json").write_text(json.dumps(self.report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def startup(self):
+        from pywinauto import mouse
+
         expected = ("机器人末端定位精度", "主轴回转精度", "主轴轴向进给精度")
         states = []
-        for name in expected:
+        for index, name in enumerate(expected):
             self.tab(name)
             button = self.button("评估精度").wrapper_object()
             assert not button.is_enabled(), f"{name}空数据时评估未禁用"
-            tooltip = button.element_info.element.CurrentHelpText
+            header = self.window.rectangle()
+            mouse.move(coords=(header.left + 100, header.top + 20))
+            time.sleep(0.2)
+            point = button.rectangle().mid_point()
+            mouse.move(coords=(point.x, point.y))
+            tip = self.app.window(class_name="QTipLabel")
+            tip.wait("visible", timeout=10)
+            tooltip = tip.window_text()
             assert "先" in tooltip, f"{name}缺少操作提示：{tooltip}"
+            self.window.capture_as_image().save(self.output / f"00_tooltip_{index}.png")
             if name == expected[2]:
                 assert self.button("导入数据").is_enabled()
             states.append({"page": name, "evaluate_enabled": False, "help": tooltip})
@@ -168,10 +206,9 @@ class WindowsVerification:
         return {"pages": states, "resources": "配置、QSS、PNG、SVG存在；界面截图另附"}
 
     def import_observation(self, path):
-        from pywinauto.keyboard import send_keys
-
         self.click("导入观测")
-        send_keys("{END}{ENTER}")
+        menu = self.app.window(class_name="QMenu")
+        menu.child_window(title="加载观测结果或记录文件", control_type="MenuItem").click_input()
         self.file_dialog("加载观测结果或记录文件", path)
         self.wait_text("已导入 ")
         wait_until(lambda: self.button("加载参数").is_enabled(), "观测导入未完成")
@@ -200,7 +237,8 @@ class WindowsVerification:
         self.import_observation(self.data / spec["current"])
         self.click("评估精度")
         wait_until(lambda: self.button("评估精度").is_enabled(), "评估未完成")
-        wait_until(lambda: all(text != "—" for text in self.robot_values()), "机器人指标未显示")
+        wait_until(lambda: len(self.robot_values()) == 4 and all(text != "—" for text in self.robot_values()),
+                   "机器人指标未显示")
         actual = [float(value) for value in self.robot_values()]
         for value, expected in zip(actual, spec["expected"]["repeatability"]):
             assert math.isclose(value, expected, abs_tol=0.0001), (actual, spec["expected"])
@@ -337,7 +375,8 @@ class WindowsVerification:
         self.stop()
         assert not self.report.get("shutdown_forced") and self.report["shutdown_exit_code"] == 0
         self.start(cwd)
-        wait_until(lambda: all(value != "—" for value in self.robot_values()), "重启未恢复机器人指标")
+        wait_until(lambda: len(self.robot_values()) == 4 and all(value != "—" for value in self.robot_values()),
+                   "重启未恢复机器人指标")
         self.tab("主轴回转精度")
         assert self.button("评估精度").is_enabled()
         self.tab("主轴轴向进给精度")
@@ -383,11 +422,15 @@ def main():
             verification.report["fatal_error"] = traceback.format_exc()
         finally:
             verification.stop()
+            verification.report["bundle_unchanged"] = (
+                verification.report["bundle_files"] == bundle_files(exe.parent)
+            )
             verification.report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
             passed = (not verification.report.get("fatal_error") and verification.report["checks"]
                       and all(row["status"] == "passed" for row in verification.report["checks"])
                       and not verification.report.get("shutdown_forced")
-                      and verification.report.get("shutdown_exit_code") == 0)
+                      and verification.report.get("shutdown_exit_code") == 0
+                      and verification.report["bundle_unchanged"])
             verification.report["status"] = "passed" if passed else "failed"
             verification.save_report()
     print(str(output / "report.json"))

@@ -17,12 +17,14 @@
 
 `resources/icons/branding/reference-interface.png` 当前仍用于顶部品牌图，不能当作无用截图删除。页面中的仿真核验、窝深模拟与相机标定入口仍有 Qt 回调，不能因名称含 debug/simulation 就移除这些现有功能。
 
-## 清理候选
+## 本地缓存清理状态
 
-仅确认以下内容可再生成；审计本身未删除：
+已核对绝对路径均在当前仓库内，缓存目录只包含 `.pyc`，以下内容可再生成：
 
-- 根目录及 `app/`、`core/`、`debug/` 中的 `__pycache__`、`.pyc`；不属于业务输入或持久化数据。
+- `__pycache__/`、`app/__pycache__/`、`app/dialogs/__pycache__/`、`app/pages/__pycache__/`、`core/algorithms/__pycache__/`、`core/services/__pycache__/`、`debug/__pycache__/`。
 - `experiments/20261005_launch/165337.stdout.log`、`165337.stderr.log` 均为 0 字节旧启动日志。
+
+限定范围的 PowerShell 清理请求被自动审批以 `blocked by policy` 拒绝，工具未给出更具体理由；未执行删除，也未换工具绕过限制。因此这些缓存和空日志仍留在本地，属于整理未完成项；构建排除它们，最终发布审计检查不进入软件包。`data/`、`storage/` 和任何历史报告未进行删除操作。
 
 未发现可仅凭“没有静态 import”就删除的已跟踪业务或复现代码。`experiments/feed_depth_ui/outputs/` 及其他报告保留，不能把验收截图与历史报告当作临时文件批量清空。
 
@@ -40,3 +42,17 @@ python -B -m pytest -q -p no:cacheprovider tests/test_release_test_data.py
 主轴另有 `02_主轴/小型建模.zip`，内含五份独立随机种子的人工信号，供最终程序在隔离存储中验证一轮训练与推理。该包不含预训练权重，不证明模型或设备有效性。
 
 2026-10-10 在隔离临时目录中运行新增 8 项正式回归，全部通过：解析观测与历史恢复、实际 ChArUco 检测、主轴实际 H5/CSV 导入/频谱计算/重复导入、五份可分组训练候选，以及 CSV/XLSX 的缺测、边界与超限统计。Ruff 通过。这是源码服务与样例格式验证，最终发布包和目标系统验证另见发布测试报告。
+
+## 最终程序内部审计
+
+`tools/release/audit_bundle.py` 同时检查发布目录和最终 EXE/ELF 中的 CArchive、内嵌 PYZ 模块目录。排除项目测试、调试、实验、构建工具、pytest、界面自动化依赖及测试数据；空目录或缺失可执行文件不能判为成功。
+
+第三方运行依赖按实际用途区分：`torch/distributed/tensor/debug` 是 PyTorch 运行库；`jinja2.tests` 是模板表达式判断实现；`numpy._pytesttester` 与 `scipy._lib._testutils` 是导入兼容帮助模块。不能因名字含 debug/test 就把它们当作本项目测试集删除。审计的 4 项正式回归使用真实 PyInstaller 归档，覆盖隐藏在 PYZ 的开发代码、合法运行模块及内外层样例文件。
+
+首个 Windows 包实际读取到 4,971 个 CArchive/PYZ 模块，没有禁止的项目或开发模块；发现 `config/examples/` 两个开发 JSON，按失败报告并要求构建端排除后重建。这条记录仅描述首包问题，最终审计结论以 `dist/verification/bundle-audit.json` 和发布测试报告为准。
+
+最终 EXE 的主轴导入实际暴露出按名字裁剪第三方 `testing` 帮助模块的问题：SciPy `signal/stats` 的运行导入链需要 NumPy 的通用数组比较工具；PyTorch 2.9 的 `autograd/gradcheck`、`utils/checkpoint` 和优化器导入需要比较、张量创建及日志张量工具。它们不是独立测试用例集，不能只因包名含 testing 就删掉。
+
+构建与审计共用 `tools/release/audit_bundle.py` 中的精确允许名单：`numpy.testing`、`numpy.testing._private`、`numpy.testing.overrides`、`numpy.testing._private.extbuild`、`numpy.testing._private.utils`、`scipy._lib.array_api_extra.testing`，以及 `torch.testing`、`torch.testing._utils`、`torch.testing._comparison`、`torch.testing._creation`、`torch.testing._internal`、`torch.testing._internal.logging_tensor`；另保留既有 `jinja2.tests`。Torch 必需的同名 `.py` 也按这份名单保留，满足其运行时源码检查。
+
+该名单按完整模块名匹配，不允许任何实际 `tests/` 子目录、未列出的 `torch.testing._internal` 模块或 pytest；正式回归验证这些边界。最终软件行为仍由重建后的 EXE 验证，源码导入试验不替代最终产物验收。

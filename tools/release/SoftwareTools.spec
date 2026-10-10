@@ -4,13 +4,14 @@ from pathlib import Path
 from importlib.metadata import PackageNotFoundError
 
 from PyInstaller.utils.hooks import copy_metadata
+from tools.release.audit_bundle import RUNTIME_MODULES, runtime_helper_file
 
 ROOT = Path(SPECPATH).resolve().parents[1]
 EXCLUDES = [
     "tests", "debug", "experiments", "diagnostics", "tools", "pytest", "_pytest",
     "pywinauto", "comtypes", "IPython", "notebook", "jupyter", "matplotlib", "pylab", "mpl_toolkits", "py",
     "pandas", "sklearn", "tkinter", "PyQt5", "PySide2", "PySide6",
-    "torch.testing", "torch.utils.benchmark", "torch.utils.tensorboard",
+    "torch.utils.benchmark", "torch.utils.tensorboard",
     "torch._dynamo.test_case", "torch._inductor.test_case", "torch._inductor.test_operators",
     "numpy.tests", "scipy.tests", "h5py.tests", "sympy.testing",
 ]
@@ -39,6 +40,8 @@ a = Analysis(
 )
 
 def runtime_file(entry):
+    if runtime_helper_file(entry[0]):
+        return True
     parts = entry[0].replace("\\", "/").lower().split("/")
     name = parts[-1]
     return not (set(parts) & {"tests", "test", "testing", "__pycache__", ".pytest_cache", ".git"}
@@ -46,7 +49,7 @@ def runtime_file(entry):
 
 a.datas = [entry for entry in a.datas if runtime_file(entry)]
 a.binaries = [entry for entry in a.binaries if runtime_file(entry)]
-a.pure = [entry for entry in a.pure if entry[0] == "jinja2.tests" or (
+a.pure = [entry for entry in a.pure if entry[0] in RUNTIME_MODULES or (
           not set(entry[0].split(".")) & {"tests", "testing", "test"}
           and not entry[0].split(".")[-1].startswith("test_"))]
 pyz = PYZ(a.pure)

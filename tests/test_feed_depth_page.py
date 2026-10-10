@@ -379,7 +379,7 @@ def test_import_evaluate_and_failed_replacement_keep_original_data(page, applica
     path = tmp_path / "measured.csv"
     path.write_text("hole_id,actual_depth_mm,theoretical_depth_mm\n001,1.4,1.5\n002,1.6,1.5\n", encoding="utf-8")
     original = path.read_bytes()
-    selected = [str(path)]
+    selected = [path.as_posix()]  # QFileDialog returns forward slashes on Windows too.
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (selected[0], ""))
     page.import_button.click()
     assert not page.import_button.isEnabled()
@@ -397,7 +397,7 @@ def test_import_evaluate_and_failed_replacement_keep_original_data(page, applica
     previous = deepcopy(page.evaluation)
     bad = tmp_path / "bad.csv"
     bad.write_text("hole_id,actual_depth_mm\n001,nan\n", encoding="utf-8")
-    selected[0] = str(bad)
+    selected[0] = bad.as_posix()
     page.import_button.click()
     wait_for_page(page, success=False)
     assert page.evaluation == previous
