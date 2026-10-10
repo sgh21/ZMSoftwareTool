@@ -28,7 +28,8 @@ jobs:
     container:
       image: quay.io/pypa/manylinux_2_28_x86_64:2026.10.10-1
     env:
-      PYTHON: /opt/python/cp312-cp312/bin/python
+      PYTHON: /opt/softwaretools-python/bin/python3.12
+      LD_LIBRARY_PATH: /opt/softwaretools-python/lib
       PYTHONDONTWRITEBYTECODE: '1'
       QT_QPA_PLATFORM: offscreen
     steps:
@@ -43,7 +44,12 @@ jobs:
             xcb-util xcb-util-image xcb-util-keysyms xcb-util-renderutil \
             xcb-util-wm xcb-util-cursor mesa-libGL mesa-libEGL \
             fontconfig freetype dejavu-sans-fonts dbus-libs \
-            xorg-x11-server-Xvfb xorg-x11-utils xorg-x11-xauth
+            xorg-x11-server-Xvfb xorg-x11-utils xorg-x11-xauth \
+            bzip2-devel libffi-devel xz-devel zlib-devel openssl-devel \
+            readline-devel sqlite-devel ncurses-devel libuuid-devel
+      - name: Build shared CPython required by PyInstaller
+        shell: bash
+        run: bash tools/release/build_shared_python.sh
       - name: Build and check actual Linux executable
         shell: bash
         run: bash tools/release/build_kylin.sh
