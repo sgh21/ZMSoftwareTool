@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.release.audit_bundle import RUNTIME_MODULES, audit, forbidden_file, forbidden_module
+from tools.release.audit_bundle import RUNTIME_MODULES, audit, forbidden_file, forbidden_module, forbidden_torch_binary
 
 
 writers = pytest.importorskip("PyInstaller.archive.writers")
@@ -58,6 +58,22 @@ def test_runtime_debug_and_test_compatibility_helpers_are_kept(tmp_path):
 def test_helper_allowlist_does_not_include_suites_or_unlisted_internal_modules(name):
     assert forbidden_module(name)
     assert forbidden_file(Path("_internal") / (name.replace(".", "/") + ".py"))
+
+
+@pytest.mark.parametrize("name", ["torch/bin/HashStoreTest", "torch/bin/FileStoreTest", "torch/bin/TCPStoreTest",
+                                  "torch/bin/protoc", "torch/bin/protoc-3.13.0.0", "torch/bin/protoc.exe",
+                                  "torch/lib/libtorchbind_test.so", "torch/lib/libjitbackend_test.so"])
+def test_torch_test_binaries_and_compiler_are_rejected(name):
+    assert forbidden_torch_binary(name)
+    assert forbidden_file(Path("_internal") / name)
+
+
+@pytest.mark.parametrize("name", ["torch/bin/torch_shm_manager", "torch/lib/libtorch_cpu.so",
+                                  "torch/lib/torch_cpu.dll", "torch/lib/libtorch_python.so",
+                                  "numpy/_core/_multiarray_tests.cpython-312-x86_64-linux-gnu.so"])
+def test_required_native_libraries_are_not_classified_by_substring(name):
+    assert not forbidden_torch_binary(name)
+    assert not forbidden_file(Path("_internal") / name)
 
 
 def test_development_sample_is_rejected_inside_or_outside_executable(tmp_path):

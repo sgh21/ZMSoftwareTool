@@ -22,6 +22,18 @@ RUNTIME_MODULES = {
 }
 
 
+def forbidden_torch_binary(relative):
+    parts = [part.lower() for part in Path(str(relative).replace("\\", "/")).parts]
+    if parts and parts[0] == "_internal":
+        parts = parts[1:]
+    name = parts[-1]
+    if parts[:2] == ["torch", "bin"]:
+        return name.removesuffix(".exe") in {"hashstoretest", "filestoretest", "tcpstoretest"} or name.startswith("protoc")
+    return parts[:2] == ["torch", "lib"] and name in {
+        "libtorchbind_test.so", "libjitbackend_test.so", "torchbind_test.dll", "jitbackend_test.dll",
+    }
+
+
 def runtime_helper_file(relative):
     parts = [part.lower() for part in Path(str(relative).replace("\\", "/")).parts]
     if parts and parts[0] == "_internal":
@@ -46,6 +58,8 @@ def forbidden_module(name):
 
 
 def forbidden_file(relative):
+    if forbidden_torch_binary(relative):
+        return True
     if runtime_helper_file(relative):
         return False
     parts = [part.lower() for part in relative.parts]

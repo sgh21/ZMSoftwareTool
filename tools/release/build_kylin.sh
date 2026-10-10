@@ -45,7 +45,8 @@ fi
     tests/test_parameter_persistence.py tests/test_spindle_algorithms.py \
     tests/test_spindle_monitoring_service.py tests/test_feed_depth_service.py \
     tests/test_feed_depth_simulation.py tests/test_runtime_paths.py \
-    tests/test_release_test_data.py \
+    tests/test_release_test_data.py tests/test_qt_compatibility.py \
+    tests/test_main_window.py::test_switching_three_tabs_and_back_preserves_each_pages_state \
     --junitxml="$report_dir/source-tests.xml" \
     2>&1 | tee "$report_dir/source-tests.log"
 

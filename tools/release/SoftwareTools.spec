@@ -4,7 +4,7 @@ from pathlib import Path
 from importlib.metadata import PackageNotFoundError
 
 from PyInstaller.utils.hooks import copy_metadata
-from tools.release.audit_bundle import RUNTIME_MODULES, runtime_helper_file
+from tools.release.audit_bundle import RUNTIME_MODULES, forbidden_torch_binary, runtime_helper_file
 
 ROOT = Path(SPECPATH).resolve().parents[1]
 EXCLUDES = [
@@ -40,6 +40,8 @@ a = Analysis(
 )
 
 def runtime_file(entry):
+    if forbidden_torch_binary(entry[0]):
+        return False
     if runtime_helper_file(entry[0]):
         return True
     parts = entry[0].replace("\\", "/").lower().split("/")

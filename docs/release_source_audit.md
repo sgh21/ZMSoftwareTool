@@ -56,3 +56,5 @@ python -B -m pytest -q -p no:cacheprovider tests/test_release_test_data.py
 构建与审计共用 `tools/release/audit_bundle.py` 中的精确允许名单：`numpy.testing`、`numpy.testing._private`、`numpy.testing.overrides`、`numpy.testing._private.extbuild`、`numpy.testing._private.utils`、`scipy._lib.array_api_extra.testing`，以及 `torch.testing`、`torch.testing._utils`、`torch.testing._comparison`、`torch.testing._creation`、`torch.testing._internal`、`torch.testing._internal.logging_tensor`；另保留既有 `jinja2.tests`。Torch 必需的同名 `.py` 也按这份名单保留，满足其运行时源码检查。
 
 该名单按完整模块名匹配，不允许任何实际 `tests/` 子目录、未列出的 `torch.testing._internal` 模块或 pytest；正式回归验证这些边界。最终软件行为仍由重建后的 EXE 验证，源码导入试验不替代最终产物验收。
+
+Linux 实际 ELF 检查还发现 PyTorch wheel 自带 `torch/bin/HashStoreTest`、`FileStoreTest`、`TCPStoreTest`、`protoc*` 和 `torch/lib/libtorchbind_test.so`、`libjitbackend_test.so`。构建 hook 在分析二进制依赖前按这些确切名称剔除，spec 与最终审计共用同一规则。`torch_shm_manager`、正常 CPU/Python 运行库及 NumPy 的 `_multiarray_tests` 扩展不按名称子串误删；后者可能被运行帮助模块导入。

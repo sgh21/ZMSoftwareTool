@@ -97,7 +97,12 @@ def launch_with_xvfb(executable, output):
                         tree = subprocess.run(["xwininfo", "-root", "-tree"], env=environment, check=True,
                                               text=True, encoding="utf-8", errors="replace", capture_output=True)
                         (output / "window-tree.txt").write_text(tree.stdout, encoding="utf-8")
-                        title_found = "精度监控系统" in tree.stdout
+                        title_found = False
+                        window = re.search(r'(0x[0-9a-fA-F]+) "精度监控系统"', tree.stdout)
+                        if window:
+                            details = subprocess.run(["xwininfo", "-id", window[1]], env=environment, check=True,
+                                                     text=True, encoding="utf-8", errors="replace", capture_output=True)
+                            title_found = "Map State: IsViewable" in details.stdout
                         if title_found and parameter_path.is_file():
                             break
                         time.sleep(0.5)

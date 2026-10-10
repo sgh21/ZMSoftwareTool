@@ -1121,7 +1121,8 @@ def test_model_names_and_marker_follow_actual_current_model(model_service, page_
     assert name == page._model_name(current["version"])
     assert page.model_select.itemData(index, Qt.ItemDataRole.UserRole + 1)
     assert not page.model_select.itemData(page.model_select.findData(other["version"]), Qt.ItemDataRole.UserRole + 1)
-    assert page.model_select.labelDrawingMode() == QComboBox.LabelDrawingMode.UseDelegate
+    if hasattr(QComboBox, "LabelDrawingMode"):
+        assert page.model_select.labelDrawingMode() == QComboBox.LabelDrawingMode.UseDelegate
     assert page.model_select.itemText(page.model_select.findData(other["version"])) == page._model_name(other["version"])
     assert page.model_select.itemText(0) == f"最新评价 · {page._model_name(current['version'])}"
     assert f"当前模型：{page._model_name(current['version'])}" in page.status_lights["model"].toolTip()

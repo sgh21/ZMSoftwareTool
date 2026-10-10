@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QSpinBox,
-    QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QStyle, QStyledItemDelegate, QStyleOptionComboBox, QStyleOptionViewItem, QStylePainter,
     QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -57,6 +57,34 @@ class CurrentModelDelegate(QStyledItemDelegate):
         selected = bool(styled.state & QStyle.StateFlag.State_Selected
                         and styled.state & QStyle.StateFlag.State_Active)
         self.markers[selected].paint(painter, marker_rect)
+
+
+class ModelComboBox(QComboBox):
+    """Qt 6.7 复用同一委托绘制收起标签；Qt 6.9 起沿用原生接口。"""
+
+    def __init__(self):
+        super().__init__()
+        if hasattr(QComboBox, "setLabelDrawingMode"):
+            self.setLabelDrawingMode(QComboBox.LabelDrawingMode.UseDelegate)
+
+    def paintEvent(self, event):
+        if hasattr(QComboBox, "setLabelDrawingMode"):
+            super().paintEvent(event)
+            return
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        if self.currentIndex() < 0:
+            return
+        label = QStyleOptionViewItem()
+        label.initFrom(self)
+        label.widget = self
+        label.rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, self)
+        label.displayAlignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        index = self.model().index(self.currentIndex(), self.modelColumn(), self.rootModelIndex())
+        self.itemDelegate().paint(painter, label, index)
 
 
 class SpindleRotationPage(QScrollArea):
@@ -105,8 +133,8 @@ class SpindleRotationPage(QScrollArea):
         return button
 
     @staticmethod
-    def _combo():
-        combo = QComboBox()
+    def _combo(combo_class=QComboBox):
+        combo = combo_class()
         combo.setProperty("robotInput", True)
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         combo.setMinimumContentsLength(6)
@@ -119,9 +147,8 @@ class SpindleRotationPage(QScrollArea):
         self.detail_holder.hide()
         self.run_select = self._combo()
         self.run_select.setToolTip("按真实采集日期选择每次检测")
-        self.model_select = self._combo()
+        self.model_select = self._combo(ModelComboBox)
         self.model_select.setItemDelegate(CurrentModelDelegate(self.model_select))
-        self.model_select.setLabelDrawingMode(QComboBox.LabelDrawingMode.UseDelegate)
         self.model_select.setToolTip("右侧星标表示当前模型；按模型版本回看，旧评价保持不变")
         self.run_select.currentIndexChanged.connect(self._selection_changed)
         self.run_select.activated.connect(self._selection_changed)
