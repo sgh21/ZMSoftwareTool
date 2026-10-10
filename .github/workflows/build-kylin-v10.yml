@@ -38,6 +38,8 @@ jobs:
       - name: Install Qt X11 and external startup-check dependencies
         shell: bash
         run: |
+          # The pinned image may contain repository metadata whose mirror files expired.
+          dnf clean all
           dnf install -y epel-release
           dnf install -y \
             libX11 libXext libXrender libXfixes libXi libXcursor libXrandr \
