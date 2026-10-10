@@ -33,6 +33,8 @@ Windows：完整解压 `Windows版.zip`，双击 `SoftwareTools/SoftwareTools.ex
 
 在现有 Python 3.12 x64 构建环境运行，不在项目中新建虚拟环境。完整锁定版本分别见 `tools/release/requirements-windows.lock` 和 `requirements-kylin.lock`；构建输出另记录实际依赖。
 
+Windows 实际使用现有 `ZMSoftware` 环境中的 CPython 3.12.13。3.12.0 在冻结 SciPy 时存在已确认的代码对象缺陷，构建脚本会拒绝该版本；本次通过 `conda install -p D:/Softwares/miniconda3/envs/ZMSoftware python=3.12.13 --freeze-installed` 修复原环境，并保留升级计划与日志。无需另建环境。[上游修复说明](https://github.com/pyinstaller/pyinstaller/issues/8186)
+
 Windows PowerShell：
 
 ```powershell
@@ -47,10 +49,14 @@ python -B tools/release/verify_windows.py --exe dist/SoftwareTools/SoftwareTools
 Linux：推送构建相关变更到 `codex/release-windows-kylin-v10` 即触发 `.github/workflows/build-kylin-v10.yml`；也可在已有 Linux x86_64 / CPython 3.12 环境执行：
 
 ```bash
-PYTHON=/opt/python/cp312-cp312/bin/python bash tools/release/build_kylin.sh
+PYTHON=/opt/softwaretools-python/bin/python3.12 \
+LD_LIBRARY_PATH=/opt/softwaretools-python/lib \
+bash tools/release/build_kylin.sh
 ```
 
-完整容器图形库安装命令在 workflow 中。Qt 固定 6.7、CPU PyTorch 固定 2.9，避免新 Qt 的 glibc 要求高于麒麟 V10。产物 `dist/SoftwareTools-linux-x86_64.tar.gz` 和 `dist/linux-build-report/` 由 Actions 上传；下载后按原目录放入本地 `dist/`，再运行交付组装脚本：
+完整容器图形库安装命令在 workflow 中。manylinux 自带解释器缺少冻结所需的 Python 共享库；workflow 先通过 `build_shared_python.sh` 编译带共享库的 CPython 3.12.15，并缓存该构建环境。编译配置和实际依赖均记录在报告中，程序自身仍携带运行所需 Python，不要求目标机安装它。
+
+Qt 固定 6.7、CPU PyTorch 固定 2.9，避免新 Qt 的 glibc 要求高于麒麟 V10。产物 `dist/SoftwareTools-linux-x86_64.tar.gz` 和 `dist/linux-build-report/` 由 Actions 上传；下载后按原目录放入本地 `dist/`，再运行交付组装脚本：
 
 ```powershell
 python -B -X utf8 tools/release/assemble_delivery.py
@@ -63,5 +69,7 @@ python -B -X utf8 tools/release/assemble_delivery.py
 完整清单见 [最终软件包验收](../tools/release/验收步骤.md)。必须在未安装开发环境的目标系统完成启动、资源、三页导入/评估、机器人导出、主轴训练/推理、关闭及重启检查。
 
 当前未完成麒麟 V10 / 海光实机和干净 Windows 11 环境验证；Linux 容器窗口启动不覆盖三页业务 GUI。现场系统 SP、驱动、字体、屏幕缩放仍需记录。
+
+本次 Windows 发布为未做代码签名的便携目录包；首次启动若遇系统信誉提示，按单位的软件安装策略处理。
 
 轴向窝深导入历史只在本次会话保留，设置跨启动保存；相机在线采集、机器人/主轴设备控制、加工点位预测接口尚未接入。本次保留这些现有行为。模拟样例的一轮训练只验证训练及推理可运行，不证明模型或设备测量精度。源码整理保留范围及未完成的本地缓存清理见 [整理审计](release_source_audit.md)。

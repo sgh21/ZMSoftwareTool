@@ -12,8 +12,8 @@ def main():
     root = Path(__file__).resolve().parents[2]
     if platform.machine().lower() not in ("amd64", "x86_64"):
         raise SystemExit("This release targets x86_64 only.")
-    if sys.version_info[:2] != (3, 12):
-        raise SystemExit("Build with Python 3.12.")
+    if sys.version_info[:2] != (3, 12) or sys.version_info < (3, 12, 1):
+        raise SystemExit("Build with Python 3.12.1 or newer 3.12.x; 3.12.0 corrupts frozen code objects.")
     import torch
 
     if torch.__version__ != "2.9.0+cpu":

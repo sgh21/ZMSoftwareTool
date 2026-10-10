@@ -104,7 +104,7 @@ class WindowsVerification:
         self.log_stream.close()
 
     def button(self, name, parent=None):
-        return (parent or self.window).child_window(title=name, control_type="Button")
+        return (parent or self.window).child_window(title=name, class_name="QPushButton", control_type="Button")
 
     def click(self, name, parent=None):
         self.button(name, parent).wait("enabled", timeout=30)
@@ -303,14 +303,17 @@ class WindowsVerification:
         wait_until(lambda: self.button("训练网络").is_enabled(), "训练样本尚未准备完毕")
         self.click("训练网络")
         train_dialog = self.dialog("从头训练网络")
-        edit = train_dialog.descendants(control_type="Edit")[0]
-        edit.set_edit_text("1")
+        epochs = train_dialog.child_window(class_name="QSpinBox").wrapper_object()
+        epochs.iface_range_value.SetValue(1)
+        assert epochs.iface_range_value.CurrentValue == 1
         self.click("开始训练", train_dialog)
         model_folder = self.user_data / "storage/spindle_monitoring/models"
         wait_until(lambda: bool(list(model_folder.rglob("*.pt"))), "未保存训练模型", timeout=300)
         wait_until(lambda: self.button("日常导入").is_enabled(), "训练后历史重算未完成", timeout=300)
         results = [row for row in self.spindle_results() if row.get("model_version")]
         assert results and all(row.get("score") is not None for row in results)
+        summaries = [json.loads(path.read_text(encoding="utf-8")) for path in model_folder.rglob("model.json")]
+        assert summaries and all(row["trained_epochs"] == 1 and row["device"] == "cpu" for row in summaries)
         previous_count = len(self.spindle_results())
         self.click("评估精度")
         wait_until(lambda: len(self.spindle_results()) > previous_count, "训练后推理未保存", timeout=180)
