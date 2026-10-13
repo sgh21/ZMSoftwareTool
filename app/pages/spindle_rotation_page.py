@@ -181,21 +181,16 @@ class SpindleRotationPage(QScrollArea):
         title.setProperty("monitorTitle", True)
         heading.addWidget(title)
         heading.addStretch()
-        self.source_badge = QLabel("暂无数据")
-        self.source_badge.setObjectName("SpindleDemoBadge")
-        self.source_badge.setWordWrap(True)
-        heading.addWidget(self.source_badge)
         body.addLayout(heading)
 
         metrics = QHBoxLayout()
         metrics.setSpacing(12)
         self.result_values = {}
-        self.result_notes = {}
-        for key, title, hint in (
-            ("analysis", "振动正常相容度", "径向 RMS · 尚无评价"),
-            ("network", "网络正常相容度", "重建误差 P95 · 尚无评价"),
-            ("temperature", "温度", "NTC1 / °C"),
-            ("current", "电流", "驱动器读数 / A"),
+        for key, title, unit in (
+            ("analysis", "振动正常相容度", ""),
+            ("network", "网络正常相容度", ""),
+            ("temperature", "温度", "°C"),
+            ("current", "电流", "A"),
         ):
             metric = QFrame()
             metric.setProperty("axisMetric", True)
@@ -209,9 +204,8 @@ class SpindleRotationPage(QScrollArea):
             value.setProperty("spindleValue", True)
             value.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.result_values[key] = value
-            note = make_note(hint)
+            note = make_note(unit)
             note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.result_notes[key] = note
             for widget in (label, value, note):
                 content.addWidget(widget)
             metrics.addWidget(metric, 1)
@@ -718,7 +712,6 @@ class SpindleRotationPage(QScrollArea):
         if key in self.auto_evaluation_attempts:
             return
         self.auto_evaluation_attempts.add(key)
-        self.source_badge.setText("正在更新当前采集评价")
         self._run_task("自动更新当前采集评价", lambda progress: self.service.ensure_latest_result(run_id, progress))
 
     def _label_changed(self):
@@ -761,11 +754,6 @@ class SpindleRotationPage(QScrollArea):
         ):
             notes = [description, "C = min(1, p / α)，正常接受范围内为 1；不是设备正常的后验概率。",
                      "两项针对不同特征，数值不要求相近；低于 1 均表示偏离各自的正常接受范围。"]
-            score = values[key]
-            state = "尚无评价" if not result else "参考无效 / 未校准"
-            if score is not None and isfinite(score):
-                state = "正常接受范围" if score == 1 else "偏离正常参考"
-            self.result_notes[key].setText(f"{'径向 RMS' if key == 'analysis' else '重建误差 P95'}\n{state}")
             if result:
                 raw_value = result.get(raw_key)
                 p_value = result.get(p_key)
@@ -788,25 +776,9 @@ class SpindleRotationPage(QScrollArea):
                 notes.append("尚无正常参考，请先确认正常样本并建立模型。")
             self.result_values[key].setToolTip("\n".join(notes))
         result_detail = ""
-        self.source_badge.setStyleSheet("")
-        self.source_badge.setToolTip("")
         if result:
-            source = "历史回放" if result["source_type"] == "historical_replay" else "检测数据"
             assessment = (assess_compatibility(result, metrics, result.get("thresholds_review_required", False))
                           if result.get("score_kind") == "normal_compatibility_v1" else result["assessment"])
-            status_text = {"unavailable": "正常相容度无效", "legacy": "旧倍率记录 · 待重新评估",
-                           "fault": "故障 / 建议检修", "warning": "预警 / 建议复测",
-                           "deviation": "偏离参考 · 未达报警阈值"}.get(
-                assessment["status"], assessment["message"])
-            self.source_badge.setText(f"{source} · {status_text}")
-            if any(item.get("calibration_level") == "preliminary" for item in result.get("compatibility", {}).values()):
-                self.source_badge.setText(self.source_badge.text() + " · 初步校准")
-            if assessment["status"] in ("warning", "fault"):
-                self.source_badge.setStyleSheet(f"color:{DISPLAY['colors']['error']};")
-            elif assessment["status"] == "deviation" or (
-                    assessment["status"] == "unconfigured" and any(
-                        value is not None and value < 1 for value in (result.get("score"), result.get("analysis_score")))):
-                self.source_badge.setStyleSheet(f"color:{DISPLAY['colors']['warning']};")
             if (assessment["status"] not in ("review_required", "legacy")
                     and not result.get("thresholds_review_required")):
                 for key, score_key, feature in (("analysis", "analysis_score", "vibration"), ("network", "score", "network")):
@@ -839,9 +811,6 @@ class SpindleRotationPage(QScrollArea):
                 result_detail += "\n两项相容度任一 ≤ 阈值即触发；故障优先。"
             elif result.get("legacy_assessment"):
                 result_detail += f"\n旧倍率当时判定：{result['legacy_assessment']['message']}"
-            self.source_badge.setToolTip(f"{assessment['message']}\n{result_detail}")
-        else:
-            self.source_badge.setText("暂无数据" if not self.service.runs else "暂无评价")
         run = self.service.runs.get(self.run_select.currentData())
         if run:
             short_name = run["run_name"].split("rpm_", 1)[-1]

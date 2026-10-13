@@ -210,7 +210,7 @@ README = """测试数据使用说明
 
 3. 主轴轴向进给精度
 “导入数据”选择 03_窝深/simulated_normal.csv，点击“评估精度”；也可重复使用同名 XLSX。
-采用逐孔理论窝深，设置误差下限 -0.1 mm、上限 0.1 mm。
+采用逐孔理论窝深，设置允许误差 0.1 mm（理论值 ±0.1 mm）。
 normal：5 个有效孔，平均 1.5000 mm，总体方差 0.0002 mm²，0 个超限。
 out_of_limit：6 行、5 个有效孔，平均 1.5000 mm，总体方差 0.0200 mm²，2 个超限。
 其中 1.4/1.6 mm 位于边界不超限，最后一行缺测保留为空、不补零。
@@ -253,7 +253,7 @@ def prepare_test_data(output):
             "feed": {
                 "normal": ["03_窝深/simulated_normal.csv", "03_窝深/simulated_normal.xlsx"],
                 "out_of_limit": ["03_窝深/simulated_out_of_limit.csv", "03_窝深/simulated_out_of_limit.xlsx"],
-                "settings": {"depth_mode": "per_hole", "error_lower_mm": -0.1, "error_upper_mm": 0.1},
+                "settings": {"depth_mode": "per_hole", "error_tolerance_mm": 0.1},
                 "expected": {"valid_count": 5, "mean_depth_mm": 1.5,
                              "normal": {"variance_mm2": 0.0002, "alarm_count": 0},
                              "out_of_limit": {"variance_mm2": 0.02, "alarm_count": 2, "missing_count": 1}},

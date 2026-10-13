@@ -103,7 +103,7 @@ def test_training_bundle_provides_five_distinct_matching_candidates(inputs, tmp_
 def test_feed_csv_and_excel_preserve_simulation_missing_values_and_limits(inputs, suffix, name, variance, alarms):
     source = inputs / "03_窝深" / f"simulated_{name}.{suffix}"
     data = load_feed_depth_data(source, DEFAULT_SETTINGS)
-    result = evaluate_feed_depth(data, {"error_lower_mm": -0.1, "error_upper_mm": 0.1})
+    result = evaluate_feed_depth(data, {"error_tolerance_mm": 0.1})
     assert all(row["is_simulated"] for row in result["rows"])
     summary = result["history"][0]
     assert summary["count"] == 5 and summary["mean_depth_mm"] == pytest.approx(1.5)

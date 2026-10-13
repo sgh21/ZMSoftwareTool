@@ -12,8 +12,7 @@ from core.services.position_persistence import read_json, write_document
 DEFAULT_SETTINGS = {
     "depth_mode": "per_hole",
     "uniform_depth": 1.5,
-    "error_lower_mm": None,
-    "error_upper_mm": None,
+    "error_tolerance_mm": None,
 }
 
 
@@ -29,24 +28,35 @@ def validate_feed_depth_settings(settings):
         if not isfinite(depth) or depth <= 0:
             raise ValueError("理论窝深必须为大于 0 的有限数值，单位 mm。")
         values["uniform_depth"] = depth
-    lower, upper = values["error_lower_mm"], values["error_upper_mm"]
-    if lower is None and upper is None:
+    tolerance = values["error_tolerance_mm"]
+    if tolerance is None:
         return values
     try:
-        lower, upper = float(lower), float(upper)
+        tolerance = float(tolerance)
     except (TypeError, ValueError):
-        raise ValueError("请同时填写误差下限和上限，或同时留空。") from None
-    if not isfinite(lower) or not isfinite(upper):
-        raise ValueError("误差下限和上限必须为有限数值，单位 mm。")
-    if lower > upper:
-        raise ValueError("误差下限不能大于上限。")
-    values.update(error_lower_mm=lower, error_upper_mm=upper)
+        raise ValueError("允许误差必须为大于或等于 0 的有限数值，单位 mm。") from None
+    if not isfinite(tolerance) or tolerance < 0:
+        raise ValueError("允许误差必须为大于或等于 0 的有限数值，单位 mm。")
+    values["error_tolerance_mm"] = tolerance
     return values
 
 
 def load_feed_depth_settings(path):
     path = Path(path)
-    return validate_feed_depth_settings(read_json(path)) if path.exists() else dict(DEFAULT_SETTINGS)
+    if not path.exists():
+        return dict(DEFAULT_SETTINGS)
+    settings = read_json(path)
+    legacy_limits = settings.get("error_lower_mm"), settings.get("error_upper_mm")
+    if "error_tolerance_mm" not in settings and legacy_limits != (None, None):
+        lower, upper = (float(value) for value in legacy_limits)
+        if upper >= 0 and isclose(lower, -upper, rel_tol=0.0, abs_tol=1e-12):
+            settings["error_tolerance_mm"] = upper
+        else:
+            settings["legacy_asymmetric_limits"] = True
+    values = validate_feed_depth_settings(settings)
+    if settings.get("legacy_asymmetric_limits"):
+        values["legacy_asymmetric_limits"] = True
+    return values
 
 
 def save_feed_depth_settings(path, settings):
@@ -144,11 +154,10 @@ def load_feed_depth_data(path, settings, progress=None):
 
 
 def _over_limit(bias, settings):
-    lower, upper = settings["error_lower_mm"], settings["error_upper_mm"]
-    if lower is None:
+    tolerance = settings["error_tolerance_mm"]
+    if tolerance is None:
         return False
-    return ((bias < lower and not isclose(bias, lower, rel_tol=0.0, abs_tol=1e-12))
-            or (bias > upper and not isclose(bias, upper, rel_tol=0.0, abs_tol=1e-12)))
+    return abs(bias) > tolerance and not isclose(abs(bias), tolerance, rel_tol=0.0, abs_tol=1e-12)
 
 
 def evaluate_feed_depth(data, settings):

@@ -1,6 +1,7 @@
 """窝深理论设置、误差边界及原始数据保留。"""
 
 from copy import deepcopy
+import json
 from statistics import fmean, pstdev, pvariance
 
 import pytest
@@ -28,8 +29,8 @@ def measurements():
     return {"rows": rows, "history": history, "csv_path": "original.csv"}
 
 
-def test_signed_limits_include_boundaries_and_do_not_hide_individual_alarms(measurements):
-    result = evaluate_feed_depth(measurements, {"error_lower_mm": -0.1, "error_upper_mm": 0.1})
+def test_symmetric_tolerance_includes_boundaries_and_does_not_hide_individual_alarms(measurements):
+    result = evaluate_feed_depth(measurements, {"error_tolerance_mm": 0.1})
     assert [row["alarm"] for row in result["rows"][:5]] == [True, False, False, False, True]
     assert result["history"][0]["alarm"] is False
     assert result["history"][0]["alarm_count"] == 2
@@ -43,7 +44,7 @@ def test_uniform_theory_updates_bias_without_rewriting_measurements(measurements
     original = deepcopy(measurements)
     result = evaluate_feed_depth(measurements, {
         "depth_mode": "uniform", "uniform_depth": 1.6,
-        "error_lower_mm": -0.1, "error_upper_mm": 0.1,
+        "error_tolerance_mm": 0.1,
     })
     assert measurements == original
     for source, row in zip(original["rows"], result["rows"]):
@@ -69,12 +70,11 @@ def test_uniform_theory_updates_bias_without_rewriting_measurements(measurements
     {"depth_mode": "uniform", "uniform_depth": 0},
     {"depth_mode": "uniform", "uniform_depth": float("nan")},
     {"depth_mode": "uniform", "uniform_depth": float("inf")},
-    {"error_lower_mm": -0.1},
-    {"error_upper_mm": 0.1},
-    {"error_lower_mm": -0.1, "error_upper_mm": "invalid"},
-    {"error_lower_mm": float("-inf"), "error_upper_mm": 0.1},
-    {"error_lower_mm": -0.1, "error_upper_mm": float("nan")},
-    {"error_lower_mm": 0.1, "error_upper_mm": -0.1},
+    {"error_tolerance_mm": -0.1},
+    {"error_tolerance_mm": "invalid"},
+    {"error_tolerance_mm": float("-inf")},
+    {"error_tolerance_mm": float("inf")},
+    {"error_tolerance_mm": float("nan")},
 ])
 def test_invalid_settings_are_rejected(settings):
     with pytest.raises(ValueError):
@@ -89,17 +89,57 @@ def test_settings_persist_and_invalid_save_keeps_previous_file(tmp_path):
     assert load_feed_depth_settings(path)["uniform_depth"] == 1.5
     settings = save_feed_depth_settings(path, {
         "depth_mode": "uniform", "uniform_depth": "1.55",
-        "error_lower_mm": "-0.02", "error_upper_mm": "0.03",
+        "error_tolerance_mm": "0.03",
     })
     assert settings == {"depth_mode": "uniform", "uniform_depth": 1.55,
-                        "error_lower_mm": -0.02, "error_upper_mm": 0.03}
+                        "error_tolerance_mm": 0.03}
     assert load_feed_depth_settings(path) == settings
     content = path.read_bytes()
     with pytest.raises(ValueError):
-        save_feed_depth_settings(path, {"error_lower_mm": 0.2, "error_upper_mm": 0.1})
+        save_feed_depth_settings(path, {"error_tolerance_mm": -0.1})
     assert path.read_bytes() == content
     assert validate_feed_depth_settings({"uniform_depth": None})["uniform_depth"] is None
-    assert validate_feed_depth_settings({"error_lower_mm": 0, "error_upper_mm": 0})["error_upper_mm"] == 0.0
+    assert validate_feed_depth_settings({"error_tolerance_mm": 0})["error_tolerance_mm"] == 0.0
+
+
+@pytest.mark.parametrize(("tolerance", "alarms"), [
+    (0.05, [True, False, False, False, False, False, True]),
+    (0, [True, True, True, True, False, True, True]),
+    (None, [False] * 7),
+])
+def test_depth_range_around_theory_is_symmetric(tolerance, alarms):
+    depths = [1.449, 1.45, 1.49, 1.497, 1.5, 1.55, 1.551]
+    data = {
+        "rows": [{"batch_id": "B01", "hole_id": str(index), "actual_depth_mm": depth,
+                  "theoretical_depth_mm": 1.5} for index, depth in enumerate(depths)],
+        "history": [{"batch_id": "B01"}],
+    }
+    result = evaluate_feed_depth(data, {"error_tolerance_mm": tolerance})
+    assert [row["alarm"] for row in result["rows"]] == alarms
+    assert result["history"][0]["alarm_count"] == sum(alarms)
+    assert result["history"][0]["alarm"] is (tolerance == 0)
+
+
+@pytest.mark.parametrize(("lower", "upper", "tolerance", "needs_input"), [
+    (-0.05, 0.05, 0.05, False),
+    (0, 0, 0.0, False),
+    (None, None, None, False),
+    (-0.02, 0.03, None, True),
+    (1.45, 1.55, None, True),
+])
+def test_legacy_settings_load_without_rewriting_file(tmp_path, lower, upper, tolerance, needs_input):
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"depth_mode": "uniform", "uniform_depth": 1.5,
+                                "error_lower_mm": lower, "error_upper_mm": upper}), encoding="utf-8")
+    original = path.read_bytes()
+    settings = load_feed_depth_settings(path)
+    assert settings["error_tolerance_mm"] == tolerance
+    assert settings.get("legacy_asymmetric_limits", False) is needs_input
+    assert settings["depth_mode"] == "uniform" and settings["uniform_depth"] == 1.5
+    assert path.read_bytes() == original
+    saved = save_feed_depth_settings(path, {**settings, "error_tolerance_mm": 0.05})
+    assert saved == {"depth_mode": "uniform", "uniform_depth": 1.5, "error_tolerance_mm": 0.05}
+    assert json.loads(path.read_text(encoding="utf-8")) == saved
 
 
 @pytest.mark.parametrize("suffix", [".csv", ".xlsx"])

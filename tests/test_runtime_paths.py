@@ -62,7 +62,7 @@ def test_frozen_services_and_page_never_write_bundle(application, monkeypatch, t
     assert page.simulation_root == writable / "data/feed_depth_simulation"
     save_feed_depth_settings(page.settings_path, {
         "depth_mode": "uniform", "uniform_depth": 1.2,
-        "error_lower_mm": -0.1, "error_upper_mm": 0.1,
+        "error_tolerance_mm": 0.1,
     })
     assert page.settings_path.is_file()
     assert {path.relative_to(bundle): path.read_bytes() for path in bundle.rglob("*") if path.is_file()} == bundle_files

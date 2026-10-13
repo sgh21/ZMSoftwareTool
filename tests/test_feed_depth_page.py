@@ -1,5 +1,6 @@
 """窝深调试、理论设置、误差报警与历史联动回归。"""
 
+import json
 from copy import deepcopy
 from pathlib import Path
 from statistics import fmean
@@ -40,7 +41,7 @@ def click_debug_action(page, application, action_text):
 
 
 def change_settings(page, application, *, mode="uniform", depth="1.500",
-                    lower="-0.05", upper="0.05", action="应用设置"):
+                    tolerance="0.05", action="应用设置"):
     inspected = {}
 
     def edit_dialog():
@@ -50,8 +51,7 @@ def change_settings(page, application, *, mode="uniform", depth="1.500",
             selector = dialog.findChild(QComboBox)
             selector.setCurrentIndex(selector.findData(mode))
             for name, value in (
-                ("feedDepthTheory", depth), ("feedDepthErrorLower", lower),
-                ("feedDepthErrorUpper", upper),
+                ("feedDepthTheory", depth), ("feedDepthErrorTolerance", tolerance),
             ):
                 dialog.findChild(QLineEdit, name).setText(value)
             button = next(item for item in dialog.findChildren(QPushButton) if item.text() == action)
@@ -131,7 +131,7 @@ def test_simulation_runs_in_background_and_links_selected_batch(page, applicatio
     assert worker_threads and worker_threads[0] != main_thread
     assert len(page.simulation["history"]) == 90
     assert page.progress.value() == 100
-    assert "模拟数据" in page.source_badge.text()
+    assert all(record["is_simulated"] for record in page.evaluation["history"])
 
     chart = page.trend_charts["bias"]
     selected_index = 34
@@ -209,7 +209,7 @@ def test_exit_simulation_restores_settings_and_keeps_csv(page, application, tmp_
     assert page.result_values["theory"].text() == "1.700"
     assert page.depth_mode == "uniform" and page.uniform_depth == 1.7
     assert "1.7" in page.theory_button.toolTip()
-    assert page.error_lower_mm == -0.05 and page.error_upper_mm == 0.05
+    assert page.error_tolerance_mm == 0.05
     assert not page.result_values["mean"].property("overLimit")
     assert page.result_values["mean"].palette().color(QPalette.ColorRole.WindowText) != QColor(DISPLAY["colors"]["error"])
     assert page.choose_button.toolTip() == page.selected_file
@@ -273,8 +273,8 @@ def test_theory_and_error_settings_refresh_history_and_alarm_colors(page, applic
     assert page.simulation == source
     assert Path(source["csv_path"]).read_bytes() == csv_before
 
-    change_settings(page, application, mode="per_hole", lower="", upper="")
-    assert page.error_lower_mm is None and page.error_upper_mm is None
+    change_settings(page, application, mode="per_hole", tolerance="")
+    assert page.error_tolerance_mm is None
     assert not mean.property("overLimit")
     assert mean.palette().color(QPalette.ColorRole.WindowText) == normal_color
     assert all(not row["alarm"] for row in page.evaluation["rows"])
@@ -284,27 +284,100 @@ def test_theory_and_error_settings_refresh_history_and_alarm_colors(page, applic
     assert all(row[3][1] != red and row[4][1] != red for row in detail_rows)
 
 
+@pytest.mark.parametrize(("actual", "tolerance", "alarm"), [
+    ("1.45", "0.05", False),
+    ("1.55", "0.05", False),
+    ("1.49", "0.05", False),
+    ("1.497", "0.05", False),
+    ("1.449", "0.05", True),
+    ("1.551", "0.05", True),
+    ("1.5", "0", False),
+    ("1.501", "0", True),
+])
+def test_single_hole_tolerance_boundaries_update_alarm_colors(page, application, tmp_path, actual, tolerance, alarm):
+    path = tmp_path / "single-hole.csv"
+    path.write_text(f"hole_id,actual_depth_mm,theoretical_depth_mm\n001,{actual},1.5\n", encoding="utf-8")
+    page.selected_file = str(path)
+    page.import_button.click()
+    wait_for_page(page)
+    change_settings(page, application, tolerance=tolerance)
+
+    red = QColor(DISPLAY["colors"]["error"])
+    mean = page.result_values["mean"]
+    assert page.error_tolerance_mm == float(tolerance)
+    assert mean.property("overLimit") is alarm
+    assert (mean.palette().color(QPalette.ColorRole.WindowText) == red) is alarm
+    assert f"±{float(tolerance):g} mm" in mean.toolTip()
+    assert page.evaluation["history"][0]["alarm_count"] == int(alarm)
+    details = read_table_dialog(application, page._show_hole_details)
+    assert (details[0][3][1] == red) is alarm
+    assert (details[0][4][1] == red) is alarm
+
+
+def test_outlying_holes_do_not_mark_an_in_range_batch_mean_red(page, application, tmp_path):
+    path = tmp_path / "opposite-errors.csv"
+    path.write_text("hole_id,actual_depth_mm,theoretical_depth_mm\n001,1.44,1.5\n002,1.56,1.5\n", encoding="utf-8")
+    page.selected_file = str(path)
+    page.import_button.click()
+    wait_for_page(page)
+    change_settings(page, application)
+
+    red = QColor(DISPLAY["colors"]["error"])
+    mean = page.result_values["mean"]
+    assert mean.text() == "1.500"
+    assert not mean.property("overLimit")
+    assert mean.palette().color(QPalette.ColorRole.WindowText) != red
+    assert page.task_progress_note.text() == "2 孔超限"
+    details = read_table_dialog(application, page._show_hole_details)
+    assert all(row[3][1] == row[4][1] == red for row in details)
+    history = read_table_dialog(application, page._show_history)
+    assert history[0][2][1] != red and history[0][3][1] != red
+
+    change_settings(page, application, tolerance="")
+    assert page.error_tolerance_mm is None
+    assert not any(row["alarm"] for row in page.evaluation["rows"])
+    assert "报警已关闭" in page.theory_button.toolTip()
+
+
+def test_legacy_asymmetric_limits_warn_without_rewriting_settings(application, tmp_path):
+    settings_path = tmp_path / "legacy-settings.json"
+    settings_path.write_text(json.dumps({
+        "depth_mode": "per_hole", "uniform_depth": 1.5,
+        "error_lower_mm": 1.45, "error_upper_mm": 1.55,
+    }), encoding="utf-8")
+    original = settings_path.read_bytes()
+    widget = FeedDepthPage(simulation_root=tmp_path / "simulation", settings_path=settings_path)
+    try:
+        assert widget.error_tolerance_mm is None
+        assert "[WARNING]" in widget.process_log.toPlainText()
+        assert "旧报警上下限不对称" in widget.process_log.toPlainText()
+        assert "重新填写允许误差" in widget.task_progress_note.text()
+        assert settings_path.read_bytes() == original
+    finally:
+        widget.close()
+
+
 def test_settings_persist_without_data_and_cancel_keeps_previous_values(page, application, tmp_path):
-    assert page.error_lower_mm is None and page.error_upper_mm is None
-    change_settings(page, application, depth="1.650", lower="-0.02", upper="0.03")
+    assert page.error_tolerance_mm is None
+    change_settings(page, application, depth="1.650", tolerance="0.03")
     settings_path = tmp_path / "settings.json"
     saved = settings_path.read_bytes()
     assert page.uniform_depth == 1.65
-    assert page.error_lower_mm == -0.02 and page.error_upper_mm == 0.03
+    assert page.error_tolerance_mm == 0.03
     assert page.simulation is None and page.evaluation is None
     assert all(page.result_values[key].text() == "—" for key in ("count", "mean", "variance"))
     assert all(not chart.history for chart in page.trend_charts.values())
     assert not page.result_values["mean"].property("overLimit")
 
-    change_settings(page, application, depth="2.000", lower="-0.1", upper="0.1", action="取消")
+    change_settings(page, application, depth="2.000", tolerance="0.1", action="取消")
     assert page.uniform_depth == 1.65
-    assert page.error_lower_mm == -0.02 and page.error_upper_mm == 0.03
+    assert page.error_tolerance_mm == 0.03
     assert settings_path.read_bytes() == saved
 
     reopened = FeedDepthPage(simulation_root=tmp_path / "reopened", settings_path=settings_path)
     try:
         assert reopened.depth_mode == "uniform" and reopened.uniform_depth == 1.65
-        assert reopened.error_lower_mm == -0.02 and reopened.error_upper_mm == 0.03
+        assert reopened.error_tolerance_mm == 0.03
         assert "1.65" in reopened.theory_button.toolTip()
         assert reopened.result_values["theory"].text() == "1.650"
         assert reopened.simulation is None and reopened.evaluation is None
@@ -328,10 +401,10 @@ def test_settings_save_failure_keeps_previous_settings_and_results(page, applica
         raise OSError("设置文件保存失败")
 
     monkeypatch.setattr(page_module, "save_feed_depth_settings", fail_save)
-    change_settings(page, application, depth="1.400", lower="-0.1", upper="0.1")
+    change_settings(page, application, depth="1.400", tolerance="0.1")
 
     assert page.depth_mode == "uniform" and page.uniform_depth == 1.5
-    assert page.error_lower_mm == -0.05 and page.error_upper_mm == 0.05
+    assert page.error_tolerance_mm == 0.05
     assert settings_path.read_bytes() == saved
     assert page.evaluation == previous_evaluation
     assert page.selected_batch_index == 89
@@ -389,7 +462,7 @@ def test_import_evaluate_and_failed_replacement_keep_original_data(page, applica
     assert page.import_button.isEnabled() and page.calculate_button.isEnabled()
     assert page.result_values["count"].text() == "2"
     assert page.result_values["mean"].text() == "1.500"
-    assert page.source_badge.text() == "导入数据"
+    assert not any(record["is_simulated"] for record in page.evaluation["history"])
     assert page.trend_charts["bias"].points == []  # 未提供时间与工况，不造历史趋势。
     page.calculate_button.click()
     assert not page.calculate_button.isEnabled()
@@ -479,7 +552,7 @@ def test_multiple_imports_group_details_and_restore_after_simulation(page, appli
     wait_for_page(page)
     assert page.simulation is None and page.measurements == original
     assert len(page.evaluation["history"]) == 3
-    assert page.source_badge.text() == "导入数据"
+    assert not any(record["is_simulated"] for record in page.evaluation["history"])
 
 
 def test_standard_deviation_chart_excludes_single_hole_batches(application):
@@ -496,12 +569,14 @@ def test_standard_deviation_chart_excludes_single_hole_batches(application):
     chart.close()
 
 
-@pytest.mark.parametrize(("depth", "lower", "upper", "message"), [
-    ("nan", "-0.05", "0.05", "理论窝深"),
-    ("1.5", "-0.05", "", "同时填写"),
-    ("1.5", "0.05", "-0.05", "下限不能大于上限"),
+@pytest.mark.parametrize(("depth", "tolerance", "message"), [
+    ("nan", "0.05", "理论窝深"),
+    ("1.5", "-0.05", "允许误差"),
+    ("1.5", "nan", "允许误差"),
+    ("1.5", "inf", "允许误差"),
+    ("1.5", "abc", "允许误差"),
 ])
-def test_invalid_settings_can_be_corrected_in_the_same_dialog(page, application, depth, lower, upper, message):
+def test_invalid_settings_can_be_corrected_in_the_same_dialog(page, application, depth, tolerance, message):
     inspected = []
 
     def edit():
@@ -509,7 +584,7 @@ def test_invalid_settings_can_be_corrected_in_the_same_dialog(page, application,
         try:
             mode = dialog.findChild(QComboBox)
             mode.setCurrentIndex(mode.findData("uniform"))
-            for name, value in (("feedDepthTheory", depth), ("feedDepthErrorLower", lower), ("feedDepthErrorUpper", upper)):
+            for name, value in (("feedDepthTheory", depth), ("feedDepthErrorTolerance", tolerance)):
                 dialog.findChild(QLineEdit, name).setText(value)
             apply = next(button for button in dialog.findChildren(QPushButton) if button.text() == "应用设置")
             apply.click()
@@ -517,7 +592,7 @@ def test_invalid_settings_can_be_corrected_in_the_same_dialog(page, application,
             inspected.append((dialog.isVisible(), page.task is None, error.text()))
             assert message in error.text()
             assert not page.settings_path.exists()
-            for name, value in (("feedDepthTheory", "1.6"), ("feedDepthErrorLower", "-0.02"), ("feedDepthErrorUpper", "0.03")):
+            for name, value in (("feedDepthTheory", "1.6"), ("feedDepthErrorTolerance", "0.03")):
                 dialog.findChild(QLineEdit, name).setText(value)
             apply.click()
         finally:
@@ -529,7 +604,7 @@ def test_invalid_settings_can_be_corrected_in_the_same_dialog(page, application,
     wait_for_page(page)
     assert inspected and inspected[0][:2] == (True, True)
     assert page.uniform_depth == 1.6
-    assert page.error_lower_mm == -.02 and page.error_upper_mm == .03
+    assert page.error_tolerance_mm == .03
 
 
 def test_repeated_simulation_and_file_selection_preserve_exported_inputs(page, application, monkeypatch, tmp_path):
@@ -594,7 +669,7 @@ def test_background_settings_completion_after_page_deletion_does_not_touch_widge
     monkeypatch.setattr(page_module, "save_feed_depth_settings", gated)
     monkeypatch.setattr(sys, "excepthook", lambda kind, value, trace: errors.append(str(value)))
     try:
-        page._apply_settings({"depth_mode": "uniform", "uniform_depth": 1.6, "error_lower_mm": None, "error_upper_mm": None})
+        page._apply_settings({"depth_mode": "uniform", "uniform_depth": 1.6, "error_tolerance_mm": None})
         assert entered.wait(2)
         page.deleteLater()
         QCoreApplication.sendPostedEvents(page, QEvent.Type.DeferredDelete)

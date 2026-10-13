@@ -220,7 +220,6 @@ def test_empty_start_has_no_fabricated_model_score_or_curves(service, page_facto
     assert "导入" in page.evaluate_button.toolTip()
     assert_disabled_tooltip(page.evaluate_button)
     assert not page.label_button.isEnabled()
-    assert "示意" not in page.source_badge.text()
     assert all(light.property("state") == "missing" for light in page.status_lights.values())
     assert page.process_log.minimumHeight() == 110
     assert page.process_log.placeholderText() == "操作过程、提示与错误将在这里显示"
@@ -467,7 +466,7 @@ def test_selecting_current_samples_refreshes_both_scores_without_inference(model
     assert page.result_values["network"].text() == "0.7"
     assert "当前设置" in page.current_run_button.text()
     assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
-    assert "偏离" in page.source_badge.text()
+    assert page.result["assessment"]["status"] == "unconfigured"
     page.run_select.setCurrentIndex(page.run_select.findData("initial1"))
     assert page.result_values["analysis"].text() == "1"
     assert page.result_values["network"].text() == "0.4"
@@ -737,8 +736,7 @@ def test_history_opens_exact_saved_evaluation_without_changing_manual_label(mode
     assert page.model_select.currentData() == original["model_version"]
     assert page.result["id"] == original["id"]
     assert page.result["thresholds"] == {"warning": None, "fault": None}
-    assert "未设置报警阈值" in page.source_badge.text()
-    assert "当时阈值" in page.source_badge.toolTip()
+    assert "当时阈值（网络）：预警 未设置 / 故障 未设置" in page.current_run_button.toolTip()
     assert page.label_select.currentData() == "abnormal"
     assert service.runs["daily"]["manual_label"] == "abnormal"
     assert len(service.state["results"]) == len(entries)
@@ -795,8 +793,7 @@ def test_failed_import_preserves_exact_historical_result(model_service, tmp_path
     assert errors
     assert page.result == original
     assert not page.uses_current_thresholds
-    assert "未设置报警阈值" in page.source_badge.text()
-    assert "当时阈值" in page.source_badge.toolTip()
+    assert "当时阈值（网络）：预警 未设置 / 故障 未设置" in page.current_run_button.toolTip()
     assert len(model_service.state["results"]) == len(entries)
     assert page.daily_button.isEnabled()
 
@@ -821,7 +818,7 @@ def test_alarm_colors_only_the_triggering_score_and_clears_when_normal_or_pendin
     service = model_service
     service.set_thresholds(warning, fault)
     page = page_factory(service)
-    assert ("预警" if fault == .2 else "故障") in page.source_badge.text()
+    assert page.result["assessment"]["status"] == ("warning" if fault == .2 else "fault")
     assert page.result_values["analysis"].text() == "1"
     assert service.analysis_metrics(page.result)[0] == pytest.approx(1)
     assert "对数参考 μ" in page.result_values["analysis"].toolTip()
@@ -831,13 +828,12 @@ def test_alarm_colors_only_the_triggering_score_and_clears_when_normal_or_pendin
     service.settings["thresholds_model_version"] = "previous-model"
     page._refresh()
     assert "新模型阈值待复核" in page.status_lights["thresholds"].toolTip()
-    assert "新模型阈值待复核" in page.source_badge.text()
-    assert page.source_badge.styleSheet() == ""
+    assert page.result["assessment"]["status"] == "review_required"
     assert all(value.styleSheet() == "" for value in page.result_values.values())
     service.set_thresholds(.3, .1)
     page._refresh()
     assert page.status_lights["thresholds"].property("state") == "ready"
-    assert "偏离参考" in page.source_badge.text()
+    assert page.result["assessment"]["status"] == "deviation"
     assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
     assert page.result_values["analysis"].styleSheet() == ""
 
@@ -865,9 +861,7 @@ def test_invalid_compatibility_and_legacy_ratio_never_display_full_compatibility
     page._show_result(result, current_thresholds=True)
     assert page.result_values["analysis"].text() == "—"
     assert page.result["assessment"]["status"] == "unavailable"
-    assert "无效" in page.source_badge.text()
     assert "标准差为 0" in page.result_values["analysis"].toolTip()
-    assert "标准差为 0" in page.source_badge.toolTip()
     assert page.result_values["analysis"].styleSheet() == ""
 
     legacy = deepcopy(result)
@@ -875,7 +869,7 @@ def test_invalid_compatibility_and_legacy_ratio_never_display_full_compatibility
     legacy["score"] = legacy["analysis_score"] = 5.0
     page._show_result(legacy)
     assert all(page.result_values[key].text() == "—" for key in ("analysis", "network"))
-    assert "旧倍率" in page.source_badge.text()
+    assert page.result["assessment"]["status"] == "legacy"
     assert "重新评估" in page.result_values["network"].toolTip()
 
 
@@ -893,16 +887,13 @@ def test_invalid_vibration_preserves_network_alarm_only_after_threshold_review(m
     assert page.result_values["analysis"].text() == "—"
     assert page.result_values["network"].text() == "0.4"
     assert page.result_values["analysis"].styleSheet() == ""
-    assert reason in page.source_badge.toolTip()
-    assert reason not in page.source_badge.text()
+    assert reason in page.result_values["analysis"].toolTip()
     if review_required:
         assert page.result["assessment"]["status"] == "unavailable"
         assert all(value.styleSheet() == "" for value in page.result_values.values())
-        assert page.source_badge.styleSheet() == ""
     else:
         assert page.result["assessment"]["status"] == "fault"
         assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
-        assert page.source_badge.styleSheet()
 
 
 def test_network_distribution_uses_one_value_per_reference_acquisition(model_service, page_factory):
@@ -914,7 +905,7 @@ def test_network_distribution_uses_one_value_per_reference_acquisition(model_ser
     assert plot._y_limits(0, 1) == (0, 1)
     assert sum(plot.series[0][1]) == pytest.approx(1)
     assert plot.series[1][0] == [result["reconstruction_error_p95"]] * 2
-    assert "初步校准" in page.source_badge.text()
+    assert any(item.get("calibration_level") == "preliminary" for item in result["compatibility"].values())
     assert "p：" in page.result_values["network"].toolTip()
     assert "正常概率" not in " ".join(label.text() for label in page.findChildren(QLabel))
 
@@ -1006,11 +997,10 @@ def test_historical_departure_is_explicit_and_can_return_to_current_without_over
     page.model_select.setCurrentIndex(page.model_select.findData(historical["model_version"]))
     assert page.result == historical
     assert "历史快照" in page.result_context.text()
-    assert "偏离正常参考" in page.source_badge.text()
-    assert "偏离正常参考" in page.result_notes["analysis"].text()
-    assert "偏离正常参考" in page.result_notes["network"].text()
-    assert "径向 RMS" in page.result_notes["analysis"].text()
-    assert "重建误差 P95" in page.result_notes["network"].text()
+    assert float(page.result_values["analysis"].text()) == pytest.approx(.9689)
+    assert float(page.result_values["network"].text()) == pytest.approx(.04338)
+    assert all(page.result_values[key].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+               for key in ("analysis", "network"))
     assert page.latest_button.isVisible()
     page.latest_button.click()
     assert page.uses_current_thresholds

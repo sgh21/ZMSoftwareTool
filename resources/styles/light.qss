@@ -337,14 +337,6 @@ QFrame[feedDepthPlot="true"] {
     border-radius: 4px;
 }
 
-QLabel#SpindleDemoBadge {
-    color: @axis_z@;
-    background: #fff4e5;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 14px;
-}
-
 QLabel[spindleValue="true"] {
     font-size: 34px;
     font-weight: 700;

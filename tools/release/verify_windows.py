@@ -338,9 +338,7 @@ class WindowsVerification:
         self.click("理论窝深与报警设置")
         dialog = self.dialog("理论窝深与报警设置")
         for field in dialog.descendants(control_type="Edit"):
-            if field.element_info.automation_id.endswith(".feedDepthErrorLower"):
-                field.set_edit_text("-0.1")
-            elif field.element_info.automation_id.endswith(".feedDepthErrorUpper"):
+            if field.element_info.automation_id.endswith(".feedDepthErrorTolerance"):
                 field.set_edit_text("0.1")
         self.click("应用设置", dialog)
         self.wait_text("设置已保存")
@@ -396,7 +394,7 @@ class WindowsVerification:
         self.tab("主轴轴向进给精度")
         assert self.button("导入数据").is_enabled() and not self.button("评估精度").is_enabled()
         settings = json.loads((self.user_data / "storage/feed_depth/settings.json").read_text(encoding="utf-8"))
-        assert settings["error_lower_mm"] == -0.1 and settings["error_upper_mm"] == 0.1
+        assert settings["error_tolerance_mm"] == 0.1
         self.screenshot("07_restarted")
         return {"robot_restored": True, "spindle_restored": True, "feed_settings_restored": True,
                 "feed_records": "会话内记录，重启无载入数据符合现状"}

@@ -46,8 +46,7 @@ class FeedDepthPage(QScrollArea):
         self.selected_file = ""
         self.uniform_depth = settings["uniform_depth"]
         self.depth_mode = settings["depth_mode"]
-        self.error_lower_mm = settings["error_lower_mm"]
-        self.error_upper_mm = settings["error_upper_mm"]
+        self.error_tolerance_mm = settings["error_tolerance_mm"]
         self.setObjectName("FeedDepthPage")
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -62,6 +61,9 @@ class FeedDepthPage(QScrollArea):
         self.columns.addWidget(self._settings_view(), 7)
         self._update_settings_tooltip()
         self._update_actions()
+        if settings.get("legacy_asymmetric_limits"):
+            self._append_log("旧报警上下限不对称，无法转换为单个允许误差；请重新填写允许误差。当前报警已关闭。", "WARNING")
+            self.task_progress_note.setText("旧报警设置需要重新填写允许误差")
 
     def _results_view(self):
         panel = QFrame()
@@ -74,18 +76,16 @@ class FeedDepthPage(QScrollArea):
         title.setProperty("monitorTitle", True)
         heading.addWidget(title)
         heading.addStretch()
-        self.source_badge = make_note("暂无数据")
-        heading.addWidget(self.source_badge)
         body.addLayout(heading)
 
         metrics = QHBoxLayout()
         metrics.setSpacing(12)
         self.result_values = {}
         for key, title, unit in (
-            ("count", "有效孔数", "当前分组 / 个"),
-            ("theory", "理论窝深", "当前分组 / mm"),
-            ("mean", "平均窝深", "实测 / mm"),
-            ("variance", "窝深方差", "总体方差 / mm²"),
+            ("count", "有效孔数", "个"),
+            ("theory", "理论窝深", "mm"),
+            ("mean", "平均窝深", "mm"),
+            ("variance", "窝深方差", "mm²"),
         ):
             card = QFrame()
             card.setProperty("axisMetric", True)
@@ -460,7 +460,6 @@ class FeedDepthPage(QScrollArea):
         self.simulation = result
         history = result["evaluation"]["history"]
         self._show_evaluation(result["evaluation"], len(history) - 1)
-        self.source_badge.setText(f"模拟数据 · {len(history)} 天")
         self._append_log(f"模拟数据生成并显示完成：{len(history)} 批、{len(result['rows'])} 孔；CSV：{result['output_dir']}")
         self.progress.setValue(100)
         self.task = None
@@ -478,7 +477,6 @@ class FeedDepthPage(QScrollArea):
             return
         self.selected_batch_index = index
         record = self.evaluation["history"][index]
-        self.source_badge.setText(_source_label(record))
         self.history_note.setText(f"{record['measured_at'][:10] or '测量时间未提供'} · {record.get('row_id') or '整批'} · {record['count']} 孔")
         for key, text in (
             ("count", str(record["count"])), ("theory", f"{record['theoretical_depth_mm']:.3f}"),
@@ -510,13 +508,13 @@ class FeedDepthPage(QScrollArea):
             self.task_progress_note.setText("当前分组全部缺测，请检查数据或选择其他分组。")
             self._alarm_key = None
             return
-        if self.error_lower_mm is None:
-            self.result_values["mean"].setToolTip("尚未设置误差报警范围。")
+        if self.error_tolerance_mm is None:
+            self.result_values["mean"].setToolTip("尚未设置允许误差，报警已关闭。")
             self.task_progress_note.setText(f"{_source_label(record)}已就绪")
             self._alarm_key = None
             return
-        detail = (f"平均偏差 {record['bias_mm']:+.4f} mm；允许范围 "
-                  f"[{self.error_lower_mm:+g}, {self.error_upper_mm:+g}] mm；"
+        detail = (f"平均偏差 {record['bias_mm']:+.4f} mm；允许误差 "
+                  f"±{self.error_tolerance_mm:g} mm；"
                   f"{record['alarm_count']} 孔超限。")
         self.result_values["mean"].setToolTip(detail)
         self.task_progress_note.setText(
@@ -524,7 +522,7 @@ class FeedDepthPage(QScrollArea):
             if record["alarm"] or record["alarm_count"] else "当前批次未超限"
         )
         alarm_key = (record["batch_id"], record["theoretical_depth_mm"],
-                     self.error_lower_mm, self.error_upper_mm) if record["alarm"] or record["alarm_count"] else None
+                     self.error_tolerance_mm) if record["alarm"] or record["alarm_count"] else None
         if alarm_key is not None and alarm_key != self._alarm_key:
             self._append_log(f"{_source_label(record)} {record['measured_at'][:10]}：{detail}", "WARNING")
         self._alarm_key = alarm_key
@@ -544,7 +542,6 @@ class FeedDepthPage(QScrollArea):
         self.result_values["mean"].setToolTip("")
         for chart in self.trend_charts.values():
             chart.set_history([])
-        self.source_badge.setText("暂无数据")
         self.history_note.setText("暂无数据")
         self.choose_button.setToolTip(self.selected_file)
         self.theory_button.setEnabled(True)
@@ -608,17 +605,13 @@ class FeedDepthPage(QScrollArea):
         mode.currentIndexChanged.connect(lambda: depth.setEnabled(mode.currentData() == "uniform"))
         form.addRow("理论值来源", mode)
         form.addRow("统一窝深 / mm", depth)
-        lower = QLineEdit("" if self.error_lower_mm is None else str(self.error_lower_mm))
-        lower.setObjectName("feedDepthErrorLower")
-        upper = QLineEdit("" if self.error_upper_mm is None else str(self.error_upper_mm))
-        upper.setObjectName("feedDepthErrorUpper")
-        for field in (lower, upper):
-            field.setProperty("robotInput", True)
-            field.setPlaceholderText("未设置")
-        form.addRow("允许误差下限 / mm", lower)
-        form.addRow("允许误差上限 / mm", upper)
+        tolerance = QLineEdit("" if self.error_tolerance_mm is None else str(self.error_tolerance_mm))
+        tolerance.setObjectName("feedDepthErrorTolerance")
+        tolerance.setProperty("robotInput", True)
+        tolerance.setPlaceholderText("留空关闭报警，例如 0.05")
+        form.addRow("允许误差 / mm", tolerance)
         body.addLayout(form)
-        body.addWidget(make_note("偏差 = 实测 − 理论；超出允许范围标红，等于边界不报警。上下限同时留空则关闭报警。"))
+        body.addWidget(make_note("偏差 = 实测 − 理论；填写 0.05 表示理论值 ±0.05 mm，等于边界不报警；留空关闭报警。"))
         error = make_note("")
         error.setProperty("validationError", True)
         body.addWidget(error)
@@ -628,8 +621,7 @@ class FeedDepthPage(QScrollArea):
                 settings = validate_feed_depth_settings({
                     "depth_mode": mode.currentData(),
                     "uniform_depth": depth.text().strip() if mode.currentData() == "uniform" else self.uniform_depth,
-                    "error_lower_mm": lower.text().strip() or None,
-                    "error_upper_mm": upper.text().strip() or None,
+                    "error_tolerance_mm": tolerance.text().strip() or None,
                 })
             except ValueError as exc:
                 error.setText(str(exc))
@@ -643,13 +635,13 @@ class FeedDepthPage(QScrollArea):
 
     def _current_settings(self):
         return {"depth_mode": self.depth_mode, "uniform_depth": self.uniform_depth,
-                "error_lower_mm": self.error_lower_mm, "error_upper_mm": self.error_upper_mm}
+                "error_tolerance_mm": self.error_tolerance_mm}
 
     def _update_settings_tooltip(self):
         theory = (f"整批统一理论窝深：{self.uniform_depth:g} mm" if self.depth_mode == "uniform"
                   else "逐孔读取文件中的理论窝深，单位 mm。")
-        limits = ("未设置误差报警范围" if self.error_lower_mm is None else
-                  f"允许误差：[{self.error_lower_mm:+g}, {self.error_upper_mm:+g}] mm（含边界）")
+        limits = ("未设置允许误差，报警已关闭" if self.error_tolerance_mm is None else
+                  f"允许误差：±{self.error_tolerance_mm:g} mm（含边界）")
         self.theory_button.setToolTip(f"{theory}\n{limits}")
         if self.evaluation is None:
             self.result_values["theory"].setText(f"{self.uniform_depth:.3f}" if self.depth_mode == "uniform" else "—")
@@ -676,8 +668,7 @@ class FeedDepthPage(QScrollArea):
         self.pending_settings = None
         self.depth_mode = settings["depth_mode"]
         self.uniform_depth = settings["uniform_depth"]
-        self.error_lower_mm = settings["error_lower_mm"]
-        self.error_upper_mm = settings["error_upper_mm"]
+        self.error_tolerance_mm = settings["error_tolerance_mm"]
         self._update_settings_tooltip()
         description = self.theory_button.toolTip().replace("\n", "；")
         self._append_log(f"已保存理论窝深与报警设置：{description}")
