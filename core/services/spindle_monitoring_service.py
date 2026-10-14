@@ -32,7 +32,7 @@ def _relative_member(name):
     return path
 
 
-def assess_score(score, thresholds):
+def assess_score(score, thresholds, *, normal_floor=algorithm.NORMAL_SCORE_FLOOR):
     """相容度越低越可疑；报警阈值独立于统计检验的 alpha。"""
     warning, fault = thresholds.get("warning"), thresholds.get("fault")
     if score is None or not math.isfinite(score) or not 0 <= score <= 1:
@@ -43,8 +43,8 @@ def assess_score(score, thresholds):
         status, message = "warning", "预警 / 建议复测"
     elif warning is None and fault is None:
         status = "unconfigured"
-        message = "偏离正常参考 · 未设置报警阈值" if score < 1 else "未设置阈值"
-    elif score < 1:
+        message = "偏离正常参考 · 未设置报警阈值" if score < normal_floor else "未设置阈值"
+    elif score < normal_floor:
         status, message = "deviation", "偏离正常参考，未达报警阈值"
     else:
         status, message = "normal", "阈值内"
@@ -53,7 +53,8 @@ def assess_score(score, thresholds):
 
 def assess_compatibility(result, thresholds, review_required=False):
     scores = [result.get("analysis_score"), result.get("score")]
-    assessments = [assess_score(score, thresholds.get(feature, thresholds))
+    normal_floor = 1.0 if result.get("score_kind") == "normal_compatibility_v1" else algorithm.NORMAL_SCORE_FLOOR
+    assessments = [assess_score(score, thresholds.get(feature, thresholds), normal_floor=normal_floor)
                    for feature, score in zip(("vibration", "network"), scores)]
     invalid = any(item["status"] == "unavailable" for item in assessments)
     reasons = [item.get("message", "正常参考无效") for item in result.get("compatibility", {}).values()
@@ -112,17 +113,20 @@ class SpindleMonitoringService:
         self.state = read_json(self.state_path) if self.state_path.exists() else {
             "schema_version": 1,
             "settings": {"thresholds": deepcopy(self.config["thresholds"]),
-                         "score_kind": "normal_compatibility_v1", "alpha": self.config.get("alpha", 0.05),
+                         "score_kind": algorithm.SCORE_KIND, "alpha": self.config.get("alpha", 0.05),
                          "thresholds_model_version": None},
             "runs": {}, "packages": [], "models": [], "current_model_version": None,
             "results": [],
         }
         # 旧倍率阈值保留备查，但不能解释为 0–1 相容度阈值。
-        if self.settings.get("score_kind") != "normal_compatibility_v1":
+        if self.settings.get("score_kind") not in algorithm.COMPATIBILITY_SCORE_KINDS:
             self.settings["legacy_thresholds"] = deepcopy(self.settings["thresholds"])
             self.settings.update(thresholds={"warning": None, "fault": None},
-                                 thresholds_model_version=None, score_kind="normal_compatibility_v1",
+                                 thresholds_model_version=None, score_kind=algorithm.SCORE_KIND,
                                  alpha=self.config.get("alpha", 0.05))
+        elif self.settings["score_kind"] != algorithm.SCORE_KIND:
+            # 评分曲线改变，保留两项设置，并沿用已有阈值复核流程。
+            self.settings.update(score_kind=algorithm.SCORE_KIND, thresholds_model_version=None)
         self.settings.setdefault("metric_settings", result_metric_settings(self.settings))
         # 旧版初始数据曾允许未判定入训；恢复状态时统一收紧到正常标签。
         eligibility_changed = False
@@ -192,7 +196,7 @@ class SpindleMonitoringService:
         return algorithm.order_band_energy(self._read_run(self.runs[run_id]))
 
     def analysis_metrics(self, result):
-        if not result or result.get("score_kind") != "normal_compatibility_v1":
+        if not result or result.get("score_kind") not in algorithm.COMPATIBILITY_SCORE_KINDS:
             return None, None
         return result.get("analysis_score"), result.get("compatibility", {}).get("vibration")
 
@@ -201,7 +205,7 @@ class SpindleMonitoringService:
         if result is None:
             return None
         shown = deepcopy(result)
-        if shown.get("score_kind") != "normal_compatibility_v1":
+        if shown.get("score_kind") not in algorithm.COMPATIBILITY_SCORE_KINDS:
             shown.setdefault("legacy_assessment", deepcopy(shown.get("assessment")))
             shown.update(score=None, analysis_score=None,
                          assessment={"status": "legacy", "message": "旧倍率记录，请重新评估相容度"})
@@ -211,15 +215,15 @@ class SpindleMonitoringService:
             review_required = self.thresholds_review_required if metric_settings is None else False
             shown["metric_settings"] = metrics
             shown["alpha"] = metrics["network"]["alpha"]
-            for key, p_key, feature in (("analysis_score", "vibration_p_value", "vibration"),
-                                        ("score", "network_p_value", "network")):
-                alpha = metrics[feature]["alpha"]
-                p = shown.get(p_key)
-                valid = shown.get("compatibility", {}).get(feature, {}).get("status") == "valid"
-                shown[key] = min(1.0, p / alpha) if valid and p is not None and math.isfinite(p) and 0 <= p <= 1 else None
-                if feature in shown.get("compatibility", {}):
-                    shown["compatibility"][feature]["score"] = shown[key]
-                    shown["compatibility"][feature]["alpha"] = alpha
+            shown["score_kind"] = algorithm.SCORE_KIND
+            for key, p_key, raw_key, feature in (
+                    ("analysis_score", "vibration_p_value", "xy_rms_mm_s", "vibration"),
+                    ("score", "network_p_value", "reconstruction_error_p95", "network")):
+                reference = shown.get("compatibility", {}).get(feature, {})
+                calibration = algorithm.normal_compatibility(shown.get(raw_key), reference, metrics[feature]["alpha"])
+                shown[key] = calibration["score"]
+                shown[p_key] = calibration["p_value"]
+                shown.setdefault("compatibility", {})[feature] = calibration
             shown["thresholds"] = {key: metrics["network"][key] for key in ("warning", "fault")}
             shown["thresholds_model_version"] = (self.settings.get("thresholds_model_version")
                                                   if metric_settings is None else self.state["current_model_version"])
@@ -641,7 +645,7 @@ class SpindleMonitoringService:
         if model is None:
             raise ValueError("尚未建立模型，无法补算历史")
         pending = [run for run in self.list_runs()
-                   if (self.latest_result(run["run_id"]) or {}).get("score_kind") != "normal_compatibility_v1"]
+                   if (self.latest_result(run["run_id"]) or {}).get("score_kind") != algorithm.SCORE_KIND]
         model["reanalysis_status"] = "running"
         model.pop("reanalysis_error", None)
         self._save()
@@ -751,8 +755,8 @@ class SpindleMonitoringService:
         return None
 
     def ensure_latest_result(self, run_id, progress=None):
-        """最新视图补齐缺失或旧倍率评价；已有相容度结果直接复用，包括无效状态。"""
+        """最新视图补齐缺失或旧算法评价；已有当前相容度直接复用，包括无效状态。"""
         result = self.latest_result(run_id)
-        if result is not None and result.get("score_kind") == "normal_compatibility_v1":
+        if result is not None and result.get("score_kind") == algorithm.SCORE_KIND:
             return result
         return self.evaluate(run_id, progress=progress, reason="selection_refresh")

@@ -141,7 +141,10 @@ class MainWindow(QMainWindow):
         QApplication.instance().setStyleSheet(load_stylesheet(scale))
         self.ui_metrics.apply(scale)
         for index in range(self.precision_page.content_stack.count()):
-            self.precision_page.content_stack.widget(index)._update_layout_direction()
+            page = self.precision_page.content_stack.widget(index)
+            page._update_layout_direction()
+            if getattr(page, "realtime_dialog", None) is not None:
+                page.realtime_dialog.sync_scale(scale)
         self.navigation_marker.move(0, round(12 * scale))
         self.size_grip.move(
             self.width() - self.size_grip.width(),
@@ -235,13 +238,20 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         for index in range(self.precision_page.content_stack.count()):
             page = self.precision_page.content_stack.widget(index)
-            if getattr(page, "task", None) is not None or getattr(page, "energy_task", None) is not None:
+            monitor = getattr(page, "realtime_dialog", None)
+            if (getattr(page, "task", None) is not None or getattr(page, "energy_task", None) is not None
+                    or (monitor is not None and monitor.load_task is not None)):
                 event.ignore()
                 self.precision_page.tab_bar.setCurrentIndex(index)
                 QMessageBox.information(
                     self, "任务尚未完成", "正在处理数据，请等待进度完成后再关闭软件。\n可以最小化窗口，处理会继续。"
                 )
                 return
+        for index in range(self.precision_page.content_stack.count()):
+            page = self.precision_page.content_stack.widget(index)
+            if getattr(page, "realtime_dialog", None) is not None:
+                page.realtime_dialog.shutdown()
+                page.realtime_dialog.close()
         super().closeEvent(event)
 
     def _update_clock(self) -> None:

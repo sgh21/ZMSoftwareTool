@@ -103,6 +103,36 @@ def test_switching_three_tabs_and_back_preserves_each_pages_state(window):
     assert not window.back_button.isEnabled()
 
 
+def test_realtime_window_closes_only_after_main_window_can_exit(window, monkeypatch):
+    spindle = window.precision_page.content_stack.widget(1)
+    spindle.realtime_button.click()
+    dialog = spindle.realtime_dialog
+    assert dialog.isVisible()
+    monkeypatch.setattr(main_window.QMessageBox, "information", lambda *args: None)
+    spindle.task = object()
+    try:
+        window.close()
+        assert window.isVisible() and dialog.isVisible()
+    finally:
+        spindle.task = None
+    window.close()
+    assert not window.isVisible() and not dialog.isVisible()
+
+
+def test_realtime_layout_follows_main_window_scale(window):
+    spindle = window.precision_page.content_stack.widget(1)
+    spindle.realtime_button.click()
+    dialog = spindle.realtime_dialog
+    dialog.channel_checks["acc2"].setChecked(False)
+    for width, height in ((1200, 750), (1600, 1000), (1200, 750)):
+        window.resize(width, height)
+        QTest.qWait(130)
+        assert dialog.ui_scale == window.ui_scale
+        assert dialog.plot_frames["acc1_waveform"].minimumHeight() == round(120 * window.ui_scale)
+        assert not dialog.channel_checks["acc2"].isChecked()
+        assert dialog.plot_frames["acc2_waveform"].isHidden()
+
+
 def assert_page_actions_reachable(window):
     stack = window.precision_page.content_stack
     for index in range(stack.count()):

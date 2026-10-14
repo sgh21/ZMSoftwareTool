@@ -18,6 +18,8 @@ from PyQt6.QtWidgets import (
 
 from app.resources import DISPLAY, fit_dialog, load_icon, make_button, make_note, set_status_light
 from app.tasks import ServiceTask
+from app.dialogs.realtime_monitor_dialog import RealtimeMonitorDialog
+from core.algorithms.spindle_monitoring import COMPATIBILITY_SCORE_KINDS, NORMAL_SCORE_FLOOR, SCORE_KIND
 from core.services.spindle_monitoring_service import SpindleMonitoringService, assess_compatibility, assess_score
 
 
@@ -95,6 +97,7 @@ class SpindleRotationPage(QScrollArea):
         super().__init__()
         self.service = service or SpindleMonitoringService()
         self.result = None
+        self.realtime_dialog = None
         self.uses_current_thresholds = False
         self.task = None
         self.task_completed = None
@@ -181,6 +184,9 @@ class SpindleRotationPage(QScrollArea):
         title.setProperty("monitorTitle", True)
         heading.addWidget(title)
         heading.addStretch()
+        self.realtime_button = self._button("实时监测", self._show_realtime_monitor, True, track=False)
+        self.realtime_button.setMinimumWidth(108)
+        heading.addWidget(self.realtime_button)
         body.addLayout(heading)
 
         metrics = QHBoxLayout()
@@ -209,8 +215,8 @@ class SpindleRotationPage(QScrollArea):
             for widget in (label, value, note):
                 content.addWidget(widget)
             metrics.addWidget(metric, 1)
-        self.result_values["analysis"].setToolTip("径向速度 RMS 的双侧正常相容度；正常接受范围内为 1，过大或过小均降低。")
-        self.result_values["network"].setToolTip("采集级重建误差 P95 的上尾正常相容度；仅误差增大降低。不是设备正常的后验概率。")
+        self.result_values["analysis"].setToolTip("径向速度 RMS 的双侧正常相容度；越接近正常参考均值越高，正常范围内不低于 0.9。")
+        self.result_values["network"].setToolTip("采集级重建误差 P95 的双侧正常相容度；偏大或偏小均降低。不是设备正常的后验概率。")
         self.result_values["temperature"].setToolTip("轴承温度有效采样点的中位数；缺失点不参与统计。")
         self.result_values["current"].setToolTip("稳定采集段内驱动器有效读数的有符号中位数，不是交流电流有效值；不参与网络评分。")
         body.addLayout(metrics)
@@ -371,6 +377,16 @@ class SpindleRotationPage(QScrollArea):
         body.addWidget(actions)
         return panel
 
+    def _show_realtime_monitor(self):
+        if self.realtime_dialog is None:
+            self.realtime_dialog = RealtimeMonitorDialog(self)
+        self.realtime_dialog.sync_scale(self.window().ui_scale)
+        if self.realtime_dialog.isMinimized():
+            self.realtime_dialog.setWindowState(self.realtime_dialog.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.realtime_dialog.show()
+        self.realtime_dialog.raise_()
+        self.realtime_dialog.activateWindow()
+
     def _show_acquisition(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("采集方案详情")
@@ -473,13 +489,13 @@ class SpindleRotationPage(QScrollArea):
             model = self.service.current_model
             evaluated = {entry["run_id"] for entry in self.service.state["results"]
                          if model and entry["model_version"] == model["version"]
-                         and entry.get("score_kind") == "normal_compatibility_v1"}
+                         and entry.get("score_kind") == SCORE_KIND}
             retry_button.setEnabled(bool(not busy and model and (model.get("reanalysis_status") != "complete"
                                                                   or set(self.service.runs) - evaluated)))
 
         self.busy_changed.connect(update_actions)
         update_actions(self.task is not None)
-        retry_button.setToolTip("沿用当前网络，补算缺失或旧倍率评价并重建正常参考，无需重训。")
+        retry_button.setToolTip("沿用当前网络，补算缺失或旧算法评价并重建正常参考，无需重训。")
         row.addWidget(retry_button)
         row.addStretch()
         row.addWidget(self._button("关闭", dialog.reject, track=False))
@@ -700,12 +716,12 @@ class SpindleRotationPage(QScrollArea):
         self.selection_timer.start(0)
 
     def _ensure_selection_result(self):
-        """合并选择信号；只为最新视图补算缺失或旧倍率评价。"""
+        """合并选择信号；只为最新视图补算缺失或旧算法评价。"""
         run_id = self.run_select.currentData()
         if (not run_id or self.model_select.currentData() is not None
                 or not self.uses_current_thresholds or self.task is not None):
             return
-        if self.result and self.result.get("score_kind") == "normal_compatibility_v1":
+        if (self.service.latest_result(run_id) or {}).get("score_kind") == SCORE_KIND:
             return
         model = self.service.current_model
         key = (run_id, model["version"] if model else None)
@@ -732,6 +748,8 @@ class SpindleRotationPage(QScrollArea):
             self.selection_timer.stop()
         result = self.service.display_result(result, current_settings=current_thresholds)
         metrics = self.service.result_metric_settings(result) if result else self.service.metric_settings
+        old_compatibility = bool(result and result.get("score_kind") == "normal_compatibility_v1")
+        normal_floor = 1.0 if old_compatibility else NORMAL_SCORE_FLOOR
         self.result = result
         self.uses_current_thresholds = current_thresholds
         self.latest_button.setVisible(bool(result) and not current_thresholds)
@@ -746,14 +764,21 @@ class SpindleRotationPage(QScrollArea):
                   "temperature": result.get("temperature_c", [None])[0] if result else None,
                   "current": result.get("current_a") if result else None}
         for key, value in values.items():
-            self.result_values[key].setText("—" if value is None or not isfinite(value) else f"{value:.4g}")
+            precision = ".3f" if key in ("analysis", "network") else ".4g"
+            self.result_values[key].setText("—" if value is None or not isfinite(value) else format(value, precision))
             self.result_values[key].setStyleSheet("")
         for key, feature, raw_key, p_key, description in (
             ("analysis", "vibration", "xy_rms_mm_s", "vibration_p_value", "本次径向 RMS（R，mm/s）；双侧检验，过大或过小均扣分。"),
-            ("network", "network", "reconstruction_error_p95", "network_p_value", "本次全部窗口重建误差的 P95（E）；上尾检验，仅误差增大扣分。"),
+            ("network", "network", "reconstruction_error_p95", "network_p_value", "本次全部窗口重建误差的 P95（E）；双侧检验，过大或过小均扣分。"),
         ):
-            notes = [description, "C = min(1, p / α)，正常接受范围内为 1；不是设备正常的后验概率。",
-                     "两项针对不同特征，数值不要求相近；低于 1 均表示偏离各自的正常接受范围。"]
+            if old_compatibility:
+                if feature == "network":
+                    description = "本次全部窗口重建误差的 P95（E）；旧版上尾检验，仅误差增大扣分。"
+                scoring_note = "旧版 C = min(1, p / α)，正常接受范围内为 1；历史分数保留。"
+            else:
+                scoring_note = "越接近正常参考的对数均值越高，均值处为 1，正常边界为 0.9；范围外快速下降。"
+            notes = [description, scoring_note, "不是设备正常的后验概率。",
+                     f"两项针对不同特征，数值不要求相近；低于 {normal_floor:g} 表示偏离各自的正常接受范围。"]
             if result:
                 raw_value = result.get(raw_key)
                 p_value = result.get(p_key)
@@ -770,7 +795,7 @@ class SpindleRotationPage(QScrollArea):
                     notes.append(f"预测偏离 u = {calibration['u']:.6g}")
                 if calibration.get("normality_p_value") is not None:
                     notes.append(f"对数高斯适用性检验 p = {calibration['normality_p_value']:.4g}；不能证明独立性或高斯分布。")
-                if result.get("score_kind") != "normal_compatibility_v1" and result.get("model_version"):
+                if result.get("score_kind") not in COMPATIBILITY_SCORE_KINDS and result.get("model_version"):
                     notes.append("旧倍率记录：请重新评估以计算正常相容度。")
             else:
                 notes.append("尚无正常参考，请先确认正常样本并建立模型。")
@@ -778,14 +803,14 @@ class SpindleRotationPage(QScrollArea):
         result_detail = ""
         if result:
             assessment = (assess_compatibility(result, metrics, result.get("thresholds_review_required", False))
-                          if result.get("score_kind") == "normal_compatibility_v1" else result["assessment"])
+                          if result.get("score_kind") in COMPATIBILITY_SCORE_KINDS else result["assessment"])
             if (assessment["status"] not in ("review_required", "legacy")
                     and not result.get("thresholds_review_required")):
                 for key, score_key, feature in (("analysis", "analysis_score", "vibration"), ("network", "score", "network")):
-                    if assess_score(result.get(score_key), metrics[feature])["status"] in ("warning", "fault"):
+                    score = result.get(score_key)
+                    status = assess_score(score, metrics[feature], normal_floor=normal_floor)["status"]
+                    if status in ("warning", "fault", "deviation") or status == "unconfigured" and score < normal_floor:
                         self.result_values[key].setStyleSheet(f"color:{DISPLAY['colors']['error']};")
-                    elif result.get(score_key) is not None and result[score_key] < 1:
-                        self.result_values[key].setStyleSheet(f"color:{DISPLAY['colors']['warning']};")
             role = {"training": "训练样本回评", "calibration": "校准样本回评", "independent": "未参与此模型建模"}[result["role"]]
             run = self.service.runs[result["run_id"]]
             condition = run.get("condition", {})
@@ -793,7 +818,7 @@ class SpindleRotationPage(QScrollArea):
             pressure = condition.get("seal_pressure_mpa")
             pressure_text = "密封气压未记录" if pressure is None else f"密封气压 {pressure:g} MPa"
             operation = "空转" if run["operation"] == "idle" else run["operation"]
-            legacy = result.get("score_kind") != "normal_compatibility_v1" and result.get("model_version")
+            legacy = result.get("score_kind") not in COMPATIBILITY_SCORE_KINDS and result.get("model_version")
             unit = " 倍（旧）" if legacy else ""
             threshold_title = "当前阈值" if current_thresholds and not legacy else "当时阈值"
             result_detail = (
@@ -1088,6 +1113,7 @@ class SpindleRotationPage(QScrollArea):
                 fields[feature][key] = field
         form.addRow(make_note("两项各用各自设置，任一相容度 ≤ 对应阈值即触发，故障优先。每项 0 ≤ 故障 < 预警 < 1；阈值可留空。\n"
                              "α 越大，越早降低评分；默认 0.05 对应模型成立时单项 95% 的正常接受范围。"
+                             "正常范围以 p ≥ α 判断，新评分范围为 0.9～1。"
                              "α 须在 0～1 之间。调报警阈值不改变评分；满分不保证设备正常。"))
         preview = make_note("")
         preview.setObjectName("spindle_threshold_preview")
@@ -1105,7 +1131,7 @@ class SpindleRotationPage(QScrollArea):
             except ValueError:
                 preview.setText("当前采集预览：请填写有效的 α 和报警阈值。")
                 return
-            if not shown or shown.get("score_kind") != "normal_compatibility_v1":
+            if not shown or shown.get("score_kind") not in COMPATIBILITY_SCORE_KINDS:
                 preview.setText("当前采集尚无相容度评价；保存后自动补算。")
                 return
             scores = ["—" if shown[key] is None else f"{shown[key]:.4g}" for key in ("analysis_score", "score")]
@@ -1168,7 +1194,7 @@ class SpindleRotationPage(QScrollArea):
         table.setRowCount(len(entries))
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         for row, result in enumerate(entries):
-            legacy = result.get("score_kind") != "normal_compatibility_v1" and result.get("model_version")
+            legacy = result.get("score_kind") not in COMPATIBILITY_SCORE_KINDS and result.get("model_version")
             scores = ["—" if result.get(key) is None else f"{result[key]:.4g}"
                       for key in ("analysis_score", "score")]
             if legacy:

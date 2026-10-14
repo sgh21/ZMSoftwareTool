@@ -8,6 +8,8 @@ import pytest
 import torch
 
 from core.algorithms.spindle_monitoring import (
+    NORMAL_SCORE_FLOOR,
+    SCORE_KIND,
     acceleration_to_velocity,
     calibrate_model,
     evaluate_run,
@@ -214,7 +216,7 @@ def test_metric_alpha_only_changes_its_own_compatibility_not_features_p_values_o
     original = evaluate_run(run, path)
     changed = evaluate_run(run, path, {f"{feature}_alpha": .2})
     assert 0 < original[score_key] < 1
-    assert changed[score_key] == pytest.approx(original[score_key] / 4)
+    assert changed[score_key] == pytest.approx(original[score_key] / 16)
     assert changed[other_score_key] == original[other_score_key]
     assert changed["compatibility"][feature]["alpha"] == .2
     assert changed["compatibility"][other_feature]["alpha"] == .05
@@ -269,27 +271,56 @@ def test_calibration_signal_cannot_change_learned_weights(trained_model, tmp_pat
             != changed["normal_reference"]["groups"][0]["network"]["values"])
 
 
-def test_predictive_t_compatibility_center_tails_and_acceptance_mapping():
+def test_predictive_t_compatibility_decreases_from_mean_on_both_sides():
     from scipy.stats import t
 
     reference = fit_normal_reference(np.exp(np.linspace(-.4, .4, 21)))
     assert reference["status"] == "valid"
     scale = reference["s"] * np.sqrt(1 + 1 / reference["M"])
     center = np.exp(reference["mu"])
-    assert normal_compatibility(center, reference, two_sided=True)["score"] == 1
     assert normal_compatibility(center, reference)["score"] == 1
-    assert normal_compatibility(center * np.exp(-10 * scale), reference)["score"] == 1
-    for p_value, expected in [(.30, 1), (.05, 1), (.02, .4), (.001, .02)]:
-        for two_sided in (False, True):
-            u = t.isf(p_value / (2 if two_sided else 1), df=reference["M"] - 1)
-            x = np.exp(reference["mu"] + scale * u)
-            result = normal_compatibility(x, reference, two_sided=two_sided)
-            assert result["u"] == pytest.approx(u)
-            assert result["p_value"] == pytest.approx(p_value)
-            assert result["score"] == pytest.approx(expected)
-            if two_sided:
-                low = np.exp(reference["mu"] - scale * u)
-                assert normal_compatibility(low, reference, two_sided=True)["score"] == pytest.approx(expected)
+    boundary = t.isf(.05 / 2, df=reference["M"] - 1)
+    scores = []
+    for distance in np.linspace(0, 2, 41):
+        high = normal_compatibility(center * np.exp(scale * boundary * distance), reference)
+        low = normal_compatibility(center * np.exp(-scale * boundary * distance), reference)
+        assert high["score"] == pytest.approx(low["score"])
+        assert high["p_value"] == pytest.approx(low["p_value"])
+        assert high["u"] == pytest.approx(-low["u"], abs=1e-14)
+        if 0 < distance < 1:
+            assert NORMAL_SCORE_FLOOR < high["score"] < 1
+        scores.append(high["score"])
+    assert np.all(np.diff(scores) < 0)
+    assert scores[20] == pytest.approx(.9)
+    assert scores[21] < .8
+    assert scores[-1] < .001
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_predictive_t_compatibility_is_continuous_at_normal_boundary(direction):
+    from scipy.stats import t
+
+    reference = fit_normal_reference(np.exp(np.linspace(-.4, .4, 21)))
+    scale = reference["s"] * np.sqrt(1 + 1 / reference["M"])
+    boundary = t.isf(.05 / 2, df=reference["M"] - 1)
+    scores = [normal_compatibility(
+        np.exp(reference["mu"] + direction * scale * boundary * distance), reference,
+    )["score"] for distance in [1 - 1e-7, 1, 1 + 1e-7]]
+    assert scores == pytest.approx([.9, .9, .9], rel=1e-5)
+    assert scores[0] > scores[1] > scores[2]
+
+
+@pytest.mark.parametrize(("p_value", "expected"), [(.02, .144), (.001, .00036)])
+def test_predictive_t_compatibility_falls_quickly_outside_normal_range(p_value, expected):
+    from scipy.stats import t
+
+    reference = fit_normal_reference(np.exp(np.linspace(-.4, .4, 21)))
+    scale = reference["s"] * np.sqrt(1 + 1 / reference["M"])
+    u = t.isf(p_value / 2, df=reference["M"] - 1)
+    for direction in [-1, 1]:
+        result = normal_compatibility(np.exp(reference["mu"] + direction * scale * u), reference)
+        assert result["p_value"] == pytest.approx(p_value)
+        assert result["score"] == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("values", [[1, 2], [1, 0, 2], [1, -1, 2], [1, np.nan, 2],
@@ -344,7 +375,8 @@ def test_evaluation_invalidates_unmatched_context_length_and_version(trained_mod
         assert result["score"] is result["analysis_score"] is None
         assert "匹配" in result["compatibility"]["network"]["message"]
         assert result["reconstruction_error_p95"] > 0
-    for field, mismatch in [("network_id", "other-network"), ("preprocessing", {"id": "other-v2"})]:
+    for field, mismatch in [("score_kind", "unsupported-score"), ("network_id", "other-network"),
+                            ("preprocessing", {"id": "other-v2"})]:
         reference = deepcopy(summary["normal_reference"])
         reference[field] = mismatch
         result = evaluate_run(make_run("unknown", .071), path, {"normal_reference": reference})
@@ -361,7 +393,8 @@ def test_calibrate_existing_network_without_changing_checkpoint_or_using_trainin
     assert path.read_bytes() == original_bytes
     assert reference["groups"][0]["network"]["M"] == 5
     result = evaluate_run(make_run("center", .072), path, {"normal_reference": reference})
-    assert result["score"] == result["analysis_score"] == 1
+    assert NORMAL_SCORE_FLOOR <= result["score"] <= 1
+    assert NORMAL_SCORE_FLOOR <= result["analysis_score"] <= 1
     with pytest.raises(ValueError, match="训练采集重叠"):
         calibrate_model([make_run("train")], path)
 
@@ -381,4 +414,21 @@ def test_legacy_checkpoint_requires_new_reference_and_keeps_raw_features(trained
     reference = calibrate_model([make_run(f"c{i}", .065 + i * .003) for i in range(5)], legacy_path)
     assert reference["network_id"].startswith("legacy:")
     result = evaluate_run(run, legacy_path, {"normal_reference": reference})
-    assert result["score"] == result["analysis_score"] == 1
+    assert NORMAL_SCORE_FLOOR <= result["score"] <= 1
+    assert NORMAL_SCORE_FLOOR <= result["analysis_score"] <= 1
+
+
+def test_v1_checkpoint_reference_is_reused_for_v2_scores_without_retraining(trained_model, tmp_path):
+    path, summary = trained_model
+    checkpoint = torch.load(path, weights_only=True)
+    checkpoint["score_kind"] = "normal_compatibility_v1"
+    checkpoint["normal_reference"]["score_kind"] = "normal_compatibility_v1"
+    legacy_path = tmp_path / "v1_reference.pt"
+    torch.save(checkpoint, legacy_path)
+    original = evaluate_run(make_run("unknown", .3), path)
+    result = evaluate_run(make_run("unknown", .3), legacy_path)
+    assert result["score_kind"] == SCORE_KIND == "normal_compatibility_v2"
+    assert result["score"] == original["score"]
+    assert result["analysis_score"] == original["analysis_score"]
+    assert result["reference_features"]["network"] == summary["normal_reference"]["groups"][0]["network"]["values"]
+    assert torch.load(legacy_path, weights_only=True)["normal_reference"]["score_kind"] == "normal_compatibility_v1"

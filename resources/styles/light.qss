@@ -101,6 +101,32 @@ QFrame#PlaceholderPanel {
     border-radius: 6px;
 }
 
+QDialog#RealtimeMonitorDialog, QScrollArea#RealtimePlotScroll, QWidget#RealtimePlotCanvas {
+    background: @background@;
+    border: none;
+}
+
+QFrame#RealtimeChannelSelection, QFrame[realtimePlot="true"] {
+    background: #ffffff;
+    border: 1px solid @border@;
+    border-radius: 6px;
+}
+
+QLabel[realtimeVerticalTitle="true"], QLabel[realtimeHeading="true"] {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+QLabel[realtimeLegend="true"], QLabel[realtimeClipping="true"] {
+    font-size: 11px;
+    color: @inactive@;
+    background: #ffffff;
+}
+
+QLabel[realtimeClipping="true"] {
+    color: @error@;
+}
+
 QFrame#PanelHeading {
     background: #f8fafc;
     border: none;

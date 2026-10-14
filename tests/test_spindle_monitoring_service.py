@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+import math
 import os
 from pathlib import Path
 from zipfile import ZipFile
@@ -47,27 +48,35 @@ def algorithm(monkeypatch):
         return {"normal_reference": {}, "best_epoch": 1}
 
     def evaluate_run(run, model_path=None, config=None, progress=None):
+        from scipy.stats import t
+
         if model_path is not None:
             assert Path(model_path).is_file()
         calls["evaluate"].append((run["run_id"], str(model_path)))
         config = config or {}
         alphas = {feature: config.get(f"{feature}_alpha", config.get("alpha", .05))
                   for feature in ("vibration", "network")}
+        network_score = float(run.get("score", .3))
         p_values = {"vibration": float(run.get("vibration_p_value", .5)),
-                    "network": float(run.get("score", .3)) * .05}
-        scores = {feature: min(1.0, p_values[feature] / alphas[feature]) if model_path else None
-                  for feature in alphas}
+                    "network": .05 * math.sqrt(network_score / .9)}
+        raw_features = {"vibration": (0.02 ** 2 + 0.03 ** 2) ** .5, "network": .25}
+        compatibility = {}
+        for feature, raw in raw_features.items():
+            u = float(t.isf(p_values[feature] / 2, 20))
+            reference = {"status": "valid" if model_path else "invalid", "message": "初步校准" if model_path else "尚未校准",
+                         "M": 21, "mu": math.log(raw) - u * .1 * math.sqrt(1 + 1 / 21), "s": .1}
+            compatibility[feature] = service_module.algorithm.normal_compatibility(raw, reference, alphas[feature])
+        # 业务测试的等号报警边界使用明确给定的输入分数。
+        if model_path and alphas["network"] == .05:
+            compatibility["network"]["score"] = network_score
+        scores = {feature: compatibility[feature]["score"] for feature in alphas}
         return {
             "score": scores["network"], "analysis_score": scores["vibration"],
-            "score_kind": "normal_compatibility_v1", "alpha": alphas["network"],
+            "score_kind": service_module.algorithm.SCORE_KIND, "alpha": alphas["network"],
             "vibration_p_value": p_values["vibration"] if model_path else None,
             "network_p_value": p_values["network"] if model_path else None,
             "reconstruction_error_p95": 0.25 if model_path else None,
-            "compatibility": {feature: {"status": "valid" if model_path else "invalid",
-                                        "message": "初步校准" if model_path else "尚未校准",
-                                        "alpha": alphas[feature], "score": scores[feature],
-                                        "p_value": p_values[feature] if model_path else None}
-                              for feature in ("vibration", "network")},
+            "compatibility": compatibility,
             "rms_mm_s": [0.02, 0.03, 0.05], "waveform": {"time_s": [0, 1], "values": [[1, 2]]},
             "xy_rms_mm_s": (0.02 ** 2 + 0.03 ** 2) ** .5,
             "window_scores": [1, 3] if model_path else [], "reconstruction": None,
@@ -443,10 +452,10 @@ def test_legacy_reference_uses_only_original_calibration_and_never_daily_candida
     assert len(calibration_calls) == 1
     assert model["normal_reference"]["model_version"] == model["version"]
     assert service.history()[:len(history)] == history
-    assert result["analysis_score"] == 1
+    assert .9 < result["analysis_score"] < 1
     restored = SpindleMonitoringService(service.root, config)
     assert restored.current_model["normal_reference"] == model["normal_reference"]
-    assert restored.analysis_metrics(result)[0] == 1
+    assert restored.analysis_metrics(result)[0] == result["analysis_score"]
 
 
 @pytest.mark.parametrize("change", ["path", "mtime", "size"])
@@ -606,6 +615,8 @@ def test_threshold_changes_only_apply_to_new_evaluations(service, tmp_path, conf
     (1, {"warning": None, "fault": None}, "unconfigured"),
     (0.3, {"warning": None, "fault": None}, "unconfigured"),
     (1, {"warning": 0.5, "fault": 0.2}, "normal"),
+    (.9, {"warning": 0.5, "fault": 0.2}, "normal"),
+    (.95, {"warning": 0.5, "fault": 0.2}, "normal"),
     (0.8, {"warning": 0.5, "fault": 0.2}, "deviation"),
     (0.5, {"warning": 0.5, "fault": 0.2}, "warning"),
     (0.2, {"warning": 0.5, "fault": 0.2}, "fault"),
@@ -620,6 +631,8 @@ def test_threshold_priority(score, thresholds, status):
     (0.8, {"warning": None, "fault": None}, "unconfigured", "偏离正常参考 · 未设置报警阈值"),
     (0.8, {"warning": 0.5, "fault": 0.2}, "deviation", "偏离正常参考，未达报警阈值"),
     (1.0, {"warning": 0.5, "fault": 0.2}, "normal", "阈值内"),
+    (.95, {"warning": 0.5, "fault": 0.2}, "normal", "阈值内"),
+    (.9, {"warning": None, "fault": None}, "unconfigured", "未设置阈值"),
 ])
 def test_reference_deviation_is_not_hidden_by_missing_or_untriggered_alarm_thresholds(
         score, thresholds, status, message):
@@ -698,7 +711,7 @@ def test_invalid_metric_without_configured_thresholds_is_unavailable(invalid_fea
     assert assess_compatibility(result, {"warning": None, "fault": None})["status"] == "unavailable"
 
 
-def test_current_alpha_rescores_from_saved_p_without_rewriting_history(service, tmp_path, config):
+def test_current_alpha_rescores_from_saved_feature_reference_without_rewriting_history(service, tmp_path, config):
     service.import_packages([package(tmp_path, config, ("run1", "run2", "run3", "run4", "run5"))], "initial")
     service.set_label("run1", "healthy")
     service.train()
@@ -707,8 +720,8 @@ def test_current_alpha_rescores_from_saved_p_without_rewriting_history(service, 
     service.set_thresholds(0.5, 0.2, alpha=0.1)
     shown = service.display_result(original, current_settings=True)
     assert shown["alpha"] == 0.1
-    assert shown["score"] == pytest.approx(0.15)
-    assert shown["analysis_score"] == 1
+    assert shown["score"] == pytest.approx(0.075)
+    assert .9 < shown["analysis_score"] < 1
     for feature, score_key in (("vibration", "analysis_score"), ("network", "score")):
         assert shown["compatibility"][feature]["alpha"] == shown["alpha"]
         assert shown["compatibility"][feature]["score"] == shown[score_key]
@@ -718,6 +731,52 @@ def test_current_alpha_rescores_from_saved_p_without_rewriting_history(service, 
     assert original == original_copy
     assert service.latest_result("run1") == original_copy
     assert SpindleMonitoringService(service.root, config).settings["alpha"] == 0.1
+
+
+def test_old_compatibility_history_keeps_its_boundary_and_new_preview_uses_both_tails(service):
+    reference = {"M": 21, "mu": 0.0, "s": .2, "status": "valid", "message": "正常参考"}
+    historical = {
+        "score_kind": "normal_compatibility_v1", "alpha": .05,
+        "thresholds": {"warning": .5, "fault": .2},
+        "analysis_score": .95, "score": 1.0,
+        "xy_rms_mm_s": math.exp(.1), "reconstruction_error_p95": math.exp(-.1),
+        "vibration_p_value": .0475, "network_p_value": .9,
+        "compatibility": {feature: deepcopy(reference) for feature in ("vibration", "network")},
+    }
+    original = deepcopy(historical)
+    assert assess_compatibility(historical, historical["thresholds"])["status"] == "deviation"
+    assert service.display_result(historical) == original
+    metrics = {feature: {"alpha": .05, "warning": .5, "fault": .2} for feature in ("vibration", "network")}
+    preview = service.display_result(historical, metric_settings=metrics)
+    assert preview["score_kind"] == service_module.algorithm.SCORE_KIND
+    assert .9 < preview["score"] < 1
+    assert preview["score"] == pytest.approx(preview["analysis_score"])
+    assert preview["assessment"]["status"] == "normal"
+    assert historical == original
+
+
+def test_old_score_settings_keep_parameters_and_require_threshold_review_without_retraining(
+        service, tmp_path, config, algorithm):
+    service.import_batch([package(tmp_path, config, tuple(f"run{i}" for i in range(5)))], label="healthy")
+    model = service.train()
+    service.set_metric_settings({"vibration": {"alpha": .2, "warning": .7, "fault": .3},
+                                 "network": {"alpha": .05, "warning": .5, "fault": .2}})
+    service.settings["score_kind"] = "normal_compatibility_v1"
+    service._save()
+    metrics_before = service.metric_settings
+    history_before = service.history()
+    model_before = deepcopy(model)
+    calls_before = deepcopy(algorithm)
+    restored = SpindleMonitoringService(service.root, config)
+    assert restored.settings["score_kind"] == service_module.algorithm.SCORE_KIND
+    assert restored.metric_settings == metrics_before
+    assert restored.thresholds_review_required
+    assert restored.current_model == model_before
+    assert restored.history() == history_before
+    assert algorithm == calls_before
+    restored.set_metric_settings(metrics_before)
+    assert not restored.thresholds_review_required
+    assert not SpindleMonitoringService(service.root, config).thresholds_review_required
 
 
 @pytest.mark.parametrize(("feature", "score_key", "other_feature", "other_score_key", "changed", "alarm"), [
@@ -741,7 +800,7 @@ def test_independent_metric_preview_changes_only_selected_score_and_alarm_withou
 
     preview = service.display_result(original, current_settings=True, metric_settings=draft)
     assert preview[score_key] != baseline[score_key]
-    assert preview[score_key] == pytest.approx(min(1, preview[f"{feature}_p_value"] / changed["alpha"]))
+    assert preview[score_key] == pytest.approx(.9 * (preview[f"{feature}_p_value"] / changed["alpha"]) ** 2)
     assert preview[other_score_key] == baseline[other_score_key]
     assert preview["compatibility"][other_feature] == baseline["compatibility"][other_feature]
     assert preview["compatibility"][feature]["alpha"] == changed["alpha"]
@@ -752,7 +811,7 @@ def test_independent_metric_preview_changes_only_selected_score_and_alarm_withou
     assert assess_score(preview[other_score_key], draft[other_feature]) == assess_score(
         baseline[other_score_key], baseline["metric_settings"][other_feature])
     for key in ("xy_rms_mm_s", "reconstruction_error_p95", "vibration_p_value", "network_p_value"):
-        assert preview[key] == baseline[key]
+        assert preview[key] == pytest.approx(baseline[key])
     assert service.settings == settings_before
     assert service.state_path.read_bytes() == bytes_before
     assert service.latest_result("run0") == original
@@ -769,8 +828,8 @@ def test_independent_metric_settings_are_used_by_evaluation_saved_as_snapshot_an
                "network": {"alpha": .1, "warning": .25, "fault": .2}}
     service.set_metric_settings(metrics)
     evaluated = service.evaluate("run0")
-    assert evaluated["analysis_score"] == pytest.approx(.625)
-    assert evaluated["score"] == pytest.approx(.15)
+    assert evaluated["analysis_score"] == pytest.approx(.9 * (.5 / .8) ** 2)
+    assert evaluated["score"] == pytest.approx(.075)
     assert evaluated["metric_settings"] == metrics
     assert evaluated["alpha"] == .1
     assert evaluated["thresholds"] == {"warning": .25, "fault": .2}
@@ -924,7 +983,7 @@ def test_latest_result_does_not_fall_back_after_failed_reanalysis(service, tmp_p
     assert restored.latest_result("run2", first["version"]) == previous
 
 
-@pytest.mark.parametrize("previous_kind", ["missing", "legacy"])
+@pytest.mark.parametrize("previous_kind", ["missing", "legacy", "normal_compatibility_v1"])
 def test_selection_refreshes_only_missing_or_legacy_result_once_without_changing_labels_or_reference(
         service, tmp_path, config, algorithm, previous_kind):
     service.import_batch([package(tmp_path, config, tuple(f"training{i}" for i in range(5)))], label="healthy")
@@ -935,11 +994,14 @@ def test_selection_refreshes_only_missing_or_legacy_result_once_without_changing
     entry = service.state["results"][-1]
     if previous_kind == "missing":
         service.state["results"].remove(entry)
-    else:
+    elif previous_kind == "legacy":
         previous.pop("score_kind")
         previous.update(score=4.0, analysis_score=1.4)
         entry.pop("score_kind")
         entry.update(score=4.0, analysis_score=1.4)
+        service_module.write_document(service.root / entry["result_file"], previous)
+    else:
+        previous["score_kind"] = entry["score_kind"] = previous_kind
         service_module.write_document(service.root / entry["result_file"], previous)
     service._save()
     labels_before = deepcopy(service.runs)
@@ -949,7 +1011,7 @@ def test_selection_refreshes_only_missing_or_legacy_result_once_without_changing
 
     refreshed = service.ensure_latest_result("daily")
     assert refreshed["reason"] == "selection_refresh"
-    assert refreshed["score_kind"] == "normal_compatibility_v1"
+    assert refreshed["score_kind"] == service_module.algorithm.SCORE_KIND
     assert refreshed["score"] == 0.3  # 人工“正常”标签不强制相容度变成 1。
     assert refreshed["manual_label_at_evaluation"] == "healthy"
     assert refreshed["role"] == "independent"
@@ -973,7 +1035,7 @@ def test_selection_refreshes_only_missing_or_legacy_result_once_without_changing
 def test_selection_returns_current_invalid_result_without_repeated_evaluation(service, tmp_path, config, algorithm):
     service.import_packages([package(tmp_path, config)])
     invalid = service.latest_result("run1")
-    assert invalid["score_kind"] == "normal_compatibility_v1"
+    assert invalid["score_kind"] == service_module.algorithm.SCORE_KIND
     assert invalid["score"] is None
     assert invalid["assessment"]["status"] == "unavailable"
     history_before = service.history()

@@ -64,6 +64,23 @@ def wait_until(condition, timeout=5):
     QApplication.processEvents()
 
 
+def set_feature_p(result, feature, p_value, direction=1):
+    """保持测试中的原始特征、参考、p 值和相容度一致。"""
+    from scipy.stats import t
+
+    reference = algorithm.fit_normal_reference(result["reference_features"][feature])
+    scale = reference["s"] * sqrt(1 + 1 / reference["M"])
+    value = exp(reference["mu"] + direction * t.isf(p_value / 2, reference["M"] - 1) * scale)
+    alpha = result["metric_settings"][feature]["alpha"]
+    compatibility = algorithm.normal_compatibility(value, reference, alpha)
+    score_key, raw_key = (("analysis_score", "xy_rms_mm_s") if feature == "vibration"
+                          else ("score", "reconstruction_error_p95"))
+    result[raw_key] = value
+    result[score_key] = compatibility["score"]
+    result[f"{feature}_p_value"] = compatibility["p_value"]
+    result["compatibility"][feature] = compatibility
+
+
 def data_package(tmp_path, service, run_ids, name="samples.zip"):
     """使用小型真实 H5/CSV 输入；不读取主应用的数据或模型。"""
     run = make_run()
@@ -171,10 +188,11 @@ def model_service(service, tmp_path, monkeypatch):
             number = float(Path(model_path).read_text(encoding="utf-8"))
             alpha = config["alpha"]
             rms = result["xy_rms_mm_s"]
-            vibration_reference = algorithm.fit_normal_reference([rms * .9, rms, rms * 1.1])
+            vibration_reference = algorithm.fit_normal_reference([rms / 1.1, rms, rms * 1.1])
             network_reference = algorithm.fit_normal_reference([.18, .2, .22])
-            error = exp(network_reference["mu"] + t.isf(.04 / number, 2) * network_reference["s"] * sqrt(1 + 1 / 3))
-            vibration = algorithm.normal_compatibility(rms, vibration_reference, alpha, two_sided=True)
+            network_p = alpha * sqrt((.8 / number) / algorithm.NORMAL_SCORE_FLOOR)
+            error = exp(network_reference["mu"] + t.isf(network_p / 2, 2) * network_reference["s"] * sqrt(1 + 1 / 3))
+            vibration = algorithm.normal_compatibility(rms, vibration_reference, alpha)
             network = algorithm.normal_compatibility(error, network_reference, alpha)
             result.update({
                 "score": network["score"], "analysis_score": vibration["score"],
@@ -435,7 +453,7 @@ def test_run_and_model_selection_show_matching_results_and_preserve_labels(model
     first, second = service.models
     originals = deepcopy(service.state["results"])
     page.run_select.setCurrentIndex(page.run_select.findData("daily"))
-    for model, expected in ((first, "0.8"), (second, "0.4")):
+    for model, expected in ((first, "0.800"), (second, "0.400")):
         page.model_select.setCurrentIndex(page.model_select.findData(model["version"]))
         assert page.result["run_id"] == "daily"
         assert page.result["model_version"] == model["version"]
@@ -454,7 +472,8 @@ def test_selecting_current_samples_refreshes_both_scores_without_inference(model
     from core.services.position_persistence import write_document
 
     result = model_service.latest_result("daily")
-    result.update(vibration_p_value=.03, network_p_value=.035)
+    set_feature_p(result, "vibration", .03)
+    set_feature_p(result, "network", .035)
     entry = next(item for item in model_service.state["results"] if item["id"] == result["id"])
     write_document(model_service.root / entry["result_file"], result)
     calls = []
@@ -462,14 +481,14 @@ def test_selecting_current_samples_refreshes_both_scores_without_inference(model
     page = page_factory(model_service)
     original = deepcopy(model_service.state["results"])
     page.run_select.setCurrentIndex(page.run_select.findData("daily"))
-    assert page.result_values["analysis"].text() == "0.6"
-    assert page.result_values["network"].text() == "0.7"
+    assert page.result_values["analysis"].text() == "0.324"
+    assert page.result_values["network"].text() == "0.441"
     assert "当前设置" in page.current_run_button.text()
-    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
     assert page.result["assessment"]["status"] == "unconfigured"
     page.run_select.setCurrentIndex(page.run_select.findData("initial1"))
-    assert page.result_values["analysis"].text() == "1"
-    assert page.result_values["network"].text() == "0.4"
+    assert page.result_values["analysis"].text() == "1.000"
+    assert page.result_values["network"].text() == "0.400"
     QApplication.processEvents()
     assert not calls and model_service.state["results"] == original
     result["compatibility"]["vibration"].update(status="invalid", message="正常参考无效")
@@ -480,9 +499,9 @@ def test_selecting_current_samples_refreshes_both_scores_without_inference(model
     assert not calls
 
 
-@pytest.mark.parametrize("stale", ["missing", "legacy"])
+@pytest.mark.parametrize("stale", ["missing", "legacy", "normal_compatibility_v1"])
 @pytest.mark.parametrize("first_show", [False, True])
-def test_current_selection_automatically_updates_missing_or_legacy_evaluation_once(
+def test_current_selection_automatically_updates_missing_or_previous_evaluation_once(
         model_service, page_factory, monkeypatch, stale, first_show):
     from core.services.position_persistence import write_document
 
@@ -494,9 +513,15 @@ def test_current_selection_automatically_updates_missing_or_legacy_evaluation_on
     if stale == "missing":
         model_service.state["results"].remove(entry)
     else:
-        result["score_kind"] = entry["score_kind"] = "legacy_ratio"
-        result["score"] = 3.0
+        result["score_kind"] = entry["score_kind"] = stale if stale == "normal_compatibility_v1" else "legacy_ratio"
+        if stale == "normal_compatibility_v1":
+            result["network_p_value"] /= 2
+            result["score"] = min(1, result["network_p_value"] / result["alpha"])
+            result["compatibility"]["network"].update(score=result["score"], p_value=result["network_p_value"])
+        else:
+            result["score"] = 3.0
         write_document(model_service.root / entry["result_file"], result)
+    original_bytes = (model_service.root / entry["result_file"]).read_bytes()
     count = len(model_service.state["results"])
     ensure = model_service.ensure_latest_result
     entered, release = Event(), Event()
@@ -519,7 +544,7 @@ def test_current_selection_automatically_updates_missing_or_legacy_evaluation_on
         page.run_select.activated.emit(page.run_select.currentIndex())
         wait_until(entered.is_set)
         assert page.task is not None
-        assert page.result_values["network"].text() == "—"
+        assert page.result_values["network"].text() == ("0.400" if stale == "normal_compatibility_v1" else "—")
     finally:
         release.set()
         if page is not None:
@@ -527,9 +552,15 @@ def test_current_selection_automatically_updates_missing_or_legacy_evaluation_on
     assert len(calls) == 1 and calls[0][0] == target and calls[0][1] != get_ident()
     assert page.result["model_version"] == version
     assert page.result["score_kind"] == algorithm.SCORE_KIND
-    assert page.result_values["analysis"].text() == "1"
-    assert page.result_values["network"].text() == "0.4"
+    assert page.result_values["analysis"].text() == "1.000"
+    assert page.result_values["network"].text() == "0.400"
     assert len(model_service.state["results"]) == count + 1
+    assert (model_service.root / entry["result_file"]).read_bytes() == original_bytes
+    assert model_service.latest_result(target)["score_kind"] == algorithm.SCORE_KIND
+    page._refresh(target)
+    page.run_select.activated.emit(page.run_select.currentIndex())
+    wait_until(lambda: not page.selection_timer.isActive() and page.task is None)
+    assert len(calls) == 1 and len(model_service.state["results"]) == count + 1
 
 
 def test_failed_automatic_update_does_not_retry_during_refresh(model_service, page_factory, monkeypatch):
@@ -600,7 +631,7 @@ def test_automatic_update_completion_preserves_the_current_selection(model_servi
         wait_until(lambda: page.task is None)
     assert page.result["run_id"] == "initial1"
     assert page.result["model_version"] == model_service.models[0 if history else -1]["version"]
-    assert page.result_values["network"].text() == ("0.8" if history else "0.4")
+    assert page.result_values["network"].text() == ("0.800" if history else "0.400")
     assert page.uses_current_thresholds is not history
 
 
@@ -657,7 +688,7 @@ def test_closing_review_keeps_result_completed_while_review_was_open(model_servi
     monkeypatch.setattr(QDialog, "exec", review)
     page._show_review()
     assert page.result["id"] == model_service.latest_result("daily")["id"]
-    assert page.result_values["network"].text() == "0.4"
+    assert page.result_values["network"].text() == "0.400"
     assert page.uses_current_thresholds
 
 
@@ -819,7 +850,7 @@ def test_alarm_colors_only_the_triggering_score_and_clears_when_normal_or_pendin
     service.set_thresholds(warning, fault)
     page = page_factory(service)
     assert page.result["assessment"]["status"] == ("warning" if fault == .2 else "fault")
-    assert page.result_values["analysis"].text() == "1"
+    assert page.result_values["analysis"].text() == "1.000"
     assert service.analysis_metrics(page.result)[0] == pytest.approx(1)
     assert "对数参考 μ" in page.result_values["analysis"].toolTip()
     assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
@@ -834,7 +865,7 @@ def test_alarm_colors_only_the_triggering_score_and_clears_when_normal_or_pendin
     page._refresh()
     assert page.status_lights["thresholds"].property("state") == "ready"
     assert page.result["assessment"]["status"] == "deviation"
-    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
     assert page.result_values["analysis"].styleSheet() == ""
 
 
@@ -842,13 +873,46 @@ def test_vibration_alarm_colors_vibration_without_coloring_normal_network(model_
     model_service.set_thresholds(.5, .2)
     page = page_factory(model_service)
     result = model_service.latest_result("daily")
-    result.update(vibration_p_value=.005, network_p_value=.3)
+    set_feature_p(result, "vibration", .05 * sqrt(.1 / algorithm.NORMAL_SCORE_FLOOR))
+    set_feature_p(result, "network", 1.0)
     page._show_result(result, current_thresholds=True)
     assert page.result["assessment"]["status"] == "fault"
-    assert page.result_values["analysis"].text() == "0.1"
-    assert page.result_values["network"].text() == "1"
+    assert page.result_values["analysis"].text() == "0.100"
+    assert page.result_values["network"].text() == "1.000"
     assert page.result_values["analysis"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
     assert page.result_values["network"].styleSheet() == ""
+
+
+def test_scores_inside_normal_range_vary_without_alarm_color(model_service, page_factory):
+    model_service.set_thresholds(.5, .2)
+    page = page_factory(model_service)
+    result = model_service.latest_result("daily")
+    set_feature_p(result, "vibration", .2)
+    set_feature_p(result, "network", .1)
+    page._show_result(result, current_thresholds=True)
+    assert page.result["assessment"]["status"] == "normal"
+    assert algorithm.NORMAL_SCORE_FLOOR < page.result["analysis_score"] < 1
+    assert algorithm.NORMAL_SCORE_FLOOR < page.result["score"] < page.result["analysis_score"]
+    assert all(page.result_values[key].styleSheet() == "" for key in ("analysis", "network"))
+    assert "正常边界为 0.9" in page.result_values["network"].toolTip()
+    assert "双侧检验" in page.result_values["network"].toolTip()
+
+
+@pytest.mark.parametrize(("feature", "key"), [("vibration", "analysis"), ("network", "network")])
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_departure_on_either_side_is_red_before_alarm_threshold(
+        model_service, page_factory, feature, key, direction):
+    model_service.set_thresholds(.5, .2)
+    page = page_factory(model_service)
+    result = model_service.latest_result("daily")
+    set_feature_p(result, "vibration", .2)
+    set_feature_p(result, "network", .2)
+    set_feature_p(result, feature, .04, direction)
+    page._show_result(result, current_thresholds=True)
+    assert page.result["assessment"]["status"] == "deviation"
+    assert page.result_values[key].text() == "0.576"
+    assert page.result_values[key].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
+    assert page.result_values["network" if key == "analysis" else "analysis"].styleSheet() == ""
 
 
 def test_invalid_compatibility_and_legacy_ratio_never_display_full_compatibility(model_service, page_factory):
@@ -885,7 +949,7 @@ def test_invalid_vibration_preserves_network_alarm_only_after_threshold_review(m
     result["analysis_score"] = result["vibration_p_value"] = None
     page._show_result(result, current_thresholds=True)
     assert page.result_values["analysis"].text() == "—"
-    assert page.result_values["network"].text() == "0.4"
+    assert page.result_values["network"].text() == "0.400"
     assert page.result_values["analysis"].styleSheet() == ""
     assert reason in page.result_values["analysis"].toolTip()
     if review_required:
@@ -914,7 +978,7 @@ def test_threshold_form_previews_and_saves_independent_settings_without_inferenc
     from core.services.position_persistence import write_document
 
     result = model_service.latest_result("daily")
-    result["vibration_p_value"] = .03
+    set_feature_p(result, "vibration", .03)
     entry = next(item for item in model_service.state["results"] if item["id"] == result["id"])
     write_document(model_service.root / entry["result_file"], result)
     page = page_factory(model_service)
@@ -926,17 +990,17 @@ def test_threshold_form_previews_and_saves_independent_settings_without_inferenc
 
     def save(dialog):
         preview = dialog.findChild(QLabel, "spindle_threshold_preview")
-        assert "振动 0.6，网络 0.4" in preview.text()
+        assert "振动 0.324，网络 0.4" in preview.text()
         dialog.findChild(QLineEdit, "spindle_vibration_alpha").setText("0.1")
-        assert "振动 0.3，网络 0.4" in preview.text()
+        assert "振动 0.081，网络 0.4" in preview.text()
         dialog.findChild(QLineEdit, "spindle_vibration_warning_threshold").setText("0.2")
         dialog.findChild(QLineEdit, "spindle_vibration_fault_threshold").setText("0.1")
-        assert "振动 0.3，网络 0.4" in preview.text()
+        assert "振动 0.081，网络 0.4" in preview.text()
         dialog.findChild(QLineEdit, "spindle_network_alpha").setText("0.1")
-        assert "振动 0.3，网络 0.2" in preview.text()
+        assert "振动 0.081，网络 0.1" in preview.text()
         dialog.findChild(QLineEdit, "spindle_network_warning_threshold").setText("0.5")
         dialog.findChild(QLineEdit, "spindle_network_fault_threshold").setText("0.25")
-        assert "振动 0.3，网络 0.2" in preview.text() and "故障" in preview.text()
+        assert "振动 0.081，网络 0.1" in preview.text() and "故障" in preview.text()
         assert model_service.settings == original_settings
         dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
         return dialog.result()
@@ -948,15 +1012,15 @@ def test_threshold_form_previews_and_saves_independent_settings_without_inferenc
         "vibration": {"alpha": .1, "warning": .2, "fault": .1},
         "network": {"alpha": .1, "warning": .5, "fault": .25},
     }
-    assert float(page.result_values["analysis"].text()) == pytest.approx(.3)
-    assert float(page.result_values["network"].text()) == pytest.approx(.2)
+    assert page.result_values["analysis"].text() == "0.081"
+    assert page.result_values["network"].text() == "0.100"
     assert page.result["assessment"]["status"] == "fault"
-    assert page.result_values["analysis"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert page.result_values["analysis"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
     assert page.result_values["network"].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
     assert not evaluations
     assert model_service.state["results"] == stored
     page.model_select.setCurrentIndex(page.model_select.findData(model_service.current_model["version"]))
-    assert float(page.result_values["network"].text()) == pytest.approx(.4)
+    assert page.result_values["network"].text() == "0.400"
     assert page.result["alpha"] == .05
 
 
@@ -969,7 +1033,7 @@ def test_cancelling_independent_setting_preview_does_not_save_or_evaluate(model_
         field = dialog.findChild(QLineEdit, "spindle_network_alpha")
         field.setText("0.2")
         preview = dialog.findChild(QLabel, "spindle_threshold_preview")
-        assert "网络 0.1" in preview.text()
+        assert "网络 0.025" in preview.text()
         field.setText("0")
         assert "有效" in preview.text()
         dialog.reject()
@@ -986,10 +1050,11 @@ def test_historical_departure_is_explicit_and_can_return_to_current_without_over
     from core.services.position_persistence import write_document
 
     historical = model_service.latest_result("daily", model_service.models[0]["version"])
-    historical.update(analysis_score=.9689, score=.04338,
+    historical.update(score_kind="normal_compatibility_v1", analysis_score=.9689, score=.04338,
                       vibration_p_value=.048445, network_p_value=.002169,
                       assessment={"status": "unconfigured", "message": "未设置阈值"})
     entry = next(item for item in model_service.state["results"] if item["id"] == historical["id"])
+    entry["score_kind"] = "normal_compatibility_v1"
     write_document(model_service.root / entry["result_file"], historical)
     stored = deepcopy(model_service.state["results"])
     page = page_factory(model_service)
@@ -997,9 +1062,11 @@ def test_historical_departure_is_explicit_and_can_return_to_current_without_over
     page.model_select.setCurrentIndex(page.model_select.findData(historical["model_version"]))
     assert page.result == historical
     assert "历史快照" in page.result_context.text()
-    assert float(page.result_values["analysis"].text()) == pytest.approx(.9689)
-    assert float(page.result_values["network"].text()) == pytest.approx(.04338)
-    assert all(page.result_values[key].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert page.result_values["analysis"].text() == "0.969"
+    assert page.result_values["network"].text() == "0.043"
+    assert "旧版 C = min(1, p / α)" in page.result_values["analysis"].toolTip()
+    assert "旧版上尾检验" in page.result_values["network"].toolTip()
+    assert all(page.result_values[key].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
                for key in ("analysis", "network"))
     assert page.latest_button.isVisible()
     page.latest_button.click()
@@ -1419,7 +1486,7 @@ def test_current_threshold_change_applies_to_other_runs_without_rewriting_histor
     assert page.result_values['network'].styleSheet()
     assert '当前阈值（网络）：预警 0.8 / 故障 0.5' in page.current_run_button.toolTip()
     page.model_select.setCurrentIndex(page.model_select.findData(service.current_model['version']))
-    assert page.result_values['network'].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["warning"]
+    assert page.result_values['network'].palette().color(QPalette.ColorRole.WindowText).name() == DISPLAY["colors"]["error"]
     assert '当时阈值（网络）：预警 未设置 / 故障 未设置' in page.current_run_button.toolTip()
     assert service.state['results'] == original
 
@@ -1443,16 +1510,28 @@ def test_threshold_confirmation_clears_review_for_all_current_views_but_not_hist
     assert service.state['results'] == historical
 
 
-def test_sample_dialog_retry_completes_missing_results_without_retraining(model_service, page_factory):
+@pytest.mark.parametrize("previous_kind", ["missing", "normal_compatibility_v1"])
+def test_sample_dialog_retry_completes_missing_or_previous_results_without_retraining(
+        model_service, page_factory, previous_kind):
     from PyQt6.QtWidgets import QPushButton
+    from core.services.position_persistence import write_document
+
     service = model_service
     version = service.current_model['version']
-    service.state['results'][:] = [entry for entry in service.state['results']
-                                 if not (entry['model_version'] == version and entry['run_id'] == 'daily')]
-    service.current_model['reanalysis_status'] = 'failed'
+    page = page_factory(service)
+    page.model_select.setCurrentIndex(page.model_select.findData(version))
+    result = service.latest_result('daily')
+    entry = next(entry for entry in service.state['results'] if entry['id'] == result['id'])
+    if previous_kind == 'missing':
+        service.state['results'].remove(entry)
+        service.current_model['reanalysis_status'] = 'failed'
+    else:
+        result['score_kind'] = entry['score_kind'] = previous_kind
+        write_document(service.root / entry['result_file'], result)
+        service.current_model['reanalysis_status'] = 'complete'
+    original_bytes = (service.root / entry['result_file']).read_bytes()
     service._save()
     count = len(service.state['results'])
-    page = page_factory(service)
     clicked = []
     def retry():
         dialog = QApplication.activeModalWidget()
@@ -1468,6 +1547,8 @@ def test_sample_dialog_retry_completes_missing_results_without_retraining(model_
     assert service.current_model['reanalysis_status'] == 'complete'
     assert len(service.state['results']) == count + 1
     assert service.latest_result('daily')['model_version'] == version
+    assert service.latest_result('daily')['score_kind'] == algorithm.SCORE_KIND
+    assert (service.root / entry['result_file']).read_bytes() == original_bytes
     assert not page.run_select.isVisible()
 
 

@@ -16,7 +16,9 @@ SAMPLE_RATE_HZ = 2048
 CHANNELS = ["ACC1", "ACC2", "ACC3"]
 TEMPERATURE_CHANNELS = ["NTC1", "RTD1"]
 MODEL_ARCHITECTURE = "tcn_1s"
-SCORE_KIND = "normal_compatibility_v1"
+SCORE_KIND = "normal_compatibility_v2"
+COMPATIBILITY_SCORE_KINDS = ("normal_compatibility_v1", SCORE_KIND)
+NORMAL_SCORE_FLOOR = 0.9
 PREPROCESSING = {
     "id": "velocity_2048_10_900_v1", "sample_rate_hz": SAMPLE_RATE_HZ,
     "frequency_band_hz": [10, 900], "unit": "mm/s", "channels": CHANNELS,
@@ -167,8 +169,11 @@ def fit_normal_reference(values, run_ids=None) -> dict:
     return reference
 
 
-def normal_compatibility(value, reference, alpha=0.05, *, two_sided=False) -> dict:
-    """有限正常参考下的 t 预测检验；相容度不是设备正常的后验概率。"""
+def normal_compatibility(value, reference, alpha=0.05) -> dict:
+    """双侧 t 预测检验；正常区间内按均值距离评分，越界后快速下降。
+
+    相容度不是设备正常的后验概率。
+    """
     from scipy.stats import t
 
     result = {**reference, "score": None, "p_value": None, "u": None,
@@ -192,8 +197,12 @@ def normal_compatibility(value, reference, alpha=0.05, *, two_sided=False) -> di
     if not np.isfinite(u):
         result["message"] = "当前偏离程度超出数值范围，不能计算有效相容度"
         return result
-    p_value = float(2 * t.sf(abs(u), df=count - 1) if two_sided else t.sf(u, df=count - 1))
-    result.update(status="valid", u=float(u), p_value=p_value, score=min(1.0, p_value / alpha))
+    p_value = float(2 * t.sf(abs(u), df=count - 1))
+    boundary = float(t.isf(alpha / 2, df=count - 1))
+    distance = abs(u) / boundary
+    score = (float(np.exp(np.log(NORMAL_SCORE_FLOOR) * distance ** 2)) if distance <= 1
+             else NORMAL_SCORE_FLOOR * (p_value / alpha) ** 2)
+    result.update(status="valid", u=float(u), p_value=p_value, score=score)
     return result
 
 
@@ -240,7 +249,8 @@ def _build_normal_reference(validation_runs, run_errors, network_id, preprocessi
 def _matched_reference(normal_reference, run, network_id, preprocessing):
     if not normal_reference:
         return None, "未建立独立正常采集参考，请重新校准"
-    if normal_reference.get("score_kind") != SCORE_KIND or normal_reference.get("network_id") != network_id:
+    if (normal_reference.get("score_kind") not in COMPATIBILITY_SCORE_KINDS
+            or normal_reference.get("network_id") != network_id):
         return None, "正常参考与当前网络版本不匹配，请重新校准"
     if normal_reference.get("preprocessing") != preprocessing:
         return None, "正常参考与当前预处理版本不匹配，请重新校准"
@@ -349,7 +359,10 @@ def train_model(train_runs, validation_runs, output_path, config, progress=None)
         "validation_window_count": len(validation), "device": str(device),
         "network_id": network_id, "preprocessing": preprocessing, "score_kind": SCORE_KIND,
         "normal_reference": normal_reference, "history": history,
-        "score_definition": "min(1, t predictive tail p / alpha); acquisition radial RMS two-sided, reconstruction P95 upper-sided",
+        "score_definition": (
+            "both metrics two-sided; d=abs(u)/t.isf(alpha/2,M-1); "
+            "exp(log(0.9)*d^2) for d<=1, else 0.9*(p/alpha)^2"
+        ),
     }
     checkpoint = {
         **summary, "model_state": final_state, "center": center.cpu(), "scale": scale.cpu(),
@@ -489,7 +502,7 @@ def evaluate_run(run, model_path=None, config=None, progress=None) -> dict:
     invalid_reference = {"status": "invalid", "message": "未建立独立正常采集参考，请训练或重新校准",
                          "mu": None, "s": None, "M": 0}
     result["compatibility"] = {
-        "vibration": normal_compatibility(result["xy_rms_mm_s"], invalid_reference, vibration_alpha, two_sided=True),
+        "vibration": normal_compatibility(result["xy_rms_mm_s"], invalid_reference, vibration_alpha),
         "network": {**invalid_reference, "score": None, "p_value": None, "u": None, "alpha": network_alpha},
     }
     if model_path is not None and run["target_speed_rpm"] == 7000:
@@ -515,7 +528,7 @@ def evaluate_run(run, model_path=None, config=None, progress=None) -> dict:
         invalid_reference = {"status": "invalid", "message": message, "mu": None, "s": None, "M": 0}
         vibration_reference = group["vibration"] if group else invalid_reference
         network_reference = group["network"] if group else invalid_reference
-        vibration = normal_compatibility(result["xy_rms_mm_s"], vibration_reference, vibration_alpha, two_sided=True)
+        vibration = normal_compatibility(result["xy_rms_mm_s"], vibration_reference, vibration_alpha)
         network = normal_compatibility(feature, network_reference, network_alpha)
         result.update({
             "score": network["score"], "analysis_score": vibration["score"],
